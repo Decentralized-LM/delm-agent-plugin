@@ -92,8 +92,10 @@ test('preparation binds one destination, produces publishable metadata, and pres
     writeFileSync(globalconfig, '');
     const published = JSON.parse(execFileSync('npm', ['publish', path.join(output, preparation.tarball.path), '--dry-run', '--ignore-scripts', '--offline', '--json',
       '--userconfig', userconfig, '--globalconfig', globalconfig, '--cache', path.join(temporary, 'cache')], {encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}));
-    assert.equal(published.name, 'delm-agent');
-    assert.equal(published.version, metadata.version);
+    // npm 10 returns package metadata directly; npm 11 keys it by package name.
+    const publishedPackage = published['delm-agent'] ?? published;
+    assert.equal(publishedPackage.name, 'delm-agent');
+    assert.equal(publishedPackage.version, metadata.version);
     assert.throws(() => execFileSync('python3', args, {stdio: 'pipe'}), error => error.status === 1 && String(error.stderr).includes('already exists'));
     for (const repository of ['../invalid', 'https://github.com/owner/repository', 'other/destination']) {
       const invalidOutput = path.join(temporary, 'invalid');
