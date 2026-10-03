@@ -191,7 +191,10 @@ fn environment_home(
     if !path
         .file_name()
         .and_then(OsStr::to_str)
-        .is_some_and(python_name)
+        // CPython 3.14 also creates this exact UTF-8 alias in POSIX venvs.
+        // Only the environment entry gains this spelling: alias traversal and
+        // the final external executable still require ordinary Python names.
+        .is_some_and(|name| python_name(name) || name == "𝜋thon")
     {
         return Ok(None);
     }

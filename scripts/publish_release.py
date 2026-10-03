@@ -1,12 +1,12 @@
 """Publish an already signed release from GitHub's protected release job only."""
 
-import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 
 from package_release import verify
+from qualify_release import verify_signed
 from release_identity import main as verify_identity
 
 
@@ -17,14 +17,19 @@ def git(*args, **kwargs):
 def main():
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Publication is restricted to the release workflow.")
-    verify_identity()
+    if os.environ.get("RELEASE_PUBLISH", "true").lower() != "true":
+        raise SystemExit("Unsigned review cannot enter the publication step.")
+    revision = verify_identity()
+    repository = os.environ.get("RELEASE_REPOSITORY")
+    if not repository or not os.environ.get("RELEASE_SOURCE_SHA"):
+        raise SystemExit("Publication requires an explicit repository and pinned source revision.")
+    if len(sys.argv) != 3:
+        raise SystemExit("Usage: publish_release.py PACKAGE SIGNED_QUALIFICATION_REPORTS")
     package = Path(sys.argv[1]).resolve()
-    verify(package)
-    metadata = json.loads((package / "release.json").read_text())
+    metadata = verify(package, revision=revision, repository=repository, require_qualified=True)
     if not metadata["signedAndNotarized"]:
         raise SystemExit("Unsigned review packages cannot be published.")
-    if metadata["sourceRevision"] != git("rev-parse", "HEAD"):
-        raise SystemExit("Release provenance does not match the checked-out source.")
+    verify_signed(package, Path(sys.argv[2]).resolve())
     tag = "delm-plugin-v" + metadata["version"]
     if git("ls-remote", "--tags", "origin", "refs/tags/" + tag):
         raise SystemExit(f"Immutable package tag already exists: {tag}")

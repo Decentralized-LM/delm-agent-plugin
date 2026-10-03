@@ -35,8 +35,11 @@ def fixture_source(path):
     for directory in (".codex-plugin", ".agents/plugins", "skills/run/agents", "hooks", "scripts"):
         (path / directory).mkdir(parents=True, exist_ok=True)
     for name in (".codex-plugin/plugin.json", ".agents/plugins/marketplace.json",
-                 "skills/run/agents/openai.yaml", "hooks/hooks.json", "Cargo.toml", "LICENSE", "NOTICE"):
+                 "skills/run/agents/openai.yaml", "hooks/hooks.json", "Cargo.toml", "Cargo.lock",
+                 "rust-toolchain.toml", "LICENSE", "NOTICE"):
         shutil.copy2(SOURCE / name, path / name)
+    for name in ("src", "plugin"):
+        shutil.copytree(SOURCE / name, path / name)
     (path / "skills/run/SKILL.md").write_text("---\nname: run\ndescription: Run an explicitly requested DeLM task.\n---\nUse the bundled runtime.\n")
     for name in ("install_support.py", "install.sh", "uninstall.sh", "migrate.sh", "build.py", "build.sh"):
         shutil.copy2(SOURCE / "scripts" / name, path / "scripts" / name)
@@ -52,6 +55,93 @@ def fixture_package(source):
         shutil.copy2(source / name, package / name)
     executable(package / "bin/delm", "#!/bin/sh\necho 'delm fixture'\n")
     return package
+
+
+class InstallationPreflightTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="delm preflight ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.home = self.root / "codex home"
+        self.home.mkdir()
+        (self.home / "config.toml").write_text("# preserve config\n")
+        self.source = self.root / "source"
+        self.source.mkdir()
+        self.tools = {name: "/tools/" + name for name in ("codex", "git", "cargo", "xcrun")}
+        for patch in (
+            mock.patch.object(install_support.sys, "platform", "darwin"),
+            mock.patch.object(install_support, "SOURCE", self.source),
+            mock.patch.object(install_support.shutil, "which", side_effect=self.tools.get),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        patch = mock.patch.object(install_support.subprocess, "run")
+        self.run = patch.start()
+        self.addCleanup(patch.stop)
+        self.run.return_value = subprocess.CompletedProcess([], 0, "/tools/clang\n", "")
+
+    def invoke(self, operation="install", *flags):
+        with mock.patch.object(sys, "argv", ["install_support.py", operation, "--codex", "codex", *flags]), \
+             mock.patch.dict(os.environ, CODEX_HOME=str(self.home)):
+            install_support.main()
+
+    def assert_unchanged(self):
+        self.assertEqual(list(self.source.iterdir()), [])
+        self.assertEqual([path.name for path in self.home.iterdir()], ["config.toml"])
+        self.assertEqual((self.home / "config.toml").read_text(), "# preserve config\n")
+
+    def test_unsupported_platform_and_missing_codex_fail_before_mutation(self):
+        with mock.patch.object(install_support.sys, "platform", "win32"):
+            with self.assertRaisesRegex(RuntimeError, "macOS only"):
+                self.invoke()
+        del self.tools["codex"]
+        with self.assertRaisesRegex(RuntimeError, "Install stock Codex CLI"):
+            self.invoke()
+        self.run.assert_not_called()
+        self.assert_unchanged()
+
+    def test_missing_home_explains_first_run_setup_without_creating_it(self):
+        missing = self.root / "missing codex home"
+        with self.assertRaisesRegex(RuntimeError, "Run Codex once"):
+            install_support.preflight("install", "codex", missing)
+        self.assertFalse(missing.exists())
+        self.run.assert_not_called()
+        self.assert_unchanged()
+
+    def test_missing_native_commands_and_unresponsive_codex_fail_before_mutation(self):
+        for outcome in (subprocess.CompletedProcess([], 2, "", "unknown subcommand"),
+                        subprocess.TimeoutExpired("codex", 15)):
+            with self.subTest(outcome=outcome):
+                if isinstance(outcome, Exception):
+                    self.run.side_effect = outcome
+                else:
+                    self.run.return_value = outcome
+                with self.assertRaisesRegex(RuntimeError, "Codex.*plugin"):
+                    self.invoke()
+                self.assert_unchanged()
+        self.assertTrue(all(call.args[0][-2:] == ["--json", "--help"] for call in self.run.call_args_list))
+
+    def test_missing_source_tools_and_invalid_xcode_fail_before_mutation(self):
+        for tool, message in (("git", "Git is required"), ("cargo", "Rust/Cargo"),
+                              ("xcrun", "Xcode Command Line Tools")):
+            with self.subTest(tool=tool), mock.patch.dict(self.tools):
+                del self.tools[tool]
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self.invoke()
+                self.assert_unchanged()
+        self.run.side_effect = lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 1 if command[0] == self.tools["xcrun"] else 0, "", "")
+        with self.assertRaisesRegex(RuntimeError, "unavailable or not selected"):
+            self.invoke()
+        self.assert_unchanged()
+
+    def test_staged_install_and_removal_do_not_require_build_tools(self):
+        del self.tools["cargo"], self.tools["xcrun"]
+        for operation, build in (("install", False), ("uninstall", True), ("migrate", True)):
+            with self.subTest(operation=operation):
+                self.assertEqual(install_support.preflight(operation, "codex", self.home, build), "/tools/codex")
+        self.assertTrue(all(call.args[0][-1] == "--help" for call in self.run.call_args_list))
+        self.assert_unchanged()
 
 
 @unittest.skipUnless(CODEX, "Existing stock Codex is required for isolated native plugin tests")
@@ -179,6 +269,8 @@ class NativeInstallationTests(unittest.TestCase):
             self.assertEqual(len(skills), 1)
             self.assertTrue(skills[0]["enabled"])
             self.assertEqual(skills[0]["pluginId"], install_support.PLUGIN_ID)
+            self.assertEqual(skills[0]["interface"]["displayName"], "DeLM")
+            self.assertEqual(skills[0]["interface"]["shortDescription"], "Build with two collaborating agents.")
             self.assertEqual(Path(skills[0]["path"]), Path(self.installation.receipt()["installed_path"]) / "skills/run/SKILL.md")
             send({"id": 3, "method": "hooks/list", "params": {"cwds": [str(self.cwd)]}})
             entries = response(3)["data"]
@@ -359,18 +451,38 @@ class BuildTests(unittest.TestCase):
 
             def run(command, **kwargs):
                 if command[0] == "lipo":
+                    if "-thin" in command:
+                        shutil.copy2(command[1], command[-1])
                     return subprocess.CompletedProcess(command, 0)
                 return real_run(command, **kwargs)
 
             with mock.patch.object(package_release.subprocess, "run", side_effect=run):
-                package_release.assemble(source, runtime, output, "example/delm", revision, signed=True)
+                qualifications = []
+                provenance = package_release.source_state(source)
+                for architecture, target in package_release.ARCHITECTURES.items():
+                    path = root / (architecture + ".json")
+                    package_release.write_json(path, {
+                        "schema": 1, "kind": "native-release-build", "architecture": architecture,
+                        "target": target, "sourceRevision": revision, **provenance,
+                        "runtimeSha256": install_support.fingerprint(runtime)["sha256"],
+                        "passed": True, "modelCalls": 0, "lifecycleCases": package_release.LIFECYCLE_CASES,
+                    })
+                    qualifications.append(path)
+                unsigned = root / "unsigned"
+                package_release.assemble(source, runtime, unsigned, "example/delm", revision,
+                                         qualifications=qualifications)
+                package_release.assemble(source, runtime, output, "example/delm", revision,
+                                         signed=True, unsigned_origin=unsigned)
             previous_cwd = Path.cwd()
             try:
                 os.chdir(source)
-                with mock.patch.dict(os.environ, GITHUB_ACTIONS="true", RUNNER_TEMP=str(root)), \
-                     mock.patch.object(publish_release, "verify_identity"), \
-                     mock.patch.object(sys, "argv", ["publish_release.py", str(output)]):
+                with mock.patch.dict(os.environ, GITHUB_ACTIONS="true", RUNNER_TEMP=str(root),
+                                     RELEASE_SOURCE_SHA=revision, RELEASE_REPOSITORY="example/delm"), \
+                     mock.patch.object(publish_release, "verify_identity", return_value=revision), \
+                     mock.patch.object(publish_release, "verify_signed") as signed_gate, \
+                     mock.patch.object(sys, "argv", ["publish_release.py", str(output), str(root / "reports")]):
                     publish_release.main()
+                    signed_gate.assert_called_once_with(output, root / "reports")
                     with self.assertRaisesRegex(SystemExit, "already exists"):
                         publish_release.main()
             finally:
@@ -446,8 +558,10 @@ class NativeReleaseTests(unittest.TestCase):
             self.assertEqual(repeated["installedPath"], str(first_path))
             release("0.2.2")
             native("marketplace", "upgrade", "delm")
-            upgraded = native("add", "delm@delm")
-            upgraded_path = Path(upgraded["installedPath"])
+            installed = native("list", "--marketplace", "delm")["installed"]
+            self.assertEqual([(entry["pluginId"], entry["version"]) for entry in installed],
+                             [("delm@delm", "0.2.2")])
+            upgraded_path = home / "plugins/cache/delm/delm/0.2.2"
             self.assertNotEqual(first_path, upgraded_path)
             self.assertEqual(subprocess.check_output([str(upgraded_path / "bin/delm")], text=True).strip(),
                              "delm 0.2.2")

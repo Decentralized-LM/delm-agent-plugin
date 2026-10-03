@@ -4,16 +4,43 @@ Public releases contain a universal macOS binary, the native Codex plugin manife
 
 The source repository currently has no published marketplace. The workflow derives installation URLs from its actual GitHub repository, so no owner or public URL is hard-coded here.
 
-## Prepare a release
+## Private iteration
 
-1. Keep `Cargo.toml`, `Cargo.lock`, and `.codex-plugin/plugin.json` on the same version. Complete the regular checks and native sandbox checks on the supported architectures. Do not add a root `plugin.json` to the package: current Codex treats that as the portable format and skips lifecycle hooks.
-2. Create a source tag matching that version, such as `v0.3.0`. Protect source tags and `delm-plugin-*` tags against replacement, and protect the `marketplace` branch.
-3. Run **Prepare macOS release**, selecting the source tag and leaving `publish` disabled. The workflow resolves the tag once and passes its exact commit to every job. Each architecture builds and tests with locked dependencies, then assembly produces a universal binary.
-4. Inspect the unsigned review artifact. Check the generated README, package contents, architecture slices, version, source revision, and checksums. This artifact is not a public installer.
-5. Configure the protected GitHub `release` environment with a required reviewer. Supply `APPLE_CERTIFICATE_BASE64` (Developer ID Application certificate as a base64-encoded P12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD` as environment secrets.
-6. Dispatch the same workflow with `publish` enabled. The protected job signs with hardened runtime and a timestamp, submits for notarization, verifies Apple's notarization record, and runs a quarantined copy without removing its quarantine attribute. Any failure prevents publication.
+Run **Prepare macOS release** with `source_ref` set to a branch or full commit SHA and `publish` disabled. No version tag, Apple credential, marketplace write, or npm publication is needed. The workflow resolves the reference once, checks out that exact clean commit in every job, and retains an unsigned review artifact. A private repository keeps its workflow artifacts private to those with access.
 
-The build deployment target is macOS 13.0. CI executes on macOS 15; building with an older deployment target does not establish runtime support on that older system. Qualify the signed package on the oldest advertised system before announcing support. Local development checks do not establish that Intel builds, signing, notarization, or the GitHub workflow have succeeded.
+Keep `Cargo.toml`, `Cargo.lock`, and `.codex-plugin/plugin.json` on the same version while iterating. The version can remain unchanged until a public release is ready. Do not add a root `plugin.json`: current Codex interprets it as the portable format and skips native lifecycle hooks.
+
+For uncommitted local work, build and exercise the runtime in disposable directories:
+
+```sh
+cargo build --locked --release --bin delm
+python3 scripts/qualify_release.py smoke --runtime target/release/delm --architecture arm64 --out .validation/release-smoke
+```
+
+Use `x86_64` on an actual Intel Mac. Every smoke output directory must be new; previous evidence is preserved. A local universal binary can also be passed to `package_release.py --runtime ... --output ... --repository OWNER/REPOSITORY --revision <base-commit>`. Uncommitted artifacts record `sourceDirty: true`, a runtime source hash, and explicitly identify `sourceRevision` as the base commit. They cannot pass publication qualification. Cross-compilation and Rosetta checks are useful development evidence; Rosetta is explicitly rejected as native Intel qualification.
+
+## Qualification and public release
+
+The workflow requires these gates:
+
+| Gate | Required evidence |
+| --- | --- |
+| Native ARM and Intel builds | Locked dependencies, regular verification, release-profile tests, native sandbox test, and all five native lifecycle cases: interrupt, preflight, stop, owner death, plugin removal. |
+| Exact release runtimes | Deterministic completion and cancellation with two workers, retained output, unchanged original project, and no surviving fixture hosts. No model calls. |
+| Universal assembly | Each extracted architecture slice must match the hash of its tested native binary. Both qualification records identify the same clean source revision and runtime sources. |
+| Signing | Developer ID, hardened runtime, timestamp, an accepted Apple notarization submission, and verification of the online notarization record. Plugin resources must match the qualified unsigned package. |
+| Signed ARM and Intel execution | The final universal binary runs the same completion/cancellation smoke under quarantine on both native architectures. Reports identify the final signed bytes. |
+| Publication | The publisher itself rechecks the expected repository and source revision, clean tagged source, package integrity, both native qualifications, signed smoke reports, and notarization before writing any remote refs. |
+
+When ready to publish:
+
+1. Create the matching source tag, such as `v0.3.0`. Protect source tags and `delm-plugin-*` tags against replacement, and protect the `marketplace` branch.
+2. Configure the GitHub `release` environment with a required reviewer and these environment secrets: `APPLE_CERTIFICATE_BASE64` (Developer ID Application certificate as a base64-encoded P12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD`.
+3. Dispatch **Prepare macOS release** with that tag as `source_ref` and `publish` enabled. The signing job uses the protected environment. After approval, successful signing and both signed native qualification jobs gate the publisher automatically; the publisher receives repository write permission but no Apple credentials.
+
+Failed native checks retain their evidence, and the notarization response is retained when available. Standalone Mach-O binaries cannot carry a stapled notarization ticket; the workflow checks Apple's online record. Never disable Gatekeeper or remove quarantine to bypass a failure.
+
+The build deployment target is macOS 13.0. CI executes on native ARM `macos-15` and native Intel `macos-15-intel`; building with an older deployment target does not establish runtime support on that older system. Qualify the signed package on the oldest advertised system before announcing support. Local development checks do not establish that native Intel CI, signing, notarization, or the GitHub workflow have succeeded. Apple credentials and a protected release environment must be configured separately.
 
 ## Publish and install
 
@@ -31,14 +58,16 @@ Updates use `codex plugin marketplace upgrade delm`; review changed hooks in `/h
 
 Repository-hosted installation is distinct from listing in OpenAI's public plugin directory. Publication does not imply directory approval.
 
+The private npm wrapper in `packages/installer` delegates marketplace registration and installation to the stock Codex CLI. It does not fetch release archives or duplicate verification and update logic. The proposed npm name is `delm-agent`, which remains unpublished and unreserved. Its version is independent of the plugin version, so a new plugin release does not require republishing an unchanged installer. Until a signed marketplace and npm package exist, the planned `npx` command is not a public installation path.
+
 ## Package verification
 
-The release artifact includes `release.json` and `SHA256SUMS`. The former records source revision, version, architectures, signing status, and each runtime file's checksum and permissions. Verify an extracted artifact with:
+The release artifact includes schema-1 `release.json` and `SHA256SUMS`. The manifest records source revision, repository, version, architectures, signing status, working-tree status, runtime source hash, native qualification records, and each plugin file's checksum and permissions. A signed package also identifies its qualified unsigned runtime. Verify an extracted artifact with:
 
 ```sh
 python3 scripts/package_release.py --verify /path/to/extracted-release
 ```
 
-Checksums detect changes against the artifact's manifest; signing and a trusted repository establish the source. Do not suggest disabling Gatekeeper or removing quarantine to bypass a release failure.
+For CI provenance checks, supply `--revision <expected-commit> --repository OWNER/REPOSITORY --require-qualified`. Signing additionally rechecks the original unsigned slices. Publication requires the two final signed smoke reports through `publish_release.py PACKAGE SIGNED_QUALIFICATION_REPORTS`; the basic checksum check alone does not authorize publishing. Checksums detect changes against the artifact's manifest; signing and a trusted workflow/repository establish the source.
 
-References: [native plugin packaging](https://developers.openai.com/plugins/build/plugins), [Apple distribution signing](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac/), and [notarization workflows](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
+References: [native plugin packaging](https://developers.openai.com/plugins/build/plugins), [GitHub-hosted runner architectures](https://docs.github.com/en/actions/reference/runners/github-hosted-runners), [Apple distribution signing](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac/), and [notarization workflows](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).

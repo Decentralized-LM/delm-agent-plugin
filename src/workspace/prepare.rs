@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "prepare_tests.rs"]
+mod tests;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Ownership {
     version: u8,
@@ -119,21 +123,25 @@ pub fn prepare(project: &Path, run_dir: &Path, limit: u64) -> Result<PreparedWor
         fs::create_dir(&baseline)?;
         fs::set_permissions(&baseline, fs::Permissions::from_mode(0o700))?;
         match capture(&root, &original, &baseline, &scan, limit, until) {
-            Ok(baseline_manifest) => {
+            Ok((baseline_manifest, baseline_inventory)) => {
                 let saved = workspace.join("baseline");
                 fs::rename(&baseline, &saved)?;
+                // Capture already inventoried this private baseline in full.
+                // No workers exist yet and we never write it during cloning.
+                // Each clone still checks source identities and independently
+                // verifies the worker's contents, metadata and staged state.
+                let baseline_root = open_dir(&saved)?;
+                let selected = baseline_inventory
+                    .entries
+                    .keys()
+                    .filter(|p| !p.is_empty())
+                    .cloned()
+                    .collect();
+                let baseline_index = git::run(&saved, &saved, &["ls-files", "--stage", "-z"])?;
                 let workers = [workspace.join("worker-1"), workspace.join("worker-2")];
                 for worker in &workers {
                     fs::create_dir(worker)?;
                     fs::set_permissions(worker, fs::Permissions::from_mode(0o700))?;
-                    let baseline_root = open_dir(&saved)?;
-                    let baseline_inventory = inventory(&baseline_root, u64::MAX, until, true)?;
-                    let selected = baseline_inventory
-                        .entries
-                        .keys()
-                        .filter(|p| !p.is_empty())
-                        .cloned()
-                        .collect();
                     clone_selected(
                         &baseline_root,
                         worker,
@@ -146,8 +154,7 @@ pub fn prepare(project: &Path, run_dir: &Path, limit: u64) -> Result<PreparedWor
                         "worker did not match saved baseline"
                     );
                     ensure!(
-                        git::run(worker, worker, &["ls-files", "--stage", "-z"])?
-                            == git::run(&saved, &saved, &["ls-files", "--stage", "-z"])?,
+                        git::run(worker, worker, &["ls-files", "--stage", "-z"])? == baseline_index,
                         "worker staged state differs from baseline"
                     );
                 }
@@ -205,7 +212,7 @@ pub(super) fn capture(
     scan: &Inventory,
     limit: u64,
     until: Instant,
-) -> Result<Manifest> {
+) -> Result<(Manifest, Inventory)> {
     let (format, config) = git::configuration(root, scan)?;
     git::initialize(baseline, &format, &config)?;
     let admin: BTreeSet<_> = scan
@@ -230,27 +237,25 @@ pub(super) fn capture(
         })
         .map(|(p, _)| p.clone())
         .collect();
+    let mut to_classify = BTreeSet::new();
     for directory in all_dirs {
         within(until)?;
+        let prefix = format!("{directory}/");
         if selected
-            .iter()
-            .any(|p| p.starts_with(&format!("{directory}/")))
+            .range(prefix.clone()..)
+            .next()
+            .is_some_and(|p| p.starts_with(&prefix))
         {
             selected.insert(directory);
-            continue;
+        } else {
+            to_classify.insert(directory);
         }
-        let mut command = git::command();
-        command
-            .arg(format!("--git-dir={}", baseline.join(".git").display()))
-            .arg(format!("--work-tree={}", original.display()))
-            .args(["check-ignore", "--quiet", "--", &directory]);
-        let result = git::execute(command, None)?.status;
-        match result.code() {
-            Some(1) => {
-                selected.insert(directory);
-            }
-            Some(0) => {}
-            _ => bail!("cannot classify ignored directory"),
+    }
+    let ignored = git::ignored_directories(baseline, original, &to_classify)?;
+    for directory in to_classify {
+        within(until)?;
+        if !ignored.contains(&directory) {
+            selected.insert(directory);
         }
     }
     for (path, (_, entry)) in &scan.entries {
@@ -314,11 +319,14 @@ pub(super) fn capture(
         admitted_bytes < limit,
         "saved admitted content reaches the original size limit"
     );
-    Ok(Manifest {
-        files: expected,
-        exclusions,
-        runtime_links: BTreeMap::new(),
-    })
+    Ok((
+        Manifest {
+            files: expected,
+            exclusions,
+            runtime_links: BTreeMap::new(),
+        },
+        frozen,
+    ))
 }
 
 fn recognized_credential(root: &File, path: &str, entry: &FileEntry) -> Result<bool> {

@@ -2,7 +2,6 @@
 
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -14,10 +13,69 @@ import sys
 import tempfile
 import uuid
 
+try:
+    import fcntl
+except ImportError:
+    # Let the platform preflight explain unsupported systems before using locks.
+    fcntl = None
+
 
 MARKETPLACE = "delm-local"
 PLUGIN_ID = "delm@" + MARKETPLACE
 SOURCE = Path(__file__).resolve().parent.parent
+
+
+def preflight(operation, codex, codex_home, build=True):
+    """Check prerequisites without building, registering a plugin, or reading auth."""
+    if sys.platform != "darwin":
+        raise RuntimeError("DeLM currently supports macOS only; Windows and Linux installation is not available yet.")
+    codex = shutil.which(codex) if codex else None
+    if not codex:
+        raise RuntimeError("Install stock Codex CLI and make it available on PATH, then retry. "
+                           "A desktop or IDE installation alone is not sufficient; DeLM does not bundle Codex.")
+    codex = str(Path(codex).resolve())
+    if not codex_home.is_dir():
+        raise RuntimeError(f"Codex home does not exist: {codex_home}. "
+                           "Run Codex once to complete setup, or set CODEX_HOME to your existing Codex home.")
+
+    commands = [("list", "--marketplace", MARKETPLACE), ("marketplace", "list")]
+    if operation == "install":
+        commands += [("add", PLUGIN_ID), ("marketplace", "add", str(SOURCE))]
+    else:
+        commands += [("remove", PLUGIN_ID), ("marketplace", "remove", MARKETPLACE)]
+    for arguments in commands:
+        command = [codex, "plugin", *arguments, "--json", "--help"]
+        try:
+            result = subprocess.run(command, text=True, capture_output=True, timeout=15,
+                                    env=dict(os.environ, CODEX_HOME=str(codex_home)))
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError("Could not check Codex's native plugin commands. "
+                               "Check that `codex --help` works, then retry.") from error
+        if result.returncode:
+            raise RuntimeError("This Codex CLI does not support the native plugin commands DeLM requires. "
+                               "Update stock Codex CLI and retry; use --codex if multiple installations are on PATH.")
+
+    if operation == "install":
+        if not shutil.which("git"):
+            raise RuntimeError("Git is required. Install Git or run `xcode-select --install`, then retry.")
+        if build:
+            if not shutil.which("cargo"):
+                raise RuntimeError("Rust/Cargo is required for a source installation. "
+                                   "Install Rust and the toolchain in rust-toolchain.toml, then retry.")
+            xcrun = shutil.which("xcrun")
+            if not xcrun:
+                raise RuntimeError("Xcode Command Line Tools are required to build DeLM. "
+                                   "Run `xcode-select --install`, then retry.")
+            try:
+                compiler = subprocess.run([xcrun, "--find", "clang"], text=True,
+                                          capture_output=True, timeout=15)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise RuntimeError("Could not check Xcode Command Line Tools. "
+                                   "Check that `xcrun --find clang` works, then retry.") from error
+            if compiler.returncode or not compiler.stdout.strip():
+                raise RuntimeError("Xcode Command Line Tools are unavailable or not selected. "
+                                   "Run `xcode-select --install`, then verify `xcrun --find clang` before retrying.")
+    return codex
 
 
 @contextlib.contextmanager
@@ -211,13 +269,8 @@ def main():
     parser.add_argument("--codex", default=shutil.which("codex"), help="Existing stock Codex executable")
     parser.add_argument("--no-build", action="store_true", help="Install an already staged .build/plugin bundle")
     args = parser.parse_args()
-    codex = shutil.which(args.codex) if args.codex else None
-    if not codex:
-        raise RuntimeError("Install stock Codex first; no replacement Codex binary is bundled.")
-    codex = str(Path(codex).resolve())
     codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser().resolve()
-    if not codex_home.is_dir():
-        raise RuntimeError(f"CODEX_HOME must already be a directory: {codex_home}")
+    codex = preflight(args.operation, args.codex, codex_home, build=not args.no_build)
     (SOURCE / ".build").mkdir(exist_ok=True)
     with locked(SOURCE / ".build/plugin-install.lock"), tempfile.TemporaryDirectory(prefix="delm-plugin-cli-") as cwd:
         installation = Installation(SOURCE, codex_home, codex, cwd)

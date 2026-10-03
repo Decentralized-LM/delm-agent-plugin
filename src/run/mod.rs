@@ -14,8 +14,19 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use state::{Journal, RunLock, atomic_json, now};
-use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::mpsc;
+
+// Give the runtime a bounded opportunity to start acknowledged native shutdown
+// at the work deadline. The watchdog still stops an unresponsive runtime, and
+// its separate native-shutdown bound remains in force once handoff begins.
+const WATCHDOG_HANDOFF_GRACE: Duration = Duration::from_secs(2);
+const TIME_LIMIT_REACHED: &str = "The execution time limit was reached";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Worker {
@@ -230,18 +241,19 @@ async fn serve_inner(
     )?;
     board.set_revision(saved.revision)?;
     let mut rpc = RpcClient::spawn(&saved.request, &run_dir).await?;
-    let allowance = if saved.expires == 0 {
-        saved.request.seconds
-    } else {
-        saved.expires.saturating_sub(now())
-    };
     if saved.expires == 0 {
-        saved.expires = now() + allowance;
+        saved.expires = now() + saved.request.seconds;
     }
+    // Capture the absolute execution deadline before watchdog setup. Starting a
+    // full-seconds sleep afterward would outlive this persisted wall deadline.
+    let remaining = (UNIX_EPOCH + Duration::from_secs(saved.expires))
+        .duration_since(SystemTime::now())
+        .unwrap_or_default();
+    let execution_deadline = tokio::time::Instant::now() + remaining;
     let guard = crate::supervisor::Guard::start_with_paths(
         std::process::id(),
         rpc.pid,
-        saved.expires * 1000,
+        saved.expires * 1000 + WATCHDOG_HANDOFF_GRACE.as_millis() as u64,
         &rpc.launch_dir,
         std::slice::from_ref(&run_dir),
     )?;
@@ -250,7 +262,7 @@ async fn serve_inner(
     } else {
         tokio::select! { biased;
             _ = cancel.changed() => Ok(None),
-            _ = tokio::time::sleep(Duration::from_secs(allowance)) => Ok(None),
+            _ = tokio::time::sleep_until(execution_deadline) => Err(anyhow::anyhow!(TIME_LIMIT_REACHED)),
             result = async {rpc.initialize().await?; rpc.verify_account(&saved.request).await?; drive(&mut saved, &mut rpc, &mut board, &mut journal, &mut input, &output).await} => result,
         }
     };
@@ -654,7 +666,7 @@ async fn drive(
     loop {
         let remaining = saved.expires.saturating_sub(now());
         if remaining == 0 {
-            return Ok(None);
+            bail!(TIME_LIMIT_REACHED);
         }
         let mut persist = true;
         tokio::select! { biased;
@@ -856,7 +868,7 @@ async fn drive(
                     _ => { if let Some(id) = message.get("id") { rpc.reject(id.clone(),"This native capability is unavailable during DeLM").await?; } }
                 }
             },
-            _ = tokio::time::sleep(Duration::from_secs(remaining)) => return Ok(None),
+            _ = tokio::time::sleep(Duration::from_secs(remaining)) => bail!(TIME_LIMIT_REACHED),
         }
         if persist {
             atomic_json(&saved.workspace.run_dir.join("run.json"), saved)?;

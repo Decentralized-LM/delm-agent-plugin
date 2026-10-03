@@ -2,12 +2,13 @@ name: Prepare macOS release
 on:
   workflow_dispatch:
     inputs:
-      source_tag:
-        description: 'Source tag matching Cargo.toml, e.g. v0.3.0'
+      source_ref:
+        description: 'Branch or commit for private review; v<version> tag for publication'
+        default: main
         required: true
         type: string
       publish:
-        description: 'Sign, notarize, and publish to the native marketplace'
+        description: 'Sign, notarize, qualify, and publish to the native marketplace'
         default: false
         type: boolean
 permissions:
@@ -24,12 +25,14 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ inputs.source_tag }}
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
           persist-credentials: false
-      - name: Resolve the source tag once for every release job
+      - name: Resolve clean source once for all subsequent jobs
         id: source
         env:
-          SOURCE_TAG: ${{ inputs.source_tag }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          RELEASE_PUBLISH: ${{ inputs.publish }}
         run: |
           python3 scripts/release_identity.py
           printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -40,42 +43,69 @@ jobs:
       matrix:
         include:
           - runner: macos-15
+            architecture: arm64
             target: aarch64-apple-darwin
           - runner: macos-15-intel
+            architecture: x86_64
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       MACOSX_DEPLOYMENT_TARGET: '13.0'
+      BUILD_TARGET: ${{ matrix.target }}
+      BUILD_ARCHITECTURE: ${{ matrix.architecture }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ needs.identity.outputs.revision }}
+          fetch-depth: 0
           persist-credentials: false
-      - name: Check release identity
+      - name: Check pinned release identity
         env:
-          SOURCE_TAG: ${{ inputs.source_tag }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          RELEASE_PUBLISH: ${{ inputs.publish }}
           RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
         run: python3 scripts/release_identity.py
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
       - name: Install build and qualification tools
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
           npm install --global @openai/codex@0.159.3
-      - name: Verify runtime and isolated native installation
+      - name: Verify source, native installation, and release packaging
         run: |
           ./scripts/verify.sh
-          DELM_TEST_HOST="$(command -v codex)" cargo test --locked --test native_sandbox -- --ignored
-      - name: Build native runtime
-        env:
-          BUILD_TARGET: ${{ matrix.target }}
+      - name: Build and test release binaries on the native architecture
         run: |
-          cargo build --locked --release --bin delm --target "$BUILD_TARGET"
-          tar -cf runtime.tar -C "target/$BUILD_TARGET/release" delm
+          cargo build --locked --release --target "$BUILD_TARGET" --bin delm --example native-lifecycle-fixture
+          cargo test --locked --release --target "$BUILD_TARGET"
+      - name: Qualify the native sandbox and every lifecycle scenario without model calls
+        run: |
+          mkdir -p "$RUNNER_TEMP/qualification"
+          DELM_TEST_HOST="$(command -v codex)" DELM_TEST_EVIDENCE="$RUNNER_TEMP/qualification/sandbox.json" cargo test --locked --release --target "$BUILD_TARGET" --test native_sandbox -- --ignored
+          for scenario in interrupt preflight stop owner-death plugin-remove; do
+            python3 scripts/verify_native_lifecycle.py --fixture "target/$BUILD_TARGET/release/examples/native-lifecycle-fixture" --case "$scenario" --out "$RUNNER_TEMP/qualification/$scenario"
+          done
+      - name: Exercise and record the exact runtime bytes being archived
+        run: |
+          python3 scripts/qualify_release.py smoke --runtime "target/$BUILD_TARGET/release/delm" --architecture "$BUILD_ARCHITECTURE" --out "$RUNNER_TEMP/qualification/smoke"
+          mkdir runtime-artifact
+          cp "target/$BUILD_TARGET/release/delm" runtime-artifact/delm
+          python3 scripts/qualify_release.py record --runtime runtime-artifact/delm --target "$BUILD_TARGET" --smoke "$RUNNER_TEMP/qualification/smoke/result.json" --sandbox "$RUNNER_TEMP/qualification/sandbox.json" --lifecycle-root "$RUNNER_TEMP/qualification" --out runtime-artifact/qualification.json
+          tar -cf runtime.tar -C runtime-artifact .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: runtime-${{ matrix.target }}
           path: runtime.tar
           if-no-files-found: error
+      - name: Retain qualification evidence, including failed cases
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qualification-${{ matrix.target }}
+          path: ${{ runner.temp }}/qualification
+          if-no-files-found: ignore
   assemble:
     needs: [identity, build]
     runs-on: macos-15
@@ -89,38 +119,41 @@ jobs:
         with:
           pattern: runtime-*
           path: artifacts
-      - name: Assemble universal runtime and unsigned review package
+      - name: Assemble only the qualified native slices
         env:
           RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
         run: |
           tar -xf artifacts/runtime-aarch64-apple-darwin/runtime.tar -C artifacts/runtime-aarch64-apple-darwin
           tar -xf artifacts/runtime-x86_64-apple-darwin/runtime.tar -C artifacts/runtime-x86_64-apple-darwin
           lipo -create artifacts/runtime-aarch64-apple-darwin/delm artifacts/runtime-x86_64-apple-darwin/delm -output artifacts/delm
-          lipo -verify_arch arm64 x86_64 artifacts/delm
-          python3 scripts/package_release.py --runtime artifacts/delm --output unsigned-review --repository "$RELEASE_REPOSITORY" --revision "$(git rev-parse HEAD)"
+          python3 scripts/package_release.py --runtime artifacts/delm --output unsigned-review --repository "$RELEASE_REPOSITORY" --revision "$RELEASE_SOURCE_SHA" --qualification artifacts/runtime-aarch64-apple-darwin/qualification.json --qualification artifacts/runtime-x86_64-apple-darwin/qualification.json
+          python3 scripts/package_release.py --verify unsigned-review --revision "$RELEASE_SOURCE_SHA" --repository "$RELEASE_REPOSITORY" --require-qualified
           tar -cf unsigned-macos-review.tar -C unsigned-review .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: unsigned-macos-review-not-for-distribution
           path: unsigned-macos-review.tar
           if-no-files-found: error
-  publish:
+  sign:
     if: inputs.publish
     needs: [identity, assemble]
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 60
     environment: release
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ needs.identity.outputs.revision }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: unsigned-macos-review-not-for-distribution
-      - name: Sign and notarize; fail if credentials or assessment are missing
+      - name: Sign and notarize the qualified package
         env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -128,10 +161,82 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           RELEASE_REPOSITORY: ${{ github.repository }}
-        run: bash scripts/sign_release.sh
-      - name: Publish immutable package tag and marketplace branch atomically
+        run: |
+          bash scripts/sign_release.sh
+          tar -cf signed-macos-release.tar -C signed-release .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-macos-release-candidate
+          path: signed-macos-release.tar
+          if-no-files-found: error
+      - name: Retain notarization response
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: notarization-response
+          path: ${{ runner.temp }}/delm-notarization.json
+          if-no-files-found: ignore
+  qualify-signed:
+    needs: [identity, sign]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.identity.outputs.revision }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-macos-release-candidate
+      - name: Verify and exercise the signed universal binary under quarantine
         env:
           RELEASE_REPOSITORY: ${{ github.repository }}
-          SOURCE_TAG: ${{ inputs.source_tag }}
           RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
-        run: python3 scripts/publish_release.py signed-release
+          BUILD_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          mkdir candidate
+          tar -xf signed-macos-release.tar -C candidate
+          python3 scripts/package_release.py --verify candidate --revision "$RELEASE_SOURCE_SHA" --repository "$RELEASE_REPOSITORY" --require-qualified
+          xattr -w com.apple.quarantine '0081;00000000;DeLMReleaseQualification;' candidate/plugins/delm/bin/delm
+          python3 scripts/qualify_release.py smoke --runtime candidate/plugins/delm/bin/delm --architecture "$BUILD_ARCHITECTURE" --signed --out "$RUNNER_TEMP/signed-qualification"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: signed-qualification-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/signed-qualification
+          if-no-files-found: error
+  publish:
+    needs: [identity, sign, qualify-signed]
+    runs-on: macos-15
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.identity.outputs.revision }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-macos-release-candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: signed-qualification-*
+          path: signed-evidence
+      - name: Publish the signed, qualified package atomically
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
+        run: |
+          mkdir signed-release
+          tar -xf signed-macos-release.tar -C signed-release
+          python3 scripts/publish_release.py signed-release signed-evidence

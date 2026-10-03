@@ -10,6 +10,21 @@ on:
 permissions:
   contents: read
 jobs:
+  installer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Check the installer and its npm package
+        run: npm --prefix packages/installer test
   plugin:
     strategy:
       fail-fast: false
@@ -29,6 +44,9 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
       - name: Install stock Codex for compatibility checks
         env:
           CODEX_VERSION: ${{ matrix.codex }}
@@ -39,7 +57,15 @@ jobs:
         run: ./scripts/verify.sh
       - name: Build the plugin bundle
         run: ./scripts/build.sh
+      - name: Verify the packed npm installer with native Codex
+        run: npm --prefix packages/installer run test:native
       - name: Verify private development environments without model calls
         run: DELM_TEST_HOST="$(command -v codex)" cargo test --locked --test native_sandbox -- --ignored
+      - name: Verify native cancellation and lifecycle ownership without model calls
+        run: |
+          cargo build --locked --example native-lifecycle-fixture
+          for scenario in interrupt preflight stop owner-death plugin-remove; do
+            python3 scripts/verify_native_lifecycle.py --case "$scenario" --out "$RUNNER_TEMP/delm-lifecycle-$scenario"
+          done
       - name: Check the example
         run: node --test examples/task-board/task.test.mjs

@@ -24,7 +24,7 @@
 
 DeLM brings two collaborating agents to your existing Codex conversation. They claim work, share findings, and reuse each other's code through a shared context and task queue. Each agent develops a complete solution in a private workspace; the first to finish returns the result.
 
-Invoke **`$delm:run`** when you want them to work together. DeLM uses your Codex account and stays inactive until you ask.
+Invoke **`$delm:run`** when you want them to work together. DeLM uses your Codex account and starts its workers only when you ask.
 
 <p align="center">
   <a href="video-demo/renders/delm-demo.mp4"><img src="video-demo/renders/poster.png" alt="Watch DeLM for Codex: two agents building and sharing their work" width="800"></a>
@@ -44,6 +44,8 @@ You'll need Codex CLI with an existing login, Git, Python 3, Rust, and Xcode Com
 
 Restart Codex, open `/hooks`, and review and trust the DeLM hooks. Restart once more to load the configuration. Installation leaves your Codex executable and account credentials unchanged. See [development setup](docs/development.md) for build details.
 
+The planned npm command is `npx --yes delm-agent@latest install`. The `delm-agent` package is not published or reserved yet; use the source installation above. Contributors can [test the installer privately](packages/installer/README.md).
+
 ## Run a task
 
 Open Codex in the Git repository you want to work on and enter a request:
@@ -55,7 +57,7 @@ and keyboard controls. Include a README and test the main interactions.
 
 Both agents can research, install dependencies, run tests, and check a private browser preview. You can clarify the request or ask Codex to stop from the same conversation.
 
-**Your original repository stays unchanged.** DeLM returns the completed project's location, a review of the changes, and the checks performed. Continue in that project or ask Codex to apply the changes after review. Interrupted work is also preserved.
+**Your original repository stays unchanged.** DeLM returns a link to the completed project, launch instructions, a review of the changes, and the checks performed. Open that project to continue, or ask Codex to apply the changes after review. Interrupted work is also preserved.
 
 Use a standalone Git repository smaller than 10 GB, including ignored files and Git history. Runs have a 30-minute default allowance. Stop an active run before disabling DeLM or revoking its hook trust.
 

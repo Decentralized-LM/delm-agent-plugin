@@ -127,6 +127,10 @@ impl Fixture {
     }
 
     fn start(&self) -> Session {
+        self.start_with_seconds(180)
+    }
+
+    fn start_with_seconds(&self, seconds: u64) -> Session {
         let stderr = self.root.join("runtime.stderr");
         let mut child = self
             .command()
@@ -137,7 +141,7 @@ impl Fixture {
             .arg(self.root.join("task.txt"))
             .arg("--context-file")
             .arg(self.root.join("context.txt"))
-            .args(["--seconds", "180"])
+            .args(["--seconds", &seconds.to_string()])
             .args(if self.root.join("inputs.json").exists() {
                 vec![
                     "--inputs-file".to_owned(),
@@ -424,7 +428,7 @@ fn public_run_automatically_accepts_and_exits_with_a_retained_result() {
     let fixture = Fixture::new("complete");
     let mut session = fixture.start();
     let id = session.run_id();
-    let status = fixture.control(&[
+    let mut status = fixture.control(&[
         "status",
         "--run-id",
         &id,
@@ -432,6 +436,20 @@ fn public_run_automatically_accepts_and_exits_with_a_retained_result() {
         "--wait-seconds",
         "15",
     ]);
+    let deadline = Instant::now() + SHORT_LIMIT;
+    while status["status"] != "complete" && Instant::now() < deadline {
+        let sequence = status["update_sequence"].as_u64().unwrap();
+        status = fixture.control(&[
+            "status",
+            "--run-id",
+            &id,
+            "--after",
+            &sequence.to_string(),
+            "--wait-seconds",
+            "15",
+        ]);
+        assert!(status["update_sequence"].as_u64().unwrap() >= sequence);
+    }
     assert_eq!(
         status["status"], "complete",
         "pending status did not receive the terminal outcome"
@@ -477,6 +495,68 @@ fn public_run_automatically_accepts_and_exits_with_a_retained_result() {
             .iter()
             .all(|request| request.to_string().contains("CLI-CONTEXT"))
     );
+    fixture.assert_preserved_and_stopped();
+}
+
+#[test]
+fn execution_time_limit_preserves_clean_partial_work() {
+    let fixture = Fixture::new("wait");
+    let mut session = fixture.start_with_seconds(3);
+    let id = session.run_id();
+    fixture.control(&["status", "--run-id", &id, "--keep-alive"]);
+    session.until(|event| event["type"] == "started", SHORT_LIMIT);
+    let stopped = session.until(|event| event["type"] == "stopped", SHORT_LIMIT);
+    assert!(session.wait(SHORT_LIMIT).success());
+    assert!(
+        stopped["message"]
+            .as_str()
+            .unwrap()
+            .contains("execution time limit"),
+        "{stopped}"
+    );
+    assert_eq!(stopped["partial_paths"].as_array().unwrap().len(), 2);
+    let run_dir = fixture.run_dir(&id);
+    let saved: Value =
+        serde_json::from_slice(&fs::read(run_dir.join("run.json")).unwrap()).unwrap();
+    assert_eq!(saved["status"], "paused");
+    let launches = fs::read_dir(run_dir.join("launches"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(launches.len(), 1);
+    let report: Value =
+        serde_json::from_slice(&fs::read(launches[0].join("shutdown-report.json")).unwrap())
+            .unwrap();
+    assert_eq!(report["reason"], "shutdown complete", "{report}");
+    assert_eq!(report["ownership_resolved"], true, "{report}");
+    assert_eq!(report["survivors"], json!([]), "{report}");
+    assert_eq!(report["errors"], json!([]), "{report}");
+    let spec: Value =
+        serde_json::from_slice(&fs::read(launches[0].join("watchdog.json")).unwrap()).unwrap();
+    assert_eq!(
+        spec["deadline_unix_ms"].as_u64().unwrap(),
+        saved["expires"].as_u64().unwrap() * 1000 + 2000
+    );
+    for worker in saved["workers"].as_array().unwrap() {
+        for method in [
+            "turn/interrupt",
+            "thread/backgroundTerminals/clean",
+            "thread/archive",
+        ] {
+            assert_eq!(
+                fixture
+                    .requests(method)
+                    .iter()
+                    .filter(|request| { request["params"]["threadId"] == worker["thread"] })
+                    .count(),
+                1,
+                "missing native {method} acknowledgment for {worker}"
+            );
+        }
+    }
+    let status = fixture.control(&["status", "--run-id", &id]);
+    assert_eq!(status["status"], "stopped");
+    assert_eq!(status["partial_paths"], stopped["partial_paths"]);
     fixture.assert_preserved_and_stopped();
 }
 

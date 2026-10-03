@@ -56,6 +56,9 @@ pub enum Command {
         keep_alive: bool,
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=15))]
         wait_seconds: u64,
+        /// Return when progress changes after this update sequence.
+        #[arg(long)]
+        after: Option<u64>,
     },
     /// Send a clarification to both workers.
     Update {
@@ -98,6 +101,9 @@ pub struct Snapshot {
     pub path: Option<PathBuf>,
     pub partial_paths: Vec<PathBuf>,
     pub updated_at: u64,
+    /// Progress cursor, independent of the user's request revision.
+    #[serde(default)]
+    pub update_sequence: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitoring_lease_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,6 +116,7 @@ pub struct Snapshot {
 
 struct Monitor {
     snapshot: Snapshot,
+    changed: watch::Sender<u64>,
     last_contact: Instant,
     expected_revision: u64,
     control_token: String,
@@ -119,6 +126,12 @@ struct Monitor {
 }
 
 impl Monitor {
+    fn publish_change(&mut self) {
+        self.snapshot.update_sequence += 1;
+        self.snapshot.updated_at = state::now();
+        self.changed.send_replace(self.snapshot.update_sequence);
+    }
+
     fn contact_deadline(&self) -> Option<Duration> {
         if self.admission.is_some() {
             Some(Duration::from_secs(CONTROL_ADMISSION_SECONDS))
@@ -131,7 +144,6 @@ impl Monitor {
 
     fn apply_event(&mut self, event: &Event) -> Option<HostCommand> {
         self.snapshot.message.clone_from(&event.message);
-        self.snapshot.updated_at = state::now();
         if let Some(revision) = event.request_revision {
             self.snapshot.request_revision = self.snapshot.request_revision.max(revision);
             self.expected_revision = self.expected_revision.max(revision);
@@ -194,6 +206,7 @@ impl Monitor {
         if !event.partial_paths.is_empty() {
             self.snapshot.partial_paths.clone_from(&event.partial_paths);
         }
+        self.publish_change();
         accepting.then_some(HostCommand::AcceptResult {
             request_revision: self.expected_revision,
         })
@@ -211,6 +224,8 @@ enum Control {
         keep_alive: bool,
         #[serde(default)]
         wait_seconds: u64,
+        #[serde(default)]
+        after: Option<u64>,
     },
     Update {
         text: String,
@@ -262,11 +277,19 @@ pub async fn execute(command: Command) -> Result<()> {
                 !control_root()?.starts_with(&project),
                 "Select a repository that does not contain DeLM control storage"
             );
+            print_event(&Event::new(
+                "status",
+                "Checking your Codex account, configuration, and private workspace permissions.",
+            ))?;
             let mut request =
                 crate::workers::stock_request(project, task, context, model, effort, seconds)
                     .await?;
             request.attachments = read_inputs(inputs_file.as_deref())?;
             if let Some(binding) = &binding {
+                print_event(&Event::new(
+                    "status",
+                    "Checking native DeLM lifecycle hooks.",
+                ))?;
                 crate::workers::verify_lifecycle_hooks(&request, binding).await?;
             }
             println!(
@@ -283,12 +306,14 @@ pub async fn execute(command: Command) -> Result<()> {
             run_id,
             keep_alive,
             wait_seconds,
+            after,
         } => {
             let value = control(
                 &run_id,
                 Control::Status {
                     keep_alive,
                     wait_seconds,
+                    after,
                 },
             )
             .await?;
@@ -554,6 +579,7 @@ fn publish_update(
         state.last_contact = Instant::now();
     }
     state.snapshot.message = "Your update is queued for both workers.".into();
+    state.publish_change();
     Ok(())
 }
 
@@ -572,9 +598,9 @@ fn apply_lifecycle_signal(
     if !binding.accepts(signal)? {
         return Ok(());
     }
-    if !terminal(&state.snapshot.status)
-        && (signal.event != "Stop" || state.snapshot.questions.is_empty())
-    {
+    let stopping = !terminal(&state.snapshot.status)
+        && (signal.event != "Stop" || state.snapshot.questions.is_empty());
+    if stopping {
         cancel.send(true).ok();
         commands.try_send(HostCommand::Stop).ok();
         state.snapshot.status = "stopping".into();
@@ -583,6 +609,9 @@ fn apply_lifecycle_signal(
     // Clear only this exact delivery. A concurrent Interrupt must survive an
     // acknowledgment of an earlier Stop, including while a question is open.
     binding.acknowledge_signal(signal)?;
+    if stopping {
+        state.publish_change();
+    }
     Ok(())
 }
 
@@ -634,6 +663,9 @@ async fn handle_control(
                 || !matches!(command, Control::Update { .. } | Control::Answer { .. }),
             "The run is finishing or stopping; this update was not applied. Continue from the retained project once it is ready"
         );
+        // Subscribe under the same lock used to read the cursor. A publication
+        // between releasing the lock and awaiting changed() cannot be missed.
+        let mut updates = state.changed.subscribe();
         let wait = match command {
             Control::Lifecycle { signal } => {
                 apply_lifecycle_signal(&mut state, &signal, &commands, &cancel)?;
@@ -642,8 +674,11 @@ async fn handle_control(
             Control::Status {
                 keep_alive,
                 wait_seconds,
+                after,
             } => {
                 ensure!(wait_seconds <= 15, "Status wait exceeds 15 seconds");
+                ensure!(after.is_none_or(|sequence| sequence <= state.snapshot.update_sequence),
+                    "Status cursor is newer than this run; request status without --after");
                 if keep_alive {
                     if let Some(binding) = &state.binding {
                         if state.admission.is_some() { binding.ensure_admissible()?; }
@@ -656,10 +691,17 @@ async fn handle_control(
                             state.snapshot.status = "preparing".into();
                             state.snapshot.message =
                                 "Control access confirmed. Starting workers.".into();
+                            state.publish_change();
                         }
                     }
                 }
-                wait_seconds
+                if terminal(&state.snapshot.status)
+                    || after.is_some_and(|sequence| sequence < state.snapshot.update_sequence)
+                    || (after.is_none() && !state.snapshot.questions.is_empty()) {
+                    0
+                } else {
+                    wait_seconds
+                }
             }
             Control::Update { text, attachments } => {
                 ensure!(
@@ -692,6 +734,7 @@ async fn handle_control(
                 state.snapshot.questions.remove(&id);
                 state.last_contact = Instant::now();
                 state.snapshot.message = "Your answer is queued for the identified question and both workers.".into();
+                state.publish_change();
                 0
             }
             Control::Stop => {
@@ -701,6 +744,7 @@ async fn handle_control(
                     state.snapshot.status = "stopping".into();
                     state.snapshot.message =
                         "Stopping workers and preserving their projects.".into();
+                    state.publish_change();
                 }
                 0
             }
@@ -709,6 +753,7 @@ async fn handle_control(
         if wait > 0 && !*closing.borrow() {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(wait)) => {},
+                _ = updates.changed() => {},
                 _ = closing.changed() => {},
             }
         }
@@ -742,6 +787,7 @@ async fn run(
         input, output, signal, admitted,
     ));
     let monitor = Arc::new(Mutex::new(Monitor {
+        changed: watch::channel(0).0,
         snapshot: Snapshot {
             status: "preparing".into(),
             request_revision: 1,
@@ -834,6 +880,7 @@ async fn run(
                     cancel.send(true).ok(); commands.try_send(HostCommand::Stop).ok();
                     current.snapshot.status = "stopping".into();
                     current.snapshot.message = format!("Native lifecycle ownership changed: {error}. Preserving work.");
+                    current.publish_change();
                     if let Some(path) = &saved_path { state::atomic_json(path, &current.snapshot)?; }
                 }
                 let awaiting_control = current.admission.is_some();
@@ -846,6 +893,7 @@ async fn run(
                     } else {
                         "The conversation stopped monitoring DeLM. Stopping workers and preserving their work."
                     }.into();
+                    current.publish_change();
                     if let Some(path) = &saved_path { state::atomic_json(path, &current.snapshot)?; }
                 }
             },
@@ -879,6 +927,7 @@ async fn run(
         let mut current = monitor.lock().await;
         current.snapshot.status = "error".into();
         current.snapshot.message = format!("{error:#}");
+        current.publish_change();
         if let Some(path) = &saved_path {
             state::atomic_json(path, &current.snapshot)?;
         }
@@ -963,6 +1012,7 @@ mod tests {
 
     fn running_monitor() -> Monitor {
         Monitor {
+            changed: watch::channel(0).0,
             snapshot: Snapshot {
                 status: "running".into(),
                 request_revision: 1,
@@ -996,6 +1046,124 @@ mod tests {
         fn drop(&mut self) {
             crate::lifecycle::tests::cleanup(&self.0);
         }
+    }
+
+    async fn status_reply(
+        monitor: Arc<Mutex<Monitor>>,
+        after: Option<u64>,
+        wait_seconds: u64,
+    ) -> Snapshot {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (commands, _input) = mpsc::channel(2);
+        let (cancel, _cancelled) = watch::channel(false);
+        let (_closing, closed) = watch::channel(false);
+        let task = tokio::spawn(handle_control(server, monitor, commands, cancel, closed));
+        let request = AuthenticatedControl {
+            token: "test-secret".into(),
+            command: Control::Status {
+                keep_alive: false,
+                wait_seconds,
+                after,
+            },
+        };
+        client
+            .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).await.unwrap();
+        task.await.unwrap().unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    async fn await_status_subscriber(monitor: &Arc<Mutex<Monitor>>) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while monitor.lock().await.changed.receiver_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("status did not subscribe to progress");
+    }
+
+    #[tokio::test]
+    async fn status_cursor_wakes_on_questions_without_repeating_pending_input() {
+        let monitor = Arc::new(Mutex::new(running_monitor()));
+        let pending = tokio::spawn(status_reply(monitor.clone(), Some(0), 15));
+        await_status_subscriber(&monitor).await;
+        assert!(!pending.is_finished());
+        let mut question = Event::new("question", "Which format?");
+        question.id = Some("format".into());
+        question.details = Some(json!({"questions":[{"id":"format","question":"Which format?"}]}));
+        monitor.lock().await.apply_event(&question);
+        let first = tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .expect("new question waited for the status timeout")
+            .unwrap();
+        assert!(first.questions.contains_key("format"));
+        assert_eq!(first.update_sequence, 1);
+
+        // A missed publication is returned immediately, even when it occurred
+        // before this connection subscribed to changes.
+        let missed = tokio::time::timeout(
+            Duration::from_secs(2),
+            status_reply(monitor.clone(), Some(0), 15),
+        )
+        .await
+        .expect("missed question was not delivered immediately");
+        assert_eq!(missed.update_sequence, 1);
+
+        let mut next = tokio::spawn(status_reply(
+            monitor.clone(),
+            Some(first.update_sequence),
+            15,
+        ));
+        await_status_subscriber(&monitor).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut next)
+                .await
+                .is_err(),
+            "a known pending question caused a busy poll"
+        );
+        let mut resolved = Event::new("question_resolved", "Answer applied");
+        resolved.id = question.id;
+        monitor.lock().await.apply_event(&resolved);
+        let next = tokio::time::timeout(Duration::from_secs(2), next)
+            .await
+            .expect("question resolution did not wake status")
+            .unwrap();
+        assert_eq!(next.update_sequence, 2);
+        assert!(next.questions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn status_returns_on_deadline_and_terminal_state_without_renewing_a_lease() {
+        let monitor = Arc::new(Mutex::new(running_monitor()));
+        let last_contact = monitor.lock().await.last_contact;
+        let started = Instant::now();
+        let unchanged = status_reply(monitor.clone(), Some(0), 1).await;
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert_eq!(unchanged.update_sequence, 0);
+        assert_eq!(monitor.lock().await.last_contact, last_contact);
+
+        let pending = tokio::spawn(status_reply(monitor.clone(), Some(0), 15));
+        await_status_subscriber(&monitor).await;
+        monitor
+            .lock()
+            .await
+            .apply_event(&Event::new("stopped", "Stopped"));
+        let stopped = tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped.status, "stopped");
+        let final_status = tokio::time::timeout(
+            Duration::from_secs(2),
+            status_reply(monitor.clone(), Some(stopped.update_sequence), 15),
+        )
+        .await
+        .expect("terminal status should not wait");
+        assert_eq!(final_status.update_sequence, stopped.update_sequence);
     }
 
     #[test]
@@ -1253,6 +1421,7 @@ mod tests {
     async fn updates_after_result_acceptance_or_stop_are_rejected_not_queued() {
         for status in ["finishing", "stopping"] {
             let monitor = Arc::new(Mutex::new(Monitor {
+                changed: watch::channel(0).0,
                 snapshot: Snapshot {
                     status: status.into(),
                     ..Default::default()
@@ -1296,6 +1465,7 @@ mod tests {
     #[tokio::test]
     async fn update_queue_preserves_revision_and_stop_cancels() {
         let monitor = Arc::new(Mutex::new(Monitor {
+            changed: watch::channel(0).0,
             snapshot: Snapshot::default(),
             expected_revision: 1,
             pending_answers: Default::default(),

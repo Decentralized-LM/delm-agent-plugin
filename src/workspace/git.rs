@@ -124,6 +124,53 @@ pub(super) fn run(private: &Path, worktree: &Path, args: &[&str]) -> Result<Vec<
     Ok(output.stdout)
 }
 
+pub(super) fn ignored_directories(
+    private: &Path,
+    worktree: &Path,
+    directories: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    if directories.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    // NUL-delimited stdin treats whitespace, newlines and leading dashes as
+    // literal path characters, without argv limits or one process per directory.
+    let mut input = Vec::new();
+    for directory in directories {
+        components(directory, true)?;
+        input.extend_from_slice(directory.as_bytes());
+        input.push(0);
+    }
+    let mut command = command();
+    command
+        .arg(format!("--git-dir={}", private.join(".git").display()))
+        .arg(format!("--work-tree={}", worktree.display()))
+        .args(["check-ignore", "--stdin", "-z"]);
+    let output = execute(command, Some(input))?;
+    ensure!(
+        matches!(output.status.code(), Some(0 | 1)),
+        "cannot classify ignored directories: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.stdout.is_empty() || output.stdout.last() == Some(&0),
+        "unterminated ignored-directory output"
+    );
+    let mut ignored = BTreeSet::new();
+    for path in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path = std::str::from_utf8(path).context("non-UTF-8 ignored-directory output")?;
+        ensure!(
+            directories.contains(path),
+            "unexpected ignored-directory output"
+        );
+        ignored.insert(path.to_owned());
+    }
+    Ok(ignored)
+}
+
 pub(super) fn configuration(root: &File, scan: &Inventory) -> Result<(String, String)> {
     let mut source = open_relative(root, ".git/config", false)?;
     ensure!(

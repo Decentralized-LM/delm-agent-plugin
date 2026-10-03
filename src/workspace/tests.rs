@@ -680,3 +680,91 @@ fn unsupported_git_administration_is_never_repaired() {
     fs::write(root.join(".gitattributes"), "*.txt filter=lfs\n").unwrap();
     assert!(prepare(&root, &temp.path().join("run"), 1_000_000).is_err());
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn result_retains_cpython_314_pi_alias_without_widening_source_admission() {
+    let (temp, root) = fixture();
+    let runtime = temp.path().join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    let interpreter = runtime.join("python3.14");
+    fs::write(&interpreter, "qualified interpreter").unwrap();
+    fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir_all(root.join(".venv/bin")).unwrap();
+    fs::write(
+        root.join(".venv/pyvenv.cfg"),
+        format!(
+            "home = {}\ninclude-system-site-packages = false\nversion = 3.14.0\n",
+            runtime.display()
+        ),
+    )
+    .unwrap();
+    symlink(&interpreter, root.join(".venv/bin/python3.14")).unwrap();
+    symlink("python3.14", root.join(".venv/bin/python")).unwrap();
+    // CPython 3.14's UTF-8 POSIX venv adds this exact same-bin alias.
+    symlink("python3.14", root.join(".venv/bin/𝜋thon")).unwrap();
+    let policy = ResultPolicy {
+        readonly_runtime_roots: vec![runtime],
+        denied_roots: vec![],
+    };
+    assert!(manifest(&root).is_err());
+    let captured = manifest_for_result(&root, &policy).unwrap();
+    assert_eq!(captured.files[".venv/bin/𝜋thon"].kind, FileKind::Symlink);
+    assert_eq!(
+        captured.runtime_links[".venv/bin/𝜋thon"],
+        captured.runtime_links[".venv/bin/python3.14"]
+    );
+    assert_eq!(
+        captured.runtime_links[".venv/bin/𝜋thon"].target,
+        interpreter.canonicalize().unwrap()
+    );
+
+    // The new spelling cannot grant access through a denied source/peer route.
+    let alias = root.join(".venv/bin/𝜋thon");
+    for name in ["original", "peer"] {
+        let denied = temp.path().join(name);
+        fs::create_dir(&denied).unwrap();
+        symlink(&interpreter, denied.join("python3.14")).unwrap();
+        fs::remove_file(&alias).unwrap();
+        symlink(denied.join("python3.14"), &alias).unwrap();
+        let restricted = ResultPolicy {
+            readonly_runtime_roots: policy.readonly_runtime_roots.clone(),
+            denied_roots: vec![denied],
+        };
+        assert!(manifest_for_result(&root, &restricted).is_err());
+    }
+    fs::remove_file(&alias).unwrap();
+    symlink("python3.14", &alias).unwrap();
+    let denied = ResultPolicy {
+        readonly_runtime_roots: policy.readonly_runtime_roots.clone(),
+        denied_roots: policy.readonly_runtime_roots.clone(),
+    };
+    assert!(manifest_for_result(&root, &denied).is_err());
+    assert!(manifest_for_result(&root, &ResultPolicy::default()).is_err());
+
+    // Similar spellings and arbitrary tools remain ordinary external links.
+    for name in ["πthon", "𝜋thon3", "pip", "source-link"] {
+        let unknown = root.join(".venv/bin").join(name);
+        symlink("python3.14", &unknown).unwrap();
+        assert!(manifest_for_result(&root, &policy).is_err(), "{name}");
+        fs::remove_file(unknown).unwrap();
+    }
+    symlink(".venv/bin/𝜋thon", root.join("source-link")).unwrap();
+    assert!(manifest_for_result(&root, &policy).is_err());
+    fs::remove_file(root.join("source-link")).unwrap();
+
+    let unrelated = policy.readonly_runtime_roots[0].join("unrelated-tool");
+    fs::write(&unrelated, "not a Python interpreter").unwrap();
+    fs::set_permissions(&unrelated, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::remove_file(&alias).unwrap();
+    symlink(&unrelated, &alias).unwrap();
+    assert!(manifest_for_result(&root, &policy).is_err());
+    fs::remove_file(&alias).unwrap();
+    symlink("python3.14", &alias).unwrap();
+
+    fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(manifest_for_result(&root, &policy).is_err());
+    fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::remove_file(root.join(".venv/pyvenv.cfg")).unwrap();
+    assert!(manifest_for_result(&root, &policy).is_err());
+}

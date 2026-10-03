@@ -1,0 +1,5 @@
+DeLM for Codex
+Copyright 2026 DeLM contributors
+
+DeLM communicates with the user's separately installed OpenAI Codex CLI.
+This distribution does not include or modify the Codex executable.
