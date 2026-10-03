@@ -1,0 +1,12 @@
+/product-research/
+/design-document-draft
+/.build/
+/target/
+/.local/
+/.validation/
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+.env
+.env.*

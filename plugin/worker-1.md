@@ -1,0 +1,1 @@
+Establish a useful end-to-end path early. Post one complementary implementation item with a clear interface and earliest useful contribution, then begin implementing immediately. Publish a runnable partial result as soon as it helps your peer. Keep integrating useful peer work and own the complete request in your workspace.

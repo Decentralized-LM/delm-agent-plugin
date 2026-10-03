@@ -1,0 +1,9 @@
+{
+  "name": "delm-local",
+  "plugins": [
+    {
+      "name": "delm",
+      "source": {"source": "local", "path": "./.build/plugin"}
+    }
+  ]
+}

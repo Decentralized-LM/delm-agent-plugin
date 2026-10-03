@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec \"${PLUGIN_ROOT}/bin/delm\" lifecycle-hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec \"${PLUGIN_ROOT}/bin/delm\" lifecycle-hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec \"${PLUGIN_ROOT}/bin/delm\" lifecycle-hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec \"${PLUGIN_ROOT}/bin/delm\" lifecycle-hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

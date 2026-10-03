@@ -1,0 +1,468 @@
+"""Runtime packaging and real stock-plugin lifecycle tests in temporary CODEX_HOME."""
+
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+import build
+import install_support
+import package_release
+import publish_release
+
+
+SOURCE = Path(__file__).resolve().parent.parent
+CODEX = shutil.which("codex")
+
+
+def executable(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    path.chmod(0o755)
+
+
+def fixture_source(path):
+    for directory in (".codex-plugin", ".agents/plugins", "skills/run/agents", "hooks", "scripts"):
+        (path / directory).mkdir(parents=True, exist_ok=True)
+    for name in (".codex-plugin/plugin.json", ".agents/plugins/marketplace.json",
+                 "skills/run/agents/openai.yaml", "hooks/hooks.json", "Cargo.toml", "LICENSE", "NOTICE"):
+        shutil.copy2(SOURCE / name, path / name)
+    (path / "skills/run/SKILL.md").write_text("---\nname: run\ndescription: Run an explicitly requested DeLM task.\n---\nUse the bundled runtime.\n")
+    for name in ("install_support.py", "install.sh", "uninstall.sh", "migrate.sh", "build.py", "build.sh"):
+        shutil.copy2(SOURCE / "scripts" / name, path / "scripts" / name)
+    return path
+
+
+def fixture_package(source):
+    package = source / ".build/plugin"
+    package.mkdir(parents=True)
+    for name in (".codex-plugin", "skills", "hooks"):
+        shutil.copytree(source / name, package / name)
+    for name in ("LICENSE", "NOTICE"):
+        shutil.copy2(source / name, package / name)
+    executable(package / "bin/delm", "#!/bin/sh\necho 'delm fixture'\n")
+    return package
+
+
+@unittest.skipUnless(CODEX, "Existing stock Codex is required for isolated native plugin tests")
+class NativeInstallationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="delm native plugin fixtures ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.source = fixture_source(self.root / "source with spaces")
+        self.package = fixture_package(self.source)
+        self.codex_home = self.root / "isolated codex home"
+        self.codex_home.mkdir()
+        self.cwd = self.root / "unrelated working directory"
+        self.cwd.mkdir()
+        self.installation = install_support.Installation(self.source, self.codex_home, CODEX, self.cwd)
+        # These are fixtures inside the temporary home, never the user's account files.
+        (self.codex_home / "auth.json").write_text('{}\n')
+        (self.codex_home / "config.toml").write_text('model = "fixture-model"\n')
+        (self.root / "previous patched host").mkdir()
+        (self.root / "previous patched host/qualification.txt").write_text("preserve evidence")
+        (self.root / "results.txt").write_text("preserve results")
+
+    def invoke(self, operation, success=True):
+        result = subprocess.run([str(self.source / "scripts" / (operation + ".sh")),
+                                 "--no-build", "--codex", CODEX], cwd=self.cwd,
+                                env=dict(os.environ, CODEX_HOME=str(self.codex_home), PYTHONDONTWRITEBYTECODE="1"),
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
+        return result
+
+    def test_native_install_upgrade_uninstall_and_repeat_keep_unrelated_data(self):
+        self.invoke("install")
+        first = self.installation.receipt()
+        cached = Path(first["installed_path"])
+        self.assertTrue((cached / "bin/delm").is_file())
+        self.assertFalse((self.codex_home / "bin/codex-delm").exists())
+        executable(self.package / "bin/delm", "#!/bin/sh\necho updated-fixture\n")
+        self.invoke("install")
+        self.assertIn("updated-fixture", (cached / "bin/delm").read_text())
+        self.invoke("uninstall")
+        self.invoke("uninstall")
+        self.assertFalse(cached.exists())
+        self.assertNotIn("delm", (self.codex_home / "config.toml").read_text())
+        self.assertIn('model = "fixture-model"', (self.codex_home / "config.toml").read_text())
+        self.assertEqual((self.codex_home / "auth.json").read_text(), '{}\n')
+        self.assertEqual((self.root / "previous patched host/qualification.txt").read_text(), "preserve evidence")
+        self.assertEqual((self.root / "results.txt").read_text(), "preserve results")
+        self.assertTrue((self.package / "bin/delm").exists())
+
+    def test_modified_cached_files_are_preserved(self):
+        self.invoke("install")
+        cached = Path(self.installation.receipt()["installed_path"])
+        (cached / "user-note.txt").write_text("keep me")
+        self.assertIn("files changed", self.invoke("uninstall", success=False).stderr)
+        self.assertIn("files changed", self.invoke("install", success=False).stderr)
+        self.assertEqual((cached / "user-note.txt").read_text(), "keep me")
+        self.assertTrue(self.installation.installed(self.installation.marketplace()))
+
+    def test_install_refuses_staged_portable_manifest_that_disables_native_hooks(self):
+        (self.package / "plugin.json").write_text('{"name":"delm","version":"0.3.0"}')
+        self.assertIn("disables native hooks", self.invoke("install", success=False).stderr)
+        self.assertIsNone(self.installation.receipt())
+        self.assertIsNone(self.installation.marketplace())
+
+    def test_migration_requires_public_plugin_and_preserves_modified_local_cache(self):
+        self.invoke("install")
+        cached = Path(self.installation.receipt()["installed_path"])
+        (cached / "user-note.txt").write_text("preserve my changes")
+        self.invoke("migrate", success=False)
+        self.assertTrue(cached.exists())
+        public = self.root / "public catalog"
+        package_release.write_json(public / ".agents/plugins/marketplace.json", {
+            "name": "delm", "plugins": [{"name": "delm", "source": {
+                "source": "local", "path": "./plugin"}}]})
+        shutil.copytree(self.package, public / "plugin")
+        self.installation.native("marketplace", "add", str(public))
+        self.installation.native("add", "delm@delm")
+        self.invoke("migrate")
+        self.invoke("migrate")
+        receipt = self.installation.receipt()
+        archive = Path(receipt["preserved_path"])
+        self.assertEqual((archive / cached.name / "user-note.txt").read_text(), "preserve my changes")
+        self.assertFalse(cached.exists())
+        entries = self.installation.native("list", "--marketplace", "delm")["installed"]
+        self.assertEqual([entry["pluginId"] for entry in entries], ["delm@delm"])
+        self.assertEqual((self.root / "results.txt").read_text(), "preserve results")
+
+    def test_stock_app_server_discovers_skill_and_untrusted_hooks_without_a_model_turn(self):
+        output = self.invoke("install").stdout
+        self.assertIn("/hooks", output)
+        self.assertIn("does not grant hook trust", output)
+        process = subprocess.Popen([CODEX, "app-server"], cwd=self.cwd,
+                                   env=dict(os.environ, CODEX_HOME=str(self.codex_home)),
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+
+        def send(message):
+            process.stdin.write((json.dumps(message) + "\n").encode())
+            process.stdin.flush()
+
+        def response(request_id):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if not select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))[0]:
+                    break
+                line = process.stdout.readline()
+                if not line:
+                    break
+                message = json.loads(line)
+                if message.get("id") == request_id:
+                    self.assertNotIn("error", message)
+                    return message["result"]
+            self.fail(f"No stock app-server response for request {request_id}")
+
+        try:
+            send({"id": 1, "method": "initialize", "params": {
+                "clientInfo": {"name": "delm_plugin_test", "version": package_release.source_version(self.source)},
+                "capabilities": {"experimentalApi": True}}})
+            response(1)
+            send({"method": "initialized"})
+            send({"id": 2, "method": "skills/list", "params": {
+                "cwds": [str(self.cwd)], "forceReload": True}})
+            entries = response(2)["data"]
+            skills = [skill for entry in entries for skill in entry["skills"] if skill["name"] == "delm:run"]
+            self.assertEqual(len(skills), 1)
+            self.assertTrue(skills[0]["enabled"])
+            self.assertEqual(skills[0]["pluginId"], install_support.PLUGIN_ID)
+            self.assertEqual(Path(skills[0]["path"]), Path(self.installation.receipt()["installed_path"]) / "skills/run/SKILL.md")
+            send({"id": 3, "method": "hooks/list", "params": {"cwds": [str(self.cwd)]}})
+            entries = response(3)["data"]
+            self.assertTrue(all(not entry["errors"] for entry in entries), entries)
+            hooks = [hook for entry in entries for hook in entry["hooks"]
+                     if hook["pluginId"] == install_support.PLUGIN_ID]
+            expected = json.loads((self.package / "hooks/hooks.json").read_text())["hooks"]
+            expected_names = {name[0].lower() + name[1:] for name in expected}
+            self.assertEqual({hook["eventName"] for hook in hooks}, expected_names, entries)
+            self.assertEqual(len(hooks), sum(len(group["hooks"]) for groups in expected.values() for group in groups))
+            for hook in hooks:
+                self.assertEqual(hook["source"], "plugin")
+                self.assertEqual(hook["trustStatus"], "untrusted")
+                self.assertTrue(hook["enabled"])
+                self.assertTrue(hook["currentHash"])
+                self.assertEqual(Path(hook["sourcePath"]), Path(self.installation.receipt()["installed_path"]) / "hooks/hooks.json")
+                self.assertIn("lifecycle-hook", hook["command"])
+            self.assertNotIn("trusted_hash", (self.codex_home / "config.toml").read_text())
+            # Model an explicit /hooks approval in this disposable home using
+            # the same native config write as Codex's hook-review UI.
+            send({"id": 4, "method": "config/batchWrite", "params": {
+                "edits": [{"keyPath": "hooks.state", "mergeStrategy": "upsert", "value": {
+                    hook["key"]: {"trusted_hash": hook["currentHash"]} for hook in hooks}}],
+                "reloadUserConfig": True}})
+            response(4)
+            send({"id": 5, "method": "hooks/list", "params": {"cwds": [str(self.cwd)]}})
+            trusted = [hook for entry in response(5)["data"] for hook in entry["hooks"]
+                       if hook["pluginId"] == install_support.PLUGIN_ID]
+            self.assertEqual(len(trusted), len(hooks))
+            self.assertTrue(all(hook["trustStatus"] == "trusted" for hook in trusted), trusted)
+        finally:
+            process.stdin.close()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5)
+            process.stdout.close()
+
+    def test_foreign_marketplace_is_not_replaced_or_removed(self):
+        foreign = fixture_source(self.root / "other source")
+        fixture_package(foreign)
+        self.installation.native("marketplace", "add", str(foreign))
+        before = (self.codex_home / "config.toml").read_bytes()
+        self.assertIn("another source", self.invoke("install", success=False).stderr)
+        self.invoke("uninstall")
+        self.assertEqual((self.codex_home / "config.toml").read_bytes(), before)
+
+    def test_uninstall_retains_preexisting_same_source_marketplace(self):
+        self.installation.native("marketplace", "add", str(self.source))
+        self.invoke("install")
+        self.assertFalse(self.installation.receipt()["owns_marketplace"])
+        self.invoke("uninstall")
+        self.assertIsNotNone(self.installation.marketplace())
+        self.assertFalse(self.installation.installed(self.installation.marketplace()))
+
+    def test_install_refuses_preexisting_plugin_without_our_receipt(self):
+        self.installation.native("marketplace", "add", str(self.source))
+        outcome = self.installation.native("add", install_support.PLUGIN_ID)
+        self.assertIn("outside this installer", self.invoke("install", success=False).stderr)
+        self.invoke("uninstall")
+        self.assertTrue(Path(outcome["installedPath"]).exists())
+
+    def test_failed_native_plugin_add_can_be_cleaned_up(self):
+        (self.package / ".codex-plugin/plugin.json").write_text('{"name":"mismatched-plugin"}')
+        self.invoke("install", success=False)
+        self.assertIsNotNone(self.installation.receipt())
+        self.invoke("uninstall")
+        self.assertIsNone(self.installation.marketplace())
+
+    def test_failed_upgrade_retains_previous_cache_receipt(self):
+        self.invoke("install")
+        before = self.installation.receipt()
+        (self.package / ".codex-plugin/plugin.json").write_text('{"name":"mismatched-plugin"}')
+        self.invoke("install", success=False)
+        self.assertEqual(self.installation.receipt()["files"], before["files"])
+        self.assertEqual(self.installation.receipt()["installed_path"], before["installed_path"])
+        self.invoke("uninstall")
+
+    def test_reinstall_does_not_claim_a_new_preexisting_marketplace(self):
+        self.invoke("install")
+        self.invoke("uninstall")
+        self.installation.native("marketplace", "add", str(self.source))
+        self.invoke("install")
+        self.assertFalse(self.installation.receipt()["owns_marketplace"])
+        self.invoke("uninstall")
+        self.assertIsNotNone(self.installation.marketplace())
+
+
+class BuildTests(unittest.TestCase):
+    def test_release_package_has_pinned_catalog_integrity_and_no_source_artifacts(self):
+        with tempfile.TemporaryDirectory(prefix="delm release fixture ") as temporary:
+            source = fixture_source(Path(temporary) / "source")
+            runtime = Path(temporary) / "delm"
+            version = package_release.source_version(source)
+            executable(runtime, f"#!/bin/sh\necho 'delm {version}'\n")
+            (source / "skills/run/local-notes.txt").write_text("never ship local notes")
+            output = Path(temporary) / "release"
+            real_run = subprocess.run
+
+            def run(command, **kwargs):
+                if command[0] == "lipo":
+                    return subprocess.CompletedProcess(command, 0)
+                return real_run(command, **kwargs)
+
+            with mock.patch.object(package_release.subprocess, "run", side_effect=run):
+                package_release.assemble(source, runtime, output, "example/delm", "a" * 40)
+            package_release.verify(output)
+            catalog = json.loads((output / ".agents/plugins/marketplace.json").read_text())
+            self.assertEqual(catalog["name"], "delm")
+            self.assertEqual(catalog["plugins"][0]["source"]["ref"], f"delm-plugin-v{version}")
+            self.assertEqual(set(path.name for path in (output / "plugins/delm").iterdir()),
+                             {"bin", "skills", "hooks", ".codex-plugin", "LICENSE", "NOTICE"})
+            self.assertEqual((output / "plugins/delm/bin/delm").stat().st_mode & 0o777, 0o755)
+            self.assertFalse((output / "plugins/delm/skills/run/local-notes.txt").exists())
+            metadata = json.loads((output / "release.json").read_text())
+            self.assertIn("hooks/hooks.json", metadata["files"])
+            self.assertIn("plugins/delm/hooks/hooks.json", (output / "SHA256SUMS").read_text())
+            (output / "plugins/delm/extra.txt").write_text("unexpected")
+            with self.assertRaisesRegex(RuntimeError, "changed"):
+                package_release.verify(output)
+
+    def test_release_refuses_mismatched_versions_and_existing_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = fixture_source(Path(temporary) / "source")
+            (source / ".codex-plugin/plugin.json").write_text('{"name":"delm","version":"99.0.0"}')
+            with self.assertRaisesRegex(RuntimeError, "must identify"):
+                package_release.source_version(source)
+            with self.assertRaisesRegex(RuntimeError, "preserving"):
+                package_release.assemble(source, Path("missing"), source, "example/delm", "a" * 40)
+
+    def test_only_runtime_is_built_and_previous_package_is_preserved(self):
+        with tempfile.TemporaryDirectory(prefix="delm runtime build fixture ") as temporary:
+            source = fixture_source(Path(temporary) / "source")
+            old = fixture_package(source)
+            (old / "qualification.txt").write_text("keep previous evidence")
+            commands = []
+
+            def run(command, **kwargs):
+                commands.append(command)
+                if command[0] == "cargo":
+                    target = Path(command[command.index("--target-dir") + 1])
+                    executable(target / "release/delm", "#!/bin/sh\necho delm-runtime-fixture\n")
+                return subprocess.CompletedProcess(command, 0)
+
+            with mock.patch.object(build.subprocess, "run", side_effect=run), mock.patch.object(build.shutil, "which", return_value="cargo"), contextlib.redirect_stdout(io.StringIO()):
+                build.build(source)
+            self.assertEqual(len(commands), 2)
+            self.assertEqual(commands[0][:7], ["cargo", "build", "--locked", "--release", "--bin", "delm", "--manifest-path"])
+            self.assertEqual(set(path.name for path in (source / ".build/plugin/bin").iterdir()), {"delm"})
+            self.assertEqual(len(list((source / ".build").glob("plugin-previous.*/qualification.txt"))), 1)
+            self.assertFalse((source / ".build/plugin/host").exists())
+            self.assertFalse((source / ".build/plugin/qualification.txt").exists())
+
+    def test_publication_uses_only_distribution_tree_and_never_replaces_a_tag(self):
+        with tempfile.TemporaryDirectory(prefix="delm publishing fixture ") as temporary:
+            root = Path(temporary).resolve()
+            source = fixture_source(root / "source")
+            remote = root / "remote.git"
+
+            def git(*args, cwd=source):
+                return subprocess.check_output(["git", *args], cwd=cwd, text=True,
+                                               stderr=subprocess.DEVNULL).strip()
+
+            git("init", "-b", "main")
+            git("config", "user.name", "DeLM fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            git("add", ".")
+            git("commit", "-m", "Fixture source")
+            revision = git("rev-parse", "HEAD")
+            git("init", "--bare", str(remote))
+            git("remote", "add", "origin", str(remote))
+            runtime = root / "delm"
+            version = package_release.source_version(source)
+            executable(runtime, f"#!/bin/sh\necho 'delm {version}'\n")
+            output = root / "release"
+            real_run = subprocess.run
+
+            def run(command, **kwargs):
+                if command[0] == "lipo":
+                    return subprocess.CompletedProcess(command, 0)
+                return real_run(command, **kwargs)
+
+            with mock.patch.object(package_release.subprocess, "run", side_effect=run):
+                package_release.assemble(source, runtime, output, "example/delm", revision, signed=True)
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(source)
+                with mock.patch.dict(os.environ, GITHUB_ACTIONS="true", RUNNER_TEMP=str(root)), \
+                     mock.patch.object(publish_release, "verify_identity"), \
+                     mock.patch.object(sys, "argv", ["publish_release.py", str(output)]):
+                    publish_release.main()
+                    with self.assertRaisesRegex(SystemExit, "already exists"):
+                        publish_release.main()
+            finally:
+                os.chdir(previous_cwd)
+            self.assertEqual(git("rev-parse", "HEAD"), revision)
+            self.assertEqual(git("status", "--porcelain"), "")
+            files = set(git("ls-tree", "-r", "--name-only", "marketplace", cwd=remote).splitlines())
+            self.assertEqual(files, set(install_support.package_files(output)))
+            self.assertEqual(git("rev-parse", "marketplace", cwd=remote),
+                             git("rev-parse", f"refs/tags/delm-plugin-v{version}", cwd=remote))
+
+
+@unittest.skipUnless(CODEX and shutil.which("git"), "Stock Codex and Git required")
+class NativeReleaseTests(unittest.TestCase):
+    def test_git_marketplace_version_upgrade_failure_and_removal(self):
+        with tempfile.TemporaryDirectory(prefix="delm git release ") as temporary:
+            root = Path(temporary).resolve()
+            source = fixture_source(root / "source")
+            repository = root / "release repository"
+            repository.mkdir()
+            package = repository / "plugins/delm"
+            fixture = fixture_package(source)
+            shutil.copytree(fixture, package)
+            home = root / "codex home"
+            home.mkdir()
+            (home / "config.toml").write_text('model = "fixture-model"\n')
+            (home / "auth.json").write_text('{}\n')
+            retained = home / "delm/runs/example/result.txt"
+            retained.parent.mkdir(parents=True)
+            retained.write_text("saved result")
+            git_config = root / "isolated git config"
+            # Exercise Codex's real HTTPS Git path while redirecting transport to
+            # a local fixture. No network, account, or real Git settings are used.
+            url = "https://github.com/delm-test-fixture/release.git"
+            subprocess.run(["git", "config", "--file", str(git_config),
+                            f"url.{repository.as_uri()}.insteadOf", url], check=True)
+            environment = dict(os.environ, CODEX_HOME=str(home),
+                               GIT_CONFIG_GLOBAL=str(git_config), GIT_CONFIG_NOSYSTEM="1")
+
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=repository, env=environment,
+                                      text=True, capture_output=True, check=True)
+
+            def native(*args, success=True):
+                result = subprocess.run([CODEX, "plugin", *args, "--json"], cwd=root,
+                                        env=environment, text=True, capture_output=True)
+                self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
+                return json.loads(result.stdout) if success else result
+
+            def release(version, broken=False):
+                manifest = json.loads((package / ".codex-plugin/plugin.json").read_text())
+                manifest["version"] = version
+                manifest["name"] = "wrong-name" if broken else "delm"
+                package_release.write_json(package / ".codex-plugin/plugin.json", manifest)
+                executable(package / "bin/delm", f"#!/bin/sh\necho 'delm {version}'\n")
+                package_release.write_json(repository / ".agents/plugins/marketplace.json", {
+                    "name": "delm", "plugins": [{"name": "delm", "source": {
+                        "source": "git-subdir", "url": url, "path": "./plugins/delm",
+                        "ref": f"delm-plugin-v{version}"}}]})
+                git("add", ".")
+                git("commit", "-m", f"Release {version}")
+                git("tag", f"delm-plugin-v{version}")
+
+            git("init", "-b", "marketplace")
+            git("config", "user.email", "fixture@example.invalid")
+            git("config", "user.name", "DeLM fixture")
+            release("0.2.1")
+            native("marketplace", "add", url, "--ref", "marketplace")
+            first = native("add", "delm@delm")
+            first_path = Path(first["installedPath"])
+            self.assertTrue((first_path / "bin/delm").is_file())
+            repeated = native("add", "delm@delm")
+            self.assertEqual(repeated["installedPath"], str(first_path))
+            release("0.2.2")
+            native("marketplace", "upgrade", "delm")
+            upgraded = native("add", "delm@delm")
+            upgraded_path = Path(upgraded["installedPath"])
+            self.assertNotEqual(first_path, upgraded_path)
+            self.assertEqual(subprocess.check_output([str(upgraded_path / "bin/delm")], text=True).strip(),
+                             "delm 0.2.2")
+            release("0.2.3", broken=True)
+            native("marketplace", "upgrade", "delm", success=False)
+            native("add", "delm@delm", success=False)
+            self.assertTrue((upgraded_path / "bin/delm").exists())
+            native("remove", "delm@delm")
+            native("remove", "delm@delm")
+            self.assertFalse(upgraded_path.exists())
+            self.assertEqual(retained.read_text(), "saved result")
+            self.assertEqual((home / "auth.json").read_text(), '{}\n')
+            self.assertIn('model = "fixture-model"', (home / "config.toml").read_text())
+            self.assertEqual(native("list", "--marketplace", "delm")["installed"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

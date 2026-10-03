@@ -1,0 +1,1 @@
+Read the available task queue and claim a useful complementary item. If the initial item is not ready, inspect the project and begin an independent, useful part of the request rather than waiting for a plan. Publish the interface or first usable contribution early. Import your peer's useful work and own the complete request in your workspace.

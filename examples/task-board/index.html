@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task board</title>
+<style>
+  :root { color-scheme: light dark; font: 17px/1.5 system-ui, sans-serif; }
+  body { max-width: 38rem; margin: 4rem auto; padding: 0 1rem; }
+  h1 { margin-bottom: .25rem; font-size: 2rem; }
+  p { color: #777; }
+  form, li { display: flex; gap: .75rem; align-items: center; }
+  input[type=text] { flex: 1; min-width: 0; }
+  input, button { font: inherit; padding: .5rem .75rem; }
+  button { cursor: pointer; }
+  ul { list-style: none; padding: 0; }
+  li { padding: .8rem 0; border-bottom: 1px solid #8884; }
+  li label { flex: 1; }
+  li[data-complete=true] label { text-decoration: line-through; color: #777; }
+</style>
+<h1>Task board</h1>
+<p>A small place to keep track of your work.</p>
+<form id="add-task">
+  <input id="title" type="text" required maxlength="200" placeholder="Add a task" aria-label="New task">
+  <button>Add</button>
+</form>
+<ul id="tasks" aria-label="Tasks"></ul>
+<script src="task.js"></script>
+<script src="app.js"></script>
+</html>

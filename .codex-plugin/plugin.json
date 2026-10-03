@@ -1,0 +1,7 @@
+{
+  "name": "delm",
+  "version": "0.3.0",
+  "description": "Run a task with two isolated Codex workers that share progress through DeLM.",
+  "skills": "./skills",
+  "hooks": "./hooks/hooks.json"
+}

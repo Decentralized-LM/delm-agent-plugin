@@ -1,0 +1,3 @@
+pub const MAX_REPO_SIZE_BYTES: u64 = 10_000_000_000;
+pub const DEFAULT_RUN_SECONDS: u64 = 30 * 60;
+pub const PREPARATION_SECONDS: u64 = 60;
