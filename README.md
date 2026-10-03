@@ -26,6 +26,12 @@ DeLM brings two collaborating agents to your existing Codex conversation. They c
 
 Invoke **`$delm:run`** when you want them to work together. DeLM uses your Codex account and stays inactive until you ask.
 
+<p align="center">
+  <a href="video-demo/renders/delm-demo.mp4"><img src="video-demo/renders/poster.png" alt="Watch DeLM for Codex: two agents building and sharing their work" width="800"></a>
+  <br>
+  <a href="video-demo/renders/delm-demo.mp4">Watch the 56-second demo</a>
+</p>
+
 ## Install on macOS
 
 The plugin currently installs from source through Codex's native plugin manager. Prebuilt releases have not yet been published.

@@ -1,0 +1,578 @@
+@font-face {
+  font-family: Geist;
+  src: url("../assets/fonts/Geist-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-display: block;
+}
+@font-face {
+  font-family: Geist;
+  src: url("../assets/fonts/Geist-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-display: block;
+}
+@font-face {
+  font-family: Geist;
+  src: url("../assets/fonts/Geist-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-display: block;
+}
+
+* {
+  box-sizing: border-box;
+}
+@font-face {
+  font-family: "Codex Mono";
+  src: url("../.cache/fonts/SF-Mono-Regular.otf") format("opentype");
+  font-weight: 400;
+  font-display: block;
+}
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #f5f5f2;
+}
+body {
+  font-family: Geist, sans-serif;
+  color: #181a20;
+  -webkit-font-smoothing: antialiased;
+}
+#film {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+}
+.paper {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse at 48% 10%,
+    #fff 0%,
+    #f8f8f5 50%,
+    #eceeec 100%
+  );
+}
+.blue {
+  color: #315ee8;
+}
+.muted {
+  color: #74777d;
+}
+.scene {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+}
+.opening-title {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 155px;
+  text-align: center;
+  font-size: 82px;
+  line-height: 1.12;
+  font-weight: 500;
+  letter-spacing: -4.4px;
+  opacity: 0;
+}
+.opening-title span {
+  color: #315ee8;
+}
+.install-copy {
+  position: absolute;
+  left: 643px;
+  top: 235px;
+  display: flex;
+  align-items: center;
+  gap: 36px;
+  height: 78px;
+  padding: 0 24px 0 30px;
+  background: white;
+  border: 1px solid #d9dce2;
+  border-radius: 13px;
+  box-shadow: 0 5px 14px #242a3610;
+  opacity: 0;
+  font:
+    27px "Codex Mono",
+    monospace;
+}
+.copy-icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+.copy-icon svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: #656b75;
+  stroke-width: 1.7;
+}
+.copy-command {
+  letter-spacing: -1px;
+}
+#installer-rig {
+  position: absolute;
+  left: 320px;
+  top: 300px;
+  width: 1280px;
+  height: 610px;
+  transform-style: flat;
+}
+
+.window {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border: 1px solid #d7d8d9;
+  border-radius: 15px;
+  overflow: hidden;
+  background: #fff;
+  box-shadow:
+    0 55px 80px -35px #1723374d,
+    0 12px 25px -14px #10172635,
+    0 2px 3px #ffffff;
+  transform-origin: 50% 50%;
+}
+.window-bar {
+  height: 62px;
+  background: linear-gradient(#fafaf9, #f1f1ef);
+  border-bottom: 1px solid #e1e2e3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  color: #6a6b6e;
+  font-size: 21px;
+}
+.traffic {
+  display: flex;
+  gap: 10px;
+  width: 88px;
+}
+.traffic i {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #ff6059;
+  border: 1px solid #00000013;
+}
+.traffic i:nth-child(2) {
+  background: #ffbd2e;
+}
+.traffic i:nth-child(3) {
+  background: #28c940;
+}
+.bar-spacer {
+  width: 88px;
+}
+.terminal-content {
+  position: absolute;
+  inset: 62px 0 0;
+  padding: 50px 60px;
+  font:
+    35px/1.6 "Codex Mono",
+    monospace;
+  letter-spacing: -1.3px;
+}
+.shell-command {
+  display: flex;
+  align-items: center;
+  gap: 17px;
+  font-size: inherit;
+  letter-spacing: 0;
+}
+.shell-tilde {
+  color: #397f66;
+}
+.shell-dollar {
+  color: #545960;
+}
+.caret {
+  display: inline-block;
+  width: 22px;
+  height: 43px;
+  background: #282e37;
+  vertical-align: -7px;
+  margin-left: 4px;
+}
+.install-output {
+  font-size: inherit;
+  margin-top: 26px;
+  opacity: 0;
+}
+.install-step { opacity: 0; line-height: inherit; }
+.install-step > span { color: #397f66; margin-right: 0; }
+
+.codex-screen {
+  opacity: 0;
+  padding: 28px 32px 23px;
+  display: flex;
+  flex-direction: column;
+  font-size: 29px;
+  letter-spacing: -0.9px;
+}
+.codex-header {
+  border: 1px solid #bcc2c9;
+  border-radius: 12px;
+  width: 655px;
+  padding: 17px 24px;
+  font-size: 24px;
+  line-height: 1.6;
+  flex: 0 0 auto;
+  margin-left: 14px;
+}
+.codex-header strong {
+  font-weight: 400;
+}
+.codex-directory {
+  font-size: 23px;
+  padding-top: 8px;
+}
+.composer {
+  display: flex;
+  gap: 18px;
+  padding: 15px 21px;
+  min-height: 76px;
+  background: #eef0f2;
+  font-size: 32px;
+  line-height: 1.45;
+}
+.prompt-chevron {
+  color: #585c64;
+}
+.skill-mention {
+  color: #285cd9;
+}
+.codex-screen .caret {
+  height: 32px;
+  width: 17px;
+  vertical-align: -5px;
+}
+.codex-response {
+  display: flex;
+  gap: 23px;
+  font-size: 26px;
+  margin-top: 22px;
+  opacity: 0;
+  line-height: 1.4;
+}
+.codex-response > span {
+  color: #626a75;
+}
+
+.section-heading {
+  position: absolute;
+  top: 70px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 64px;
+  letter-spacing: -3.2px;
+  line-height: 1.13;
+  font-weight: 500;
+}
+.section-heading span {
+  color: #315ee8;
+}
+.section-heading p {
+  font-size: 29px;
+  letter-spacing: -0.7px;
+  font-weight: 400;
+  color: #6b7280;
+  margin: 22px 0;
+}
+#browser-rig {
+  position: absolute;
+  left: 192px;
+  top: 240px;
+  width: 1536px;
+  height: 770px;
+  opacity: 0;
+}
+.browser {
+  border-color: #393d4b;
+  background: #080d1c;
+  border-radius: 13px;
+}
+.browser-bar {
+  height: 50px;
+  background: #f4f4f2;
+  padding: 0 20px;
+}
+.browser-bar .traffic i {
+  width: 12px;
+  height: 12px;
+}
+.address {
+  height: 31px;
+  width: 660px;
+  background: #e6e7e5;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 17px;
+  color: #575d66;
+}
+.address svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: #737d88;
+  stroke-width: 1.4;
+}
+#game-footage {
+  display: block;
+  width: 100%;
+  height: calc(100% - 50px);
+  object-fit: cover;
+  object-position: center;
+}
+.result-footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 46px;
+  text-align: center;
+  color: #6e7783;
+  font-size: 26px;
+  opacity: 0;
+}
+.closing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 340px;
+}
+#closing-title {
+  font-size: 98px;
+  line-height: 1.05;
+  font-weight: 500;
+  letter-spacing: -5.5px;
+  text-align: center;
+  margin: 0;
+}
+#closing-command {
+  font:
+    31px "Codex Mono",
+    monospace;
+  letter-spacing: -1.2px;
+  background: #fff;
+  border: 1px solid #dce0e7;
+  border-radius: 10px;
+  box-shadow: 0 8px 18px -8px #132a5420;
+  padding: 22px 33px;
+  color: #315ee8;
+}
+#closing-command > span {
+  color: #8892a2;
+  margin-right: 10px;
+}
+.closing-caret {
+  display: inline-block;
+  height: 30px;
+  width: 14px;
+  background: #315ee8;
+  vertical-align: -5px;
+  margin-left: 4px;
+}
+#pointer {
+  position: absolute;
+  width: 38px;
+  height: 47px;
+  top: 0;
+  left: 0;
+  filter: drop-shadow(0 3px 2px #0003);
+  z-index: 50;
+  opacity: 0;
+}
+/* The result retains the captured browser's 16:9 viewport. */
+#browser-rig {
+  top: 155px;
+  height: 914px;
+}
+.result-footer {
+  display: none;
+}
+
+.install-copy {
+  left: 0;
+  right: 0;
+  width: max-content;
+  margin-inline: auto;
+}
+
+
+#installer {
+  border-color: #d5d9df;
+  box-shadow: 0 32px 65px -34px #18283a38, 0 5px 14px -7px #18283a20;
+  background: #fff;
+}
+.codex-conversation {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-top: 26px;
+}
+.submitted-request {
+  display: flex;
+  gap: 18px;
+  background: #f2f3f5;
+  padding: 15px 21px;
+  font-size: 29px;
+  line-height: 1.6;
+  opacity: 0;
+}
+.codex-input-area { flex: 0 0 auto; }
+.input-text { position: relative; flex: 1; }
+#prompt-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  color: #8a9098;
+  pointer-events: none;
+}
+.codex-statusline {
+  padding: 8px 20px 0;
+  font-size: 25px;
+  line-height: 1.45;
+  color: #8a6822;
+}
+.project-directory { color: #407953; }
+.status-separator, .codex-shortcuts { color: #7a7f87; }
+.codex-shortcuts { padding: 0 20px; font-size: 23px; line-height: 1.45; }
+#closing-title .closing-line { display: inline-block; color: #181a20; }
+#closing-with { position: relative; margin: 18px 0 72px; font: 500 98px/1.05 Geist, sans-serif; letter-spacing: -5.5px; white-space: pre; }
+.closing-with-size { visibility: hidden; }
+.closing-with-text { position: absolute; inset: 0; }
+#closing-with-fast, #closing-with-brand { color: #315ee8; }
+#closing-with-caret { display: none; width: 3px; height: 83px; background: #315ee8; margin-left: 8px; vertical-align: -10px; }
+
+/* Shared resources stay between the peers, making the data flow visible. */
+.task-queue, .context-strip {
+  position: absolute;
+  left: 670px;
+  width: 580px;
+  padding: 24px;
+  background: #fff;
+  border: 1.7px solid #40444c;
+  border-radius: 20px;
+  box-shadow: none;
+  opacity: 0;
+}
+.context-strip { top: 220px; height: 374px; }
+.task-queue { top: 624px; height: 324px; }
+.context-label, .queue-heading {
+  font-size: 32px;
+  font-weight: 500;
+  color: #17191d;
+  line-height: 38px;
+  letter-spacing: -.5px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e0e3e8;
+  margin-bottom: 5px;
+}
+.queue-heading { display: flex; justify-content: space-between; align-items: center; }
+.context-label { padding-bottom: 10px; }
+.context-post {
+  padding: 11px 14px;
+  margin-top: 7px;
+  height: 82px;
+  background: #f5f4f0;
+  border: 0;
+  border-radius: 10px;
+}
+.post-text { font-size: 26px; font-weight: 500; line-height: 30px; letter-spacing: -.5px; color: #17191d; }
+.post-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 5px; }
+.context-attachment { font: 21px "Codex Mono", monospace; color: #666b74; }
+.post-author { font-size: 21px; color: #666b74; }
+#context-audio, #context-fix { opacity: 0; }
+.queue-items { display: grid; gap: 7px; }
+.queue-item {
+  display: flex;
+  align-items: center;
+  height: 48px;
+  padding: 0 12px;
+  background: #f5f4f0;
+  border: 0;
+  border-radius: 8px;
+  font-size: 25px;
+  letter-spacing: -.5px;
+}
+.queue-number { flex: 0 0 34px; font: 19px "Codex Mono", monospace; color: #666b74; }
+.queue-task { flex: 1; font-weight: 500; color: #17191d; }
+.queue-owner { flex: 0 0 auto; margin-left: 10px; font-size: 21px; color: #315ee8; letter-spacing: -.5px; }
+#queue-integration, #queue-checks { opacity: 0; }
+#worker-checks { font-size: 18px; font-weight: 400; color: #315ee8; opacity: 0; }
+.worker-window {
+  top: 340px;
+  width: 500px;
+  height: 570px;
+  border-color: #cfd5df;
+  border-radius: 16px;
+  box-shadow: 0 18px 35px -28px #192a4930;
+  opacity: 0;
+}
+#worker-left { left: 90px; }
+#worker-right { left: 1330px; }
+.worker-window .window-bar { height: 52px; padding: 0 27px; background: #f8f8f6; }
+.worker-name { font: 23px "Codex Mono", monospace; color: #253247; }
+.worker-body { padding: 27px; }
+.worker-role { font-size: 27px; font-weight: 500; color: #252e3c; margin-bottom: 27px; letter-spacing: -.6px; }
+.worker-file { font: 20px "Codex Mono", monospace; color: #315ee8; }
+.tool-bullet { color: #7a838f; }
+.feature-code { height: 64px; margin: 19px 0 0; font: 20px/1.55 "Codex Mono", monospace; letter-spacing: -.7px; color: #536071; white-space: pre; }
+.worker-detail { font-size: 21px; line-height: 1.5; color: #626d7d; margin-top: 12px; }
+.feature-preview { position: absolute; left: 27px; right: 27px; bottom: 27px; opacity: 0; }
+.preview-label { font-size: 20px; color: #637080; margin: 0 0 12px; }
+.feature-preview canvas { display: block; width: 444px; height: 142px; border-radius: 7px; }
+#transfer-route { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
+#transfer-label text { font: 18px Geist, sans-serif; fill: #315ee8; }
+
+#installer .window-bar { height: 50px; font-size: 19px; }
+#installer > .window-bar { position: relative; }
+#worker-morph { position: absolute; inset: 62px 0 0; opacity: 0; }
+#worker-morph-caption { position: absolute; left: 27px; top: 50%; transform: translateY(-50%); opacity: 0; }
+#installer .terminal-content { inset: 50px 0 0; }
+#installer #install-screen { padding: 32px 42px; font: 26px/1.5 "Codex Mono", monospace; letter-spacing: 0; }
+#installer #codex-screen { padding: 28px 32px 23px; }
+#installer .shell-command { gap: 15.6px; }
+#installer .caret { width: 15.6px; height: 29px; margin: 0; vertical-align: -5px; }
+#install-open { margin-top: 20px; opacity: 0; }
+
+.result-contributions { position: absolute; top: 85px; left: 192px; width: 1536px; display: flex; justify-content: space-around; opacity: 0; font-size: 27px; color: #333d4d; }
+.result-contributions span { color: #315ee8; margin-right: 17px; }
+
+#copied-glyph { opacity: 0; stroke: #315ee8; stroke-width: 2; }
+
+.install-logo {
+  height: 130px;
+  font: inherit;
+  line-height: 1;
+  letter-spacing: 0;
+  color: #315ee8;
+  margin: 0 0 22px;
+  white-space: pre;
+}
+
+#collaboration .section-heading { top: 104px; font-size: 52px; font-weight: 500; letter-spacing: -1.7px; }
+#collab-subtitle { display: none; }
+
+
+#codex-screen, #codex-screen .codex-header, #codex-screen .codex-directory, #codex-screen .composer, #codex-screen .submitted-request, #codex-screen .codex-response, #codex-screen .codex-statusline { font-size: 26px; line-height: 1.5; letter-spacing: 0; }
+
+#cover-title { position: absolute; inset: 0; padding-bottom: 76px; display: flex; align-items: center; justify-content: center; gap: 28px; font: 500 112px/1.1 Geist, sans-serif; letter-spacing: -5px; white-space: nowrap; }
+#cover-title span { color: #315ee8; }
+.transfer-route { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.transfer-label text { font: 18px Geist, sans-serif; fill: #315ee8; }
+
+/* The finished project remains in a browser window, without a game-camera zoom. */
+#browser-rig { left: 320px; top: 235px; width: 1280px; height: 770px; }
+.result-contributions { top: 150px; left: 320px; width: 1280px; }
+
+/* The install command belongs to the title card. The terminal types it next. */
+#install-copy { top: 612px; opacity: 1; }

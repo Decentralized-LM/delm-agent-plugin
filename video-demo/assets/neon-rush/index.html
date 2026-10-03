@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#080d1c">
+  <meta name="description" content="One cube. One minute. All momentum. Neon Rush is a hand-crafted synthwave precision platformer.">
+  <title>NEON RUSH — Find your flow</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect x='5' y='5' width='30' height='30' rx='3' fill='%2345edff'/%3E%3Cpath d='M12 28V12h5l6 10V12h5v16h-5l-6-10v10' fill='%23080d1c'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="js/core.js"></script>
+  <script defer src="js/audio.js"></script>
+  <script defer src="js/renderer.js"></script>
+  <script defer src="js/game.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <a class="brand" href="#" id="brand" aria-label="Neon Rush home"><span class="brand-icon" aria-hidden="true">N</span><span>NEON<span class="brand-light">RUSH</span></span></a>
+      <div class="edition"><span class="tiny-cross">+</span> AN ARCADE AFTER DARK <span class="edition-number">VOL. 001</span></div>
+      <div class="header-actions">
+        <span class="sound-status"><span class="status-dot"></span><span id="sound-status">SOUND ON</span></span>
+        <button class="icon-button" id="settings-button" aria-label="Open sound settings" title="Sound settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h4l5-4v16l-5-4H4zM17 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></svg></button>
+        <button class="icon-button pause-button" id="pause-button" aria-label="Pause game" title="Pause (Escape)" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg></button>
+      </div>
+    </header>
+
+    <main class="stage is-menu" id="stage">
+      <canvas id="game-canvas" aria-label="Neon Rush game. Space, click, or tap to jump. Hold to jump on landing." tabindex="0"></canvas>
+      <div class="stage-vignette" aria-hidden="true"></div>
+      <span class="corner corner-tl" aria-hidden="true"></span><span class="corner corner-br" aria-hidden="true"></span>
+
+      <section class="title-screen screen" id="title-screen" aria-labelledby="title">
+        <div class="title-copy">
+          <div class="eyebrow"><span class="live-diamond"></span> FIND YOUR FLOW</div>
+          <h1 id="title">NEON<br><span>RUSH</span><i aria-hidden="true">↗</i></h1>
+          <p class="tagline">One cube. One minute.<br><strong>All momentum.</strong></p>
+          <div class="play-row"><button class="button primary" id="play-button" aria-label="Play Neon Rush"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 3 11 7-11 7Z"/></svg>LET’S RUSH<span class="button-arrow" aria-hidden="true">↗</span></button><span class="play-hint">PRESS <kbd>SPACE</kbd><br>OR TAP TO START</span></div>
+          <p class="title-controls"><span>SPACE / CLICK / TAP</span> to jump <b>·</b> hold to keep jumping</p>
+        </div>
+        <div class="level-chip"><span class="chip-line"></span><div><span class="mono muted">YOUR NEXT OBSESSION</span><strong>01 / AFTERGLOW</strong></div></div>
+        <div class="title-bottom">
+          <div class="track-credit"><span class="equalizer" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span><div><strong>AFTERGLOW</strong><span>ORIGINAL SYNTHWAVE SCORE</span></div></div>
+          <div class="title-stats"><div><strong>140<span>BPM</span></strong><small>FEEL THE BEAT</small></div><div><strong>60<span>SEC</span></strong><small>CHASE THE FINISH</small></div><div class="best-stat"><strong id="title-best">0<span>%</span></strong><small>PERSONAL BEST</small></div></div>
+        </div>
+      </section>
+
+      <div class="game-hud" id="game-hud" hidden>
+        <div class="attempt-stat"><span class="hud-label">ATTEMPT</span><strong id="attempt">01</strong></div>
+        <div class="progress-group"><div class="progress-labels"><span id="section-name">01 / FIRST LIGHT</span><strong id="progress-text">0<span>%</span></strong></div><div class="progress-track" role="progressbar" aria-label="Level progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-bar"><div id="progress-fill"></div><i style="left:22.85%"></i><i style="left:45.71%"></i><i style="left:68.57%"></i><i style="left:88.57%"></i></div><div class="progress-meta"><span>AFTERGLOW</span><span id="hud-best">BEST 0%</span></div></div>
+        <div class="bpm-stat"><span class="beat-dot"></span><strong>140</strong><span class="hud-label">BPM</span></div>
+      </div>
+      <div class="game-tip" id="game-tip" hidden><kbd>SPACE</kbd><span>CLICK / TAP TO JUMP <b>·</b> HOLD TO REPEAT</span></div>
+      <div class="section-toast" id="section-toast" aria-hidden="true"></div>
+      <div class="retry-notice" id="retry-notice" hidden>BACK INTO THE FLOW <span id="death-progress">0%</span></div>
+
+      <section class="overlay" id="pause-screen" role="dialog" aria-modal="true" aria-labelledby="pause-title" hidden>
+        <div class="panel">
+          <div class="eyebrow"><span class="live-diamond"></span> TAKE A BREATH</div>
+          <h2 id="pause-title">ON PAUSE<span>.</span></h2><p id="pause-reason">The skyline can wait.</p>
+          <button class="button primary" id="resume-button">KEEP THE MOMENTUM <span aria-hidden="true">→</span></button>
+          <div class="secondary-row"><button class="button secondary" id="restart-button">RESTART <kbd>R</kbd></button><button class="text-button" id="quit-button">BACK TO MENU</button></div>
+          <p class="panel-note">PRESS ESC TO RESUME</p>
+        </div>
+      </section>
+
+      <section class="overlay" id="victory-screen" role="dialog" aria-modal="true" aria-labelledby="victory-title" hidden>
+        <div class="panel victory-panel">
+          <div class="finish-symbol" aria-hidden="true">✦</div>
+          <div class="eyebrow">140 BEATS. EVERY ONE EARNED.</div>
+          <h2 id="victory-title">PURE FLOW<span>.</span></h2><p>You made it through the night.</p>
+          <div class="finish-stats"><div><strong>100<span>%</span></strong><small>COMPLETE</small></div><div><strong id="finish-attempts">01</strong><small>ATTEMPTS</small></div><div><strong>60<span>s</span></strong><small>ALL MOMENTUM</small></div></div>
+          <button class="button primary" id="replay-button">ONE MORE RUSH <span aria-hidden="true">↗</span></button>
+          <button class="text-button" id="finish-menu-button">BACK TO MENU</button>
+        </div>
+      </section>
+
+      <section class="overlay settings-overlay" id="settings-screen" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+        <div class="panel settings-panel"><button class="icon-button close-button" id="close-settings" aria-label="Close sound settings">×</button><div class="eyebrow">SET THE MOOD</div><h2 id="settings-title">SOUND<span>.</span></h2><p>Made for headphones. Built to move you.</p>
+          <label class="volume-label" for="music-volume"><span>MUSIC</span><output id="music-value" for="music-volume">70%</output></label><input id="music-volume" type="range" min="0" max="100" step="1" value="70">
+          <label class="volume-label" for="effects-volume"><span>EFFECTS</span><output id="effects-value" for="effects-volume">65%</output></label><input id="effects-volume" type="range" min="0" max="100" step="1" value="65">
+          <div class="score-info"><span class="status-dot"></span><span>AFTERGLOW / ORIGINAL SCORE<br><small>140 BPM · SYNTHWAVE / ELECTRO</small></span></div>
+          <button class="button primary" id="settings-done">SOUNDS GOOD <span aria-hidden="true">✓</span></button>
+        </div>
+      </section>
+      <div class="sr-only" id="announcer" role="status" aria-live="polite"></div>
+    </main>
+
+    <footer class="footer"><div><span class="footer-key"><kbd>SPACE</kbd> JUMP</span><span class="footer-key"><kbd>R</kbd> RESTART</span><span class="footer-key"><kbd>ESC</kbd> PAUSE</span><span class="touch-footer">TAP TO JUMP · HOLD TO REPEAT</span></div><span class="footer-right">STAY SHARP. <span>STAY IN THE FLOW.</span><i>↗</i></span></footer>
+  </div>
+  <noscript><div class="no-script">Neon Rush needs JavaScript to play. Enable it and reload this page.</div></noscript>
+</body>
+</html>

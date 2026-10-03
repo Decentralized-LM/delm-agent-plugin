@@ -1,0 +1,50 @@
+{
+  "duration": 12,
+  "fps": 60,
+  "width": 1920,
+  "height": 1080,
+  "audio": false,
+  "source": "Unchanged retained Neon Rush game; real browser frames and keyboard inputs.",
+  "actions": [
+    {
+      "time": 2,
+      "action": "Play"
+    },
+    {
+      "time": 4.233333333333333,
+      "action": "Jump"
+    },
+    {
+      "time": 5.95,
+      "action": "Jump"
+    },
+    {
+      "time": 7.716666666666667,
+      "action": "Jump"
+    },
+    {
+      "time": 8,
+      "action": "Pause"
+    },
+    {
+      "time": 9,
+      "action": "Resume"
+    },
+    {
+      "time": 10.466666666666667,
+      "action": "Jump"
+    }
+  ],
+  "endState": {
+    "attempts": "01",
+    "progress": "15",
+    "paused": false,
+    "retry": false
+  },
+  "browserErrors": [],
+  "edit": {
+    "sourceStartSeconds": 1.4,
+    "durationSeconds": 6,
+    "file": "neon-rush-edit.mp4"
+  }
+}
