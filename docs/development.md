@@ -31,7 +31,15 @@ node --test examples/task-board/task.test.mjs
 
 The regular suite uses fixture workers. Installation tests use temporary Codex homes and local Git repositories. The native suite checks filesystem restrictions for both workers and installs tiny npm and Python dependencies from a temporary local server, without generating model turns. It needs Node/npm and Python virtual environment support. Run it from a normal terminal, since an enclosing sandbox can prevent local sockets or nested sandbox execution. None of these checks launches a real DeLM task.
 
-The [npm installer](../packages/installer/README.md) has no dependencies or installation scripts. Its version is independent of the plugin version. Unit and package tests run in the regular suite; `test:native` exercises the packed command against stock Codex and a local Git marketplace in temporary homes. It does not register a plugin in your normal Codex configuration or contact a published DeLM marketplace.
+The [npm installer](../packages/installer/README.md) has no dependencies or installation scripts. Its version is independent of the plugin version. Source configuration leaves its repository unset; release preparation supplies the destination. Unit and package tests run in the regular suite; `test:native` exercises the prepared, packed command against stock Codex and a local Git marketplace in temporary homes. It does not register a plugin in your normal Codex configuration or contact a published DeLM marketplace.
+
+To inspect a configured installer before publication, use a new output directory:
+
+```sh
+python3 scripts/prepare_installer.py --repository OWNER/REPOSITORY --out .validation/prepared-installer
+```
+
+Replace `OWNER/REPOSITORY` with the intended GitHub destination. The output includes a configured package, its tarball, checksums, and a preparation record. The release workflow generates the same installer alongside the native package and binds them to one destination. See [releases](releases.md) for publication.
 
 The [native lifecycle checks](native-lifecycle-qualification.md) cover interruption, cancellation during startup, normal chat completion, owner-process death, and plugin removal. CI runs these with each Codex version in its matrix, using disposable Codex homes and a local scripted provider.
 

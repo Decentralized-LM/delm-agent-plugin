@@ -3,7 +3,9 @@ import {chmod, mkdtemp, readFile, stat, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {test} from 'node:test';
-import {COMMANDS, InstallerError, RELEASE, describe, execute, manage} from '../lib/installer.mjs';
+import {COMMANDS, InstallerError, RELEASE as SOURCE_RELEASE, describe, execute, manage} from '../lib/installer.mjs';
+
+const RELEASE = {...SOURCE_RELEASE, repository: 'delm-fixture/distribution', url: 'https://github.com/delm-fixture/distribution.git'};
 
 function fake({installed = false, enabled = true, source = RELEASE.url, legacy = false} = {}) {
   const unrelated = {pluginId: 'other@elsewhere', installed: true, enabled: true, version: '7.0.0'};
@@ -44,11 +46,19 @@ function fake({installed = false, enabled = true, source = RELEASE.url, legacy =
     } else assert.fail(`Unexpected native command ${operation}`);
     return {stdout: JSON.stringify(result)};
   };
-  return {state, options: {codex: '/existing Codex', platform: 'darwin', run}};
+  return {state, options: {codex: '/existing Codex', platform: 'darwin', run, release: RELEASE}};
 }
 
 const mutations = state => state.calls.filter(call => call[1] === 'plugin' && (
   ['add', 'remove'].includes(call[2]) || ['add', 'upgrade', 'remove'].includes(call[3])));
+
+test('source and invalid release configurations fail before calling native tools', async () => {
+  for (const command of COMMANDS) {
+    const run = async () => assert.fail('Unconfigured release called a native tool');
+    await assert.rejects(manage(command, {platform: 'darwin', run}), {code: 'UNCONFIGURED_RELEASE'});
+    await assert.rejects(manage(command, {platform: 'darwin', run, release: {...RELEASE, repository: '../invalid'}}), {code: 'INVALID_RELEASE'});
+  }
+});
 
 test('installation uses only the fixed native marketplace and preserves unrelated plugins', async () => {
   const {state, options} = fake();
@@ -155,7 +165,7 @@ test('native errors are relayed and partial installation is not rolled back dest
 
 test('unsupported native JSON is diagnosed before mutation', async () => {
   for (const stdout of ['not-json', '{}']) {
-    await assert.rejects(manage('install', {platform: 'darwin', run: async () => ({stdout})}), {code: 'UNSUPPORTED_CODEX'});
+    await assert.rejects(manage('install', {platform: 'darwin', release: RELEASE, run: async () => ({stdout})}), {code: 'UNSUPPORTED_CODEX'});
   }
 });
 
@@ -187,7 +197,7 @@ test('relative Codex paths use one private working directory which is cleaned up
     const log = path.join(root, 'calls.jsonl');
     await writeFile(codex, `#!/usr/bin/env node\nimport {appendFileSync} from 'node:fs';\nappendFileSync(${JSON.stringify(log)}, JSON.stringify({cwd:process.cwd(), args:process.argv.slice(2)})+'\\n');\nconsole.log(JSON.stringify(process.argv[3] === 'marketplace' ? {marketplaces:[]} : {installed:[]}));\n`);
     await chmod(codex, 0o755);
-    const result = await manage('status', {codex: path.relative(process.cwd(), codex)});
+    const result = await manage('status', {codex: path.relative(process.cwd(), codex), release: RELEASE});
     assert.equal(result.installed, false);
     const calls = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     assert.equal(calls.length, 3);

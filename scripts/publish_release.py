@@ -14,6 +14,18 @@ def git(*args, **kwargs):
     return subprocess.check_output(["git", *args], text=True, **kwargs).strip()
 
 
+def verify_destination(repository):
+    """Both read and write remotes must identify the catalog's repository."""
+    expected = repository.lower()
+    accepted = {f"https://github.com/{expected}", f"https://github.com/{expected}.git",
+                f"git@github.com:{expected}", f"git@github.com:{expected}.git",
+                f"ssh://git@github.com/{expected}", f"ssh://git@github.com/{expected}.git"}
+    for flags in [("--all",), ("--push", "--all")]:
+        urls = git("remote", "get-url", *flags, "origin").splitlines()
+        if len(urls) != 1 or urls[0].lower() not in accepted:
+            raise SystemExit("The origin remote does not match the release repository; refusing to publish to a different destination.")
+
+
 def main():
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Publication is restricted to the release workflow.")
@@ -30,6 +42,7 @@ def main():
     if not metadata["signedAndNotarized"]:
         raise SystemExit("Unsigned review packages cannot be published.")
     verify_signed(package, Path(sys.argv[2]).resolve())
+    verify_destination(repository)
     tag = "delm-plugin-v" + metadata["version"]
     if git("ls-remote", "--tags", "origin", "refs/tags/" + tag):
         raise SystemExit(f"Immutable package tag already exists: {tag}")

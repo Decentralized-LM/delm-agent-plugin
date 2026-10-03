@@ -3,12 +3,17 @@
 set -euo pipefail
 # Keep the imported P12 and signing scratch files private even on a shared host.
 umask 077
+missing_settings=()
 for setting in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD RELEASE_REPOSITORY RELEASE_SOURCE_SHA RUNNER_TEMP; do
   if [[ -z "${!setting:-}" ]]; then
-    echo "Missing release secret or environment variable: $setting" >&2
-    exit 1
+    missing_settings+=("$setting")
   fi
 done
+if (( ${#missing_settings[@]} )); then
+  printf 'Signing is not configured. Missing release settings: %s\n' "${missing_settings[*]}" >&2
+  echo 'Configure Apple credentials in the protected release environment. Private unsigned preparation does not need these credentials.' >&2
+  exit 1
+fi
 python3 scripts/release_identity.py
 mkdir unsigned-review
 tar -xf unsigned-macos-review.tar -C unsigned-review

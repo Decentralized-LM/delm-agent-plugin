@@ -1,16 +1,15 @@
 import {execFile} from 'node:child_process';
+import {readFileSync} from 'node:fs';
 import {mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {promisify} from 'node:util';
 
 const execFileAsync = promisify(execFile);
+const configuration = JSON.parse(readFileSync(new URL('../release.json', import.meta.url), 'utf8'));
 export const RELEASE = Object.freeze({
-  repository: 'jerry2247/delm-agent-plugin',
-  url: 'https://github.com/jerry2247/delm-agent-plugin.git',
-  ref: 'marketplace',
-  marketplace: 'delm',
-  plugin: 'delm@delm',
+  ...configuration,
+  url: configuration.repository ? `https://github.com/${configuration.repository}.git` : null,
 });
 export const COMMANDS = ['install', 'update', 'remove', 'status'];
 
@@ -44,23 +43,31 @@ function collection(value, key) {
   return value[key];
 }
 
-// Distribution identity is fixed. Tests redirect this Git URL through a disposable
-// Git configuration; there is no production repository or marketplace override.
-export async function manage(command, {codex = 'codex', platform = process.platform, run = execute} = {}) {
+// Distribution identity is fixed at package preparation, never by a CLI flag.
+// Unit tests inject release/run; native tests exercise a prepared package.
+export async function manage(command, {codex = 'codex', platform = process.platform, run = execute, release = RELEASE} = {}) {
   if (codex.includes('/') || codex.includes('\\')) codex = resolve(codex);
   if (!COMMANDS.includes(command)) throw new InstallerError(`Unknown command: ${command}`, 'USAGE');
+  if (release.repository === null) {
+    throw new InstallerError('This source installer has no release destination. Use a prepared installer package; contributors can run scripts/prepare_installer.py with --repository OWNER/REPO and --out DIRECTORY.', 'UNCONFIGURED_RELEASE');
+  }
+  if (typeof release.repository !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(release.repository)
+      || release.url !== `https://github.com/${release.repository}.git`
+      || release.marketplace !== 'delm' || release.ref !== 'marketplace' || release.plugin !== 'delm@delm') {
+    throw new InstallerError('This installer has invalid release configuration. Obtain a correctly prepared package.', 'INVALID_RELEASE');
+  }
   if (command !== 'status' && platform !== 'darwin') {
     throw new InstallerError('DeLM installation currently supports macOS only. Windows and Linux support is not released yet.', 'UNSUPPORTED_PLATFORM');
   }
   const cwd = await mkdtemp(join(tmpdir(), 'delm-installer-'));
   try {
-    return await manageNative(command, {codex, run: (file, args) => run(file, args, {cwd})});
+    return await manageNative(command, {codex, release, run: (file, args) => run(file, args, {cwd})});
   } finally {
     await rm(cwd, {recursive: true, force: true});
   }
 }
 
-async function manageNative(command, {codex, run}) {
+async function manageNative(command, {codex, release: RELEASE, run}) {
   const native = async (...args) => {
     let result;
     try {
@@ -121,7 +128,7 @@ async function manageNative(command, {codex, run}) {
     return {command, changed: before.installed, ...after};
   }
   if (command === 'update' && !before.installed) {
-    throw new InstallerError('DeLM is not installed. Run `npx --yes delm-agent@latest install` first once the package is published.', 'NOT_INSTALLED');
+    throw new InstallerError('DeLM is not installed. Run `npx --yes delm-agent@latest install` first.', 'NOT_INSTALLED');
   }
   await run('git', ['--version']);
   // Native add checks the configured ref as well as the URL. Its own conflict

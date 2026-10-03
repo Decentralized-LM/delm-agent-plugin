@@ -65,6 +65,54 @@ def checksums(output):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_untracked_installer_inputs_mark_source_dirty(self):
+        with fixture() as (_, source, _, _):
+            self.assertFalse(package_release.source_state(source)["sourceDirty"])
+            installer = source / "packages/installer"
+            installer.mkdir(parents=True)
+            (installer / "release.json").write_text('{"repository":null}')
+            self.assertTrue(package_release.source_state(source)["sourceDirty"])
+
+    def test_release_destination_is_explicit_and_publication_requires_matching_repository(self):
+        with fixture() as (_, source, _, revision), mock.patch.object(release_identity, "SOURCE", source):
+            before = Path.cwd()
+            try:
+                os.chdir(source)
+                environment = {"SOURCE_REF": "main", "RELEASE_PUBLISH": "false",
+                               "RELEASE_REPOSITORY": "example/distribution", "GITHUB_ACTIONS": "true",
+                               "GITHUB_REPOSITORY": "example/source"}
+                with mock.patch.dict(os.environ, environment, clear=True):
+                    self.assertEqual(release_identity.main(), revision)
+                    with mock.patch.dict(os.environ, RELEASE_PUBLISH="true"):
+                        with self.assertRaisesRegex(SystemExit, "workflow's repository"):
+                            release_identity.main()
+                    with mock.patch.dict(os.environ, RELEASE_REPOSITORY="example/repo\nother=value"):
+                        with self.assertRaisesRegex(SystemExit, "OWNER/REPO"):
+                            release_identity.main()
+            finally:
+                os.chdir(before)
+
+    def test_publisher_rejects_different_or_multiple_push_destinations(self):
+        with mock.patch.object(publish_release, "git", side_effect=[
+                "https://github.com/Example/DeLM.git", "git@github.com:example/delm.git"]):
+            publish_release.verify_destination("example/delm")
+        for push in ["https://github.com/example/other.git",
+                     "https://github.com/example/delm.git\nhttps://github.com/example/other.git"]:
+            with self.subTest(push=push), mock.patch.object(publish_release, "git", side_effect=[
+                    "https://github.com/example/delm.git", push]):
+                with self.assertRaisesRegex(SystemExit, "different destination"):
+                    publish_release.verify_destination("example/delm")
+
+    def test_signing_preflight_lists_missing_settings_without_importing_a_certificate(self):
+        result = subprocess.run(["/bin/bash", str(package_release.SOURCE / "scripts/sign_release.sh")],
+                                env={"PATH": "/usr/bin:/bin"}, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Signing is not configured", result.stderr)
+        for name in ["APPLE_CERTIFICATE_BASE64", "APPLE_SIGNING_IDENTITY", "APPLE_TEAM_ID",
+                     "APPLE_APP_PASSWORD", "RELEASE_REPOSITORY", "RELEASE_SOURCE_SHA"]:
+            self.assertIn(name, result.stderr)
+        self.assertIn("Private unsigned preparation", result.stderr)
+
     def test_resealed_extra_files_cannot_enter_the_release_distribution(self):
         for name in ["plugins/delm/auth.json", "private-validation.json"]:
             with self.subTest(name=name), fixture() as (root, source, runtime, revision):

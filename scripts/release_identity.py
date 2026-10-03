@@ -5,13 +5,19 @@ import re
 import subprocess
 
 from build import SOURCE
-from package_release import source_state, source_version
+from package_release import REPOSITORY_PATTERN, source_state, source_version
 
 
 def main():
     expected = "v" + source_version(SOURCE)
     source_ref = os.environ.get("SOURCE_REF", os.environ.get("SOURCE_TAG", ""))
     publishing = os.environ.get("RELEASE_PUBLISH", "true").lower() == "true"
+    repository = os.environ.get("RELEASE_REPOSITORY")
+    if repository is not None and not re.fullmatch(REPOSITORY_PATTERN, repository):
+        raise SystemExit("Release repository must be GitHub OWNER/REPO, without a URL.")
+    if publishing and os.environ.get("GITHUB_ACTIONS") == "true":
+        if not repository or repository.lower() != os.environ.get("GITHUB_REPOSITORY", "").lower():
+            raise SystemExit("Publication must target this workflow's repository. Configure a workflow and write access in the selected release repository before publishing there.")
     if not source_ref or source_ref.startswith("-"):
         raise SystemExit("Select a source branch, tag, or full commit SHA.")
     if publishing and source_ref not in [expected, "refs/tags/" + expected]:
@@ -37,4 +43,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    revision = main()
+    if os.environ.get("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            output.write(f"revision={revision}\n")
+            if os.environ.get("RELEASE_REPOSITORY"):
+                output.write(f"repository={os.environ['RELEASE_REPOSITORY']}\n")

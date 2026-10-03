@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import {readFile} from 'node:fs/promises';
 import {parseArgs} from 'node:util';
-import {COMMANDS, InstallerError, describe, manage} from '../lib/installer.mjs';
+import {COMMANDS, InstallerError, RELEASE, describe, manage} from '../lib/installer.mjs';
 
 const help = `DeLM installer for Codex
 
@@ -18,7 +18,8 @@ Usage: delm-agent <install|update|remove|status> [--codex PATH] [--json]
   --version     Show the installer version
 
 Node.js 22+ and stock Codex CLI are required. Install/update also require Git.
-The installer is currently unpublished; use a local package for private testing.`;
+${RELEASE.repository ? `Marketplace: https://github.com/${RELEASE.repository} (branch ${RELEASE.ref}).`
+  : 'This unpublished source installer has no release destination. Use a prepared package.'}`;
 
 let json = process.argv.slice(2).includes('--json');
 try {

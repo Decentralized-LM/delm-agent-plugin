@@ -16,6 +16,7 @@ from install_support import fingerprint, package_files
 
 ARCHITECTURES = {"arm64": "aarch64-apple-darwin", "x86_64": "x86_64-apple-darwin"}
 LIFECYCLE_CASES = ["interrupt", "preflight", "stop", "owner-death", "plugin-remove"]
+REPOSITORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
 
 
 def write_json(path, data):
@@ -53,7 +54,7 @@ def source_state(source):
     status = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
                             text=True, capture_output=True)
     untracked = subprocess.run(["git", "-C", str(source), "ls-files", "--others", "--exclude-standard",
-                                "--", "src", "plugin", "scripts", "tests", "skills", "hooks", ".github"],
+                                "--", "src", "plugin", "scripts", "tests", "skills", "hooks", "packages", ".github"],
                                text=True, capture_output=True)
     dirty = bool(status.returncode or untracked.returncode or status.stdout or untracked.stdout)
     return {"sourceDirty": dirty, "runtimeSourcesSha256": digest}
@@ -83,7 +84,7 @@ def verify_qualification(metadata, runtime=None):
 
 def assemble(source, runtime, output, repository, revision, signed=False,
              qualifications=(), unsigned_origin=None):
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+    if not re.fullmatch(REPOSITORY_PATTERN, repository):
         raise RuntimeError("Repository must be the GitHub OWNER/REPO, without a URL.")
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise RuntimeError("Source revision must be a full Git commit SHA.")
@@ -177,7 +178,7 @@ def verify(output, revision=None, repository=None, require_qualified=False):
             or type(metadata.get("sourceDirty")) is not bool
             or not re.fullmatch(r"[0-9a-f]{40}", metadata.get("sourceRevision", ""))
             or not re.fullmatch(r"[0-9a-f]{64}", metadata.get("runtimeSourcesSha256", ""))
-            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", metadata.get("repository", ""))):
+            or not re.fullmatch(REPOSITORY_PATTERN, metadata.get("repository", ""))):
         raise RuntimeError("Invalid release provenance or platform metadata.")
     if revision is not None and metadata["sourceRevision"] != revision:
         raise RuntimeError("Release source revision differs from the pinned checkout.")

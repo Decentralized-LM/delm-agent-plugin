@@ -479,6 +479,7 @@ class BuildTests(unittest.TestCase):
                 with mock.patch.dict(os.environ, GITHUB_ACTIONS="true", RUNNER_TEMP=str(root),
                                      RELEASE_SOURCE_SHA=revision, RELEASE_REPOSITORY="example/delm"), \
                      mock.patch.object(publish_release, "verify_identity", return_value=revision), \
+                     mock.patch.object(publish_release, "verify_destination"), \
                      mock.patch.object(publish_release, "verify_signed") as signed_gate, \
                      mock.patch.object(sys, "argv", ["publish_release.py", str(output), str(root / "reports")]):
                     publish_release.main()

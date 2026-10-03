@@ -2,11 +2,19 @@
 
 Public releases contain a universal macOS binary, the native Codex plugin manifest, the explicit `delm:run` skill, lifecycle hooks, and license files. Users need Codex CLI and Git, without a compiler or a source checkout. Windows and Linux are separate future work.
 
-The source repository currently has no published marketplace. The workflow derives installation URLs from its actual GitHub repository, so no owner or public URL is hard-coded here.
+The source repository currently has no published marketplace. The release workflow resolves one repository address and uses it for the native marketplace, plugin metadata, and prepared installer. A new public home does not require changing the installer implementation.
+
+## Release destination
+
+The workflow's `release_repository` input accepts `OWNER/REPOSITORY` and defaults to the repository running the workflow. Unsigned review can prepare artifacts for another destination. Publication requires the configured destination to match the workflow repository and its Git remote, so a release cannot accidentally publish to a different origin.
+
+The installer source has no configured destination and remains private. Release preparation creates a separate configured package with the same repository identity as the native plugin. The generated package is what users receive; its repository cannot be overridden when they run it.
 
 ## Private iteration
 
-Run **Prepare macOS release** with `source_ref` set to a branch or full commit SHA and `publish` disabled. No version tag, Apple credential, marketplace write, or npm publication is needed. The workflow resolves the reference once, checks out that exact clean commit in every job, and retains an unsigned review artifact. A private repository keeps its workflow artifacts private to those with access.
+Run **Prepare macOS release** with `source_ref` set to a branch or full commit SHA and `publish` disabled. The workflow resolves the reference once, checks out that exact clean commit in every job, and retains an unsigned review artifact. A private repository keeps its workflow artifacts private to those with access.
+
+Successful preparation produces `unsigned-macos-review-not-for-distribution` and `prepared-npm-installer-not-published`. The installer artifact contains its tarball, `preparation.json`, and `SHA256SUMS`. Its preparation record binds the configured repository and source revision to the native package metadata. These artifacts let contributors inspect the exact files before publication.
 
 Keep `Cargo.toml`, `Cargo.lock`, and `.codex-plugin/plugin.json` on the same version while iterating. The version can remain unchanged until a public release is ready. Do not add a root `plugin.json`: current Codex interprets it as the portable format and skips native lifecycle hooks.
 
@@ -58,7 +66,25 @@ Updates use `codex plugin marketplace upgrade delm`; review changed hooks in `/h
 
 Repository-hosted installation is distinct from listing in OpenAI's public plugin directory. Publication does not imply directory approval.
 
-The private npm wrapper in `packages/installer` delegates marketplace registration and installation to the stock Codex CLI. It does not fetch release archives or duplicate verification and update logic. The proposed npm name is `delm-agent`, which remains unpublished and unreserved. Its version is independent of the plugin version, so a new plugin release does not require republishing an unchanged installer. Until a signed marketplace and npm package exist, the planned `npx` command is not a public installation path.
+The npm wrapper in `packages/installer` delegates marketplace registration and installation to the stock Codex CLI. Its proposed name is `delm-agent`, which remains unpublished and unreserved. Its version is independent of the plugin version, so a new plugin release does not require republishing an unchanged installer.
+
+After a successful workflow with `publish` enabled has published the signed native marketplace, download `prepared-npm-installer-not-published` from that same run. Verify its `SHA256SUMS`, then publish the prepared installer tarball. It already contains the selected repository address, package metadata, and an explicit file allowlist. The source package retains `private: true`; publish the prepared tarball rather than changing that source setting.
+
+```sh
+gh run download RUN_ID --name prepared-npm-installer-not-published --dir .validation/installer-publication
+cd .validation/installer-publication
+shasum -a 256 -c SHA256SUMS
+npm login
+npm publish ./delm-agent-0.1.0.tgz --access public
+```
+
+Run these commands from the final repository's checkout. Replace `RUN_ID` with the successful publication workflow's run ID and use the filename produced for the installer version being released. Registry account ownership and authentication are required. Each published installer version is immutable; increment its package version when its code or destination changes. Users then install with:
+
+```sh
+npx --yes delm-agent@latest install
+```
+
+The destination repository must be public for installation without GitHub access credentials. Before announcing a release, verify its installation using the published command, followed by native hook review, update, and removal. The final native plugin and installer must identify the same repository. Until both are published, the command above is not an available public installation path.
 
 ## Package verification
 

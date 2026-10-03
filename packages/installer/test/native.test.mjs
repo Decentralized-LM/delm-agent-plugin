@@ -5,7 +5,6 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {test} from 'node:test';
-import {RELEASE} from '../lib/installer.mjs';
 
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -18,9 +17,9 @@ test('packed npx entrypoint installs, updates and removes through real Codex wit
     const home = path.join(root, 'home');
     const codexHome = path.join(root, 'codex home');
     const repository = path.join(root, 'release repository');
-    const output = path.join(root, 'packed');
+    const output = path.join(root, 'prepared');
     const gitconfig = path.join(root, 'gitconfig');
-    for (const directory of [home, codexHome, repository, output]) mkdirSync(directory, {recursive: true});
+    for (const directory of [home, codexHome, repository]) mkdirSync(directory, {recursive: true});
     for (const name of ['user.npmrc', 'global.npmrc', 'gitconfig']) writeFileSync(path.join(root, name), '');
     const env = {
       ...process.env, HOME: home, CODEX_HOME: codexHome,
@@ -32,6 +31,14 @@ test('packed npx entrypoint installs, updates and removes through real Codex wit
     };
     const codex = process.env.DELM_TEST_HOST || execFileSync('/usr/bin/which', ['codex'], {encoding: 'utf8'}).trim();
     const run = (file, args, cwd = root) => execFileSync(file, args, {cwd, env, encoding: 'utf8', timeout: 45_000, stdio: ['ignore', 'pipe', 'pipe']});
+    const prepared = JSON.parse(run('python3', [path.resolve(packageRoot, '../../scripts/prepare_installer.py'),
+      '--repository', 'delm-fixture/alternate-distribution', '--out', output]));
+    const RELEASE = JSON.parse(readFileSync(path.join(output, 'package/release.json'), 'utf8'));
+    RELEASE.url = `https://github.com/${RELEASE.repository}.git`;
+    assert.equal(RELEASE.repository, 'delm-fixture/alternate-distribution');
+    const metadata = JSON.parse(readFileSync(path.join(output, 'package/package.json'), 'utf8'));
+    assert.equal(metadata.private, false);
+    assert.equal(metadata.repository.url, `git+${RELEASE.url}`);
     const git = (...args) => run('git', args, repository);
     const native = (...args) => JSON.parse(run(codex, ['plugin', ...args, '--json']));
     run('git', ['config', '--file', gitconfig, `url.${pathToFileURL(repository).href}.insteadOf`, RELEASE.url]);
@@ -75,8 +82,7 @@ test('packed npx entrypoint installs, updates and removes through real Codex wit
     native('marketplace', 'add', unrelated);
     native('add', 'other@unrelated');
     const otherBefore = native('list', '--marketplace', 'unrelated');
-    const packed = JSON.parse(run('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', output], packageRoot));
-    const tarball = path.join(output, packed[0].filename);
+    const tarball = path.join(output, prepared.tarball.path);
     const cli = (...args) => JSON.parse(run('npx', ['--yes', '--offline', `--package=${tarball}`, 'delm-agent', ...args, '--codex', codex, '--json']));
 
     assert.equal(cli('status').installed, false);

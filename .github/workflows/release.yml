@@ -7,6 +7,10 @@ on:
         default: main
         required: true
         type: string
+      release_repository:
+        description: 'GitHub OWNER/REPO for native and npm installation; blank uses this repository'
+        required: false
+        type: string
       publish:
         description: 'Sign, notarize, qualify, and publish to the native marketplace'
         default: false
@@ -22,6 +26,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       revision: ${{ steps.source.outputs.revision }}
+      repository: ${{ steps.source.outputs.repository }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -33,9 +38,8 @@ jobs:
         env:
           SOURCE_REF: ${{ inputs.source_ref }}
           RELEASE_PUBLISH: ${{ inputs.publish }}
-        run: |
-          python3 scripts/release_identity.py
-          printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          RELEASE_REPOSITORY: ${{ inputs.release_repository || github.repository }}
+        run: python3 scripts/release_identity.py
   build:
     needs: identity
     strategy:
@@ -65,6 +69,7 @@ jobs:
           SOURCE_REF: ${{ inputs.source_ref }}
           RELEASE_PUBLISH: ${{ inputs.publish }}
           RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
+          RELEASE_REPOSITORY: ${{ needs.identity.outputs.repository }}
         run: python3 scripts/release_identity.py
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -115,13 +120,16 @@ jobs:
         with:
           ref: ${{ needs.identity.outputs.revision }}
           persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: runtime-*
           path: artifacts
       - name: Assemble only the qualified native slices
         env:
-          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_REPOSITORY: ${{ needs.identity.outputs.repository }}
           RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
         run: |
           tar -xf artifacts/runtime-aarch64-apple-darwin/runtime.tar -C artifacts/runtime-aarch64-apple-darwin
@@ -129,11 +137,21 @@ jobs:
           lipo -create artifacts/runtime-aarch64-apple-darwin/delm artifacts/runtime-x86_64-apple-darwin/delm -output artifacts/delm
           python3 scripts/package_release.py --runtime artifacts/delm --output unsigned-review --repository "$RELEASE_REPOSITORY" --revision "$RELEASE_SOURCE_SHA" --qualification artifacts/runtime-aarch64-apple-darwin/qualification.json --qualification artifacts/runtime-x86_64-apple-darwin/qualification.json
           python3 scripts/package_release.py --verify unsigned-review --revision "$RELEASE_SOURCE_SHA" --repository "$RELEASE_REPOSITORY" --require-qualified
+          python3 scripts/prepare_installer.py --repository "$RELEASE_REPOSITORY" --native-release unsigned-review/release.json --out prepared-installer
           tar -cf unsigned-macos-review.tar -C unsigned-review .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: unsigned-macos-review-not-for-distribution
           path: unsigned-macos-review.tar
+          if-no-files-found: error
+      - name: Retain the npm installer bound to the same release destination
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: prepared-npm-installer-not-published
+          path: |
+            prepared-installer/*.tgz
+            prepared-installer/preparation.json
+            prepared-installer/SHA256SUMS
           if-no-files-found: error
   sign:
     if: inputs.publish
@@ -152,6 +170,7 @@ jobs:
           name: unsigned-macos-review-not-for-distribution
       - name: Sign and notarize the qualified package
         env:
+          RELEASE_PUBLISH: ${{ inputs.publish }}
           SOURCE_REF: ${{ inputs.source_ref }}
           RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -160,7 +179,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_REPOSITORY: ${{ needs.identity.outputs.repository }}
         run: |
           bash scripts/sign_release.sh
           tar -cf signed-macos-release.tar -C signed-release .
@@ -198,7 +217,7 @@ jobs:
           name: signed-macos-release-candidate
       - name: Verify and exercise the signed universal binary under quarantine
         env:
-          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_REPOSITORY: ${{ needs.identity.outputs.repository }}
           RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
           BUILD_ARCHITECTURE: ${{ matrix.architecture }}
         run: |
@@ -233,7 +252,8 @@ jobs:
           path: signed-evidence
       - name: Publish the signed, qualified package atomically
         env:
-          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_PUBLISH: ${{ inputs.publish }}
+          RELEASE_REPOSITORY: ${{ needs.identity.outputs.repository }}
           SOURCE_REF: ${{ inputs.source_ref }}
           RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
         run: |

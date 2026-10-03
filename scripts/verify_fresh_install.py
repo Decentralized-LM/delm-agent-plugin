@@ -220,7 +220,9 @@ def main():
                    "SHELL": "/bin/zsh", "LANG": "en_US.UTF-8", "TMPDIR": str(root)}
     git_environment = dict(environment, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
     def git(*arguments):
-        subprocess.run(["/usr/bin/git", "-C", str(project), *arguments],
+        # No detached maintenance may change .git after the baseline snapshot.
+        subprocess.run(["/usr/bin/git", "-c", "maintenance.auto=false", "-c", "gc.auto=0",
+                        "-C", str(project), *arguments],
                        env=git_environment, check=True, capture_output=True)
     git("init", "--quiet", "--template=")
     (project / "README.md").write_text("# Fresh-install qualification project\n\nImplement the requested task here.\n")

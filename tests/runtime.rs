@@ -17,6 +17,9 @@ fn git(path: &Path, args: &[&str]) {
     let output = Command::new("git")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        // The committed fixture must be quiescent before its strict snapshot.
+        // Newer Git can detach auto-maintenance and remove its lock afterward.
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .arg("-C")
         .arg(path)
         .args(args)

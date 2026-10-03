@@ -7,14 +7,9 @@
   "type": "module",
   "bin": {"delm-agent": "bin/delm-agent.mjs"},
   "engines": {"node": ">=22"},
-  "files": ["bin/delm-agent.mjs", "lib/installer.mjs", "LICENSE", "NOTICE"],
+  "files": ["bin/delm-agent.mjs", "lib/installer.mjs", "release.json", "LICENSE", "NOTICE"],
   "scripts": {
     "test": "node --test test/installer.test.mjs test/package.test.mjs",
     "test:native": "node --test test/native.test.mjs"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/jerry2247/delm-agent-plugin.git",
-    "directory": "packages/installer"
   }
 }
