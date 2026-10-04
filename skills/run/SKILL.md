@@ -1,6 +1,6 @@
 ---
 name: run
-description: Build in parallel with two collaborating Codex agents and deliver their changes to your project.
+description: Build in parallel with collaborating Codex agents and deliver their changes to your project.
 ---
 
 Use DeLM only when explicitly invoked. The trusted UserPromptSubmit hook captures the exact request and starts the runtime. Its developer context supplies an absolute `follow --capture` command. Execute that command immediately through the normal execution tool, retaining its process handle when it yields. Do not reconstruct the task, inspect the project first, generate launch files, send a separate startup confirmation, or launch a second run.

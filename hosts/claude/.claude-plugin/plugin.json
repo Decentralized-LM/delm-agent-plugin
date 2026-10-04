@@ -1,0 +1,9 @@
+{
+  "name": "delm",
+  "version": "0.3.0",
+  "description": "Build in parallel with collaborating Claude Code agents and deliver their changes to your project.",
+  "author": {
+    "name": "DeLM contributors"
+  },
+  "license": "MIT"
+}

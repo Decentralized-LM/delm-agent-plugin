@@ -276,6 +276,7 @@ fn retains_real_python_venv_and_npm_with_all_outputs_recorded() {
     );
     let interpreter = worker.join(".venv/bin/python3").canonicalize().unwrap();
     let policy = ResultPolicy {
+        native_python_runtime: false,
         readonly_runtime_roots: vec![interpreter.parent().unwrap().to_path_buf()],
         denied_roots: vec![root.clone(), prepared.workers[1].clone()],
     };
@@ -397,6 +398,7 @@ fn result_interpreter_allowance_does_not_admit_source_or_fake_environment_links(
     fs::write(&interpreter, "fixture interpreter").unwrap();
     fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o755)).unwrap();
     let policy = ResultPolicy {
+        native_python_runtime: false,
         readonly_runtime_roots: vec![runtime.clone()],
         denied_roots: vec![],
     };
@@ -411,6 +413,7 @@ fn result_interpreter_allowance_does_not_admit_source_or_fake_environment_links(
     fs::write(&interpreter, "changed interpreter").unwrap();
     assert_ne!(manifest_for_result(&root, &policy).unwrap(), captured);
     let denied = ResultPolicy {
+        native_python_runtime: false,
         readonly_runtime_roots: vec![runtime.clone()],
         denied_roots: vec![runtime.clone()],
     };
@@ -425,6 +428,7 @@ fn result_interpreter_allowance_does_not_admit_source_or_fake_environment_links(
     )
     .unwrap();
     let denied_route = ResultPolicy {
+        native_python_runtime: false,
         readonly_runtime_roots: vec![runtime.clone()],
         denied_roots: vec![original_private],
     };
@@ -694,6 +698,7 @@ fn result_retains_cpython_314_pi_alias_without_widening_source_admission() {
     // CPython 3.14's UTF-8 POSIX venv adds this exact same-bin alias.
     symlink("python3.14", root.join(".venv/bin/𝜋thon")).unwrap();
     let policy = ResultPolicy {
+        native_python_runtime: false,
         readonly_runtime_roots: vec![runtime],
         denied_roots: vec![],
     };
@@ -718,6 +723,7 @@ fn result_retains_cpython_314_pi_alias_without_widening_source_admission() {
         fs::remove_file(&alias).unwrap();
         symlink(denied.join("python3.14"), &alias).unwrap();
         let restricted = ResultPolicy {
+            native_python_runtime: false,
             readonly_runtime_roots: policy.readonly_runtime_roots.clone(),
             denied_roots: vec![denied],
         };
@@ -726,6 +732,7 @@ fn result_retains_cpython_314_pi_alias_without_widening_source_admission() {
     fs::remove_file(&alias).unwrap();
     symlink("python3.14", &alias).unwrap();
     let denied = ResultPolicy {
+        native_python_runtime: false,
         readonly_runtime_roots: policy.readonly_runtime_roots.clone(),
         denied_roots: policy.readonly_runtime_roots.clone(),
     };

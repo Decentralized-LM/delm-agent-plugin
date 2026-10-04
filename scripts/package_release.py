@@ -10,13 +10,15 @@ import subprocess
 import sys
 import tempfile
 
-from build import PACKAGE_FILES, SOURCE, stage_package
+from build import HOST_PACKAGE_FILES, SOURCE, claude_adapter_digest, payload_digest, stage_package, validate_claude_package, validate_claude_runtime
 from install_support import fingerprint, package_files
 
 
 ARCHITECTURES = {"arm64": "aarch64-apple-darwin", "x86_64": "x86_64-apple-darwin"}
 LIFECYCLE_CASES = ["interrupt", "preflight", "stop", "owner-death", "plugin-remove"]
 REPOSITORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
+HOST_PATHS = {"codex": "plugins/delm", "claude": "plugins/delm-claude"}
+HOST_MANIFESTS = {"codex": ".codex-plugin/plugin.json", "claude": ".claude-plugin/plugin.json"}
 
 
 def write_json(path, data):
@@ -31,10 +33,10 @@ def source_version(source):
     if not match:
         raise RuntimeError("Cargo.toml must contain an explicit package version.")
     version = match[1]
-    manifest = ".codex-plugin/plugin.json"
-    data = json.loads((source / manifest).read_text())
-    if data.get("name") != "delm" or data.get("version") != version:
-        raise RuntimeError(f"{manifest} must identify delm {version}.")
+    for manifest in [".codex-plugin/plugin.json", "hosts/claude/.claude-plugin/plugin.json"]:
+        data = json.loads((source / manifest).read_text())
+        if data.get("name") != "delm" or data.get("version") != version:
+            raise RuntimeError(f"{manifest} must identify delm {version}.")
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
         raise RuntimeError("Invalid release version.")
     lock = (source / "Cargo.lock").read_text()
@@ -47,14 +49,16 @@ def source_state(source):
     """Bind build inputs and distinguish a working tree from committed source."""
     inputs = {name: fingerprint(source / name)["sha256"]
               for name in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]}
-    for directory in ["src", "plugin"]:
+    for directory in ["src", "plugin", "hosts"]:
+        if not (source / directory).exists():
+            continue
         inputs.update({f"{directory}/{name}": entry["sha256"]
                        for name, entry in package_files(source / directory).items()})
     digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
     status = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
                             text=True, capture_output=True)
     untracked = subprocess.run(["git", "-C", str(source), "ls-files", "--others", "--exclude-standard",
-                                "--", "src", "plugin", "scripts", "tests", "skills", "hooks", "packages", ".github"],
+                                "--", "src", "plugin", "hosts", "scripts", "tests", "skills", "hooks", "packages", ".github"],
                                text=True, capture_output=True)
     dirty = bool(status.returncode or untracked.returncode or status.stdout or untracked.stdout)
     return {"sourceDirty": dirty, "runtimeSourcesSha256": digest}
@@ -98,8 +102,71 @@ def verify_qualification(metadata, runtime=None):
                     raise RuntimeError(f"The {arch} release slice differs from the tested binary.")
 
 
+
+CLAUDE_PROOF_FILES = {"slug.mjs", "stats.mjs", "demo.mjs", "test.mjs"}
+CLAUDE_PROOF_FLAGS = ("exactlyTwoNativeForks", "bothWorkersPublishedFiles", "matchingNativeToolPools",
+                      "originalPreserved", "workspacesRemoved", "deliveredOutputChecked")
+
+
+def verify_claude_qualification(metadata, require_all=False):
+    records = metadata.get("claudeQualification", {})
+    if (not isinstance(records, dict) or not set(records).issubset(ARCHITECTURES)
+            or metadata.get("claudeQualifiedArchitectures") != [arch for arch in ARCHITECTURES if arch in records]):
+        raise RuntimeError("Invalid qualified Claude architecture coverage.")
+    if require_all and set(records) != set(ARCHITECTURES):
+        missing = ", ".join(arch for arch in ARCHITECTURES if arch not in records)
+        raise RuntimeError("Claude publication requires real native qualification for " + missing
+                           + "; pass the manual fixture's qualification.json with --claude-qualification.")
+    expected_fixture = metadata.get("claudeQualificationFixtureSha256", "")
+    if not isinstance(expected_fixture, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_fixture):
+        raise RuntimeError("Claude qualification fixture identity is missing.")
+    for arch, record in records.items():
+        if not isinstance(record, dict):
+            raise RuntimeError(f"Invalid real native Claude qualification for {arch}.")
+        version = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*) \(Claude Code\)", str(record.get("hostVersion", "")))
+        proof = record.get("outputProof", {})
+        allowed_runtime_hashes = {
+            metadata.get("unsignedRuntimeSha256") if metadata.get("signedAndNotarized") else metadata["files"]["bin/delm"]["sha256"],
+            metadata.get("qualification", {}).get(arch, {}).get("runtimeSha256"),
+        } - {None}
+        if (record.get("schema") != 1 or record.get("kind") != "claude-native-qualification"
+                or record.get("architecture") != arch or record.get("passed") is not True
+                or record.get("workerCount") != 2
+                or type(record.get("modelCalls")) is not int or record["modelCalls"] <= 0
+                or any(record.get(key) is not True for key in CLAUDE_PROOF_FLAGS)
+                or not version or tuple(map(int, version.groups())) < (2, 1, 289)
+                or record.get("runtimeSourcesSha256") != metadata["runtimeSourcesSha256"]
+                or record.get("fixtureSha256") != expected_fixture
+                or record.get("adapterSha256") != metadata.get("claudeAdapterSha256")
+                or not isinstance(record.get("runtimeSha256"), str)
+                or record.get("runtimeSha256") not in allowed_runtime_hashes
+                or not isinstance(proof, dict) or set(proof) != CLAUDE_PROOF_FILES
+                or not all(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) for digest in proof.values())):
+            raise RuntimeError(f"Invalid or mismatched real native Claude qualification for {arch}.")
+
+
+def load_claude_qualifications(paths, existing=None):
+    records = dict(existing or {})
+    # Only the small release proof is distributed, never raw transcripts or account data.
+    fields = {"schema", "kind", "architecture", "hostVersion", "runtimeSha256", "runtimeSourcesSha256",
+              "fixtureSha256", "adapterSha256", "passed", "workerCount", "modelCalls", "outputProof", *CLAUDE_PROOF_FLAGS}
+    for path in paths:
+        if path.stat().st_size > 64 * 1024:
+            raise RuntimeError("Claude qualification input exceeds 64 KiB.")
+        value = json.loads(path.read_text())
+        for record in value if isinstance(value, list) else [value]:
+            if (not isinstance(record, dict) or not isinstance(record.get("architecture"), str)
+                    or record["architecture"] not in ARCHITECTURES):
+                raise RuntimeError("Claude qualification must identify its actual supported native architecture.")
+            arch = record["architecture"]
+            if arch in records:
+                raise RuntimeError("Duplicate Claude architecture qualification.")
+            records[arch] = {key: value for key, value in record.items() if key in fields}
+    return records
+
+
 def assemble(source, runtime, output, repository, revision, signed=False,
-             qualifications=(), unsigned_origin=None):
+             qualifications=(), unsigned_origin=None, claude="claude", claude_qualifications=()):
     if not re.fullmatch(REPOSITORY_PATTERN, repository):
         raise RuntimeError("Repository must be the GitHub OWNER/REPO, without a URL.")
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
@@ -121,24 +188,33 @@ def assemble(source, runtime, output, repository, revision, signed=False,
         if architecture in qualification:
             raise RuntimeError("Duplicate architecture qualification.")
         qualification[architecture] = record
+    claude_qualification = load_claude_qualifications(
+        claude_qualifications, origin["claudeQualification"] if unsigned_origin is not None else None)
     if signed and (unsigned_origin is None or provenance["sourceDirty"]):
         raise RuntimeError("Signed releases require clean source and its qualified unsigned package.")
     result = subprocess.run([str(runtime.resolve()), "--version"], check=True,
                             text=True, capture_output=True)
     if result.stdout.strip() != f"delm {version}":
         raise RuntimeError("Prebuilt runtime version differs from source manifests.")
+    validate_claude_runtime(runtime)
     # Release assemblies must contain both native Mac architectures.
     subprocess.run(["lipo", str(runtime), "-verify_arch", "arm64", "x86_64"], check=True)
-    package = output / "plugins/delm"
-    stage_package(source, runtime, package)
-    manifest = json.loads((package / ".codex-plugin/plugin.json").read_text())
-    manifest["repository"] = f"https://github.com/{repository}"
-    write_json(package / ".codex-plugin/plugin.json", manifest)
-    if unsigned_origin is not None:
-        payload = {name: value for name, value in package_files(package).items() if name != "bin/delm"}
-        original_payload = {name: value for name, value in origin["files"].items() if name != "bin/delm"}
-        if payload != original_payload:
-            raise RuntimeError("Signed plugin payload differs from the qualified unsigned package.")
+    packages = {}
+    for host, relative in HOST_PATHS.items():
+        package = output / relative
+        stage_package(source, runtime, package, host)
+        manifest_path = package / HOST_MANIFESTS[host]
+        manifest = json.loads(manifest_path.read_text())
+        manifest["repository"] = f"https://github.com/{repository}"
+        write_json(manifest_path, manifest)
+        files = package_files(package)
+        packages[host] = {"path": relative, "files": files}
+        if unsigned_origin is not None:
+            payload = {name: value for name, value in files.items() if name != "bin/delm"}
+            original_payload = {name: value for name, value in origin["hostPackages"][host]["files"].items() if name != "bin/delm"}
+            if payload != original_payload:
+                raise RuntimeError(f"Signed plugin payload differs from the qualified unsigned package ({host}).")
+    claude_validation = validate_claude_package(output / HOST_PATHS["claude"], claude)
     write_json(output / ".agents/plugins/marketplace.json", {
         "name": "delm", "interface": {"displayName": "DeLM"},
         "plugins": [{"name": "delm", "source": {
@@ -147,23 +223,35 @@ def assemble(source, runtime, output, repository, revision, signed=False,
             "policy": {"installation": "AVAILABLE", "authentication": "ON_USE"},
             "category": "Developer Tools"}],
     })
+    write_json(output / ".claude-plugin/marketplace.json", {
+        "name": "delm", "owner": {"name": "DeLM"},
+        "description": "DeLM native Claude Code plugin",
+        "plugins": [{"name": "delm", "source": "./plugins/delm-claude",
+                     "description": "Collaborating agents with shared tasks and guarded result delivery."}],
+    })
     metadata = {
         "schema": 1, "version": version, "sourceRevision": revision,
         "repository": repository, **provenance,
         "platform": "darwin", "architectures": ["arm64", "x86_64"],
         "minimumMacOS": "13.0", "signedAndNotarized": signed,
-        "files": package_files(package),
+        "files": packages["codex"]["files"], "hostPackages": packages,
+        "claudeValidation": claude_validation,
+        "claudeAdapterSha256": claude_adapter_digest(output / HOST_PATHS["claude"]),
+        "claudeQualification": claude_qualification,
+        "claudeQualifiedArchitectures": [arch for arch in ARCHITECTURES if arch in claude_qualification],
+        "claudeQualificationFixtureSha256": fingerprint(source / "scripts/verify_claude_native.py")["sha256"],
         "qualification": qualification,
     }
     if qualification:
         verify_qualification(metadata, None if signed else runtime)
     if signed:
         metadata["unsignedRuntimeSha256"] = origin["files"]["bin/delm"]["sha256"]
+    verify_claude_qualification(metadata, require_all=signed)
     write_json(output / "release.json", metadata)
     (output / "README.md").write_text(
         f"# DeLM {version} for macOS\n\n"
-        "Prebuilt native Codex plugin for Apple Silicon and Intel. "
-        "Requires stock Codex CLI and Git; no Rust or Python is needed.\n\n"
+        "Prebuilt native plugins for Codex and Claude Code on Apple Silicon and Intel. "
+        "Requires the selected host CLI and Git; no Rust or Python is needed.\n\n"
         + ("Signed and notarized release.\n\n" if signed else
            "**Unsigned review artifact. Not for public distribution or installation.**\n\n")
         + ("Built from an uncommitted working tree. `sourceRevision` identifies its base commit, "
@@ -175,6 +263,16 @@ def assemble(source, runtime, output, repository, revision, signed=False,
         "Restart Codex once more, then invoke `$delm:run <task>`. Installation starts no workers and does not grant hook trust.\n\n"
         "Update with `codex plugin marketplace upgrade delm`, review any changed hooks in `/hooks`, and restart before running DeLM. "
         "Remove with `codex plugin remove delm@delm`; saved DeLM runs are retained.\n\n"
+        "For Claude Code:\n\n```sh\n"
+        f"claude plugin marketplace add https://github.com/{repository}.git#marketplace --scope user\n"
+        "claude plugin install delm@delm --scope user\n"
+        "```\n\nRestart Claude Code, then use `/delm:run <task>`. "
+        "Update with `claude plugin marketplace update delm` followed by "
+        "`claude plugin update delm@delm --scope user`. Remove with "
+        "`claude plugin uninstall delm@delm --scope user --keep-data`. "
+        "Native plugin validation checks packaging, separately from runtime qualification.\n\n"
+        + "Claude architectures with matching real native task evidence: "
+        + (", ".join(metadata["claudeQualifiedArchitectures"]) or "none; qualification remains incomplete") + ".\n\n"
         f"[Source and support](https://github.com/{repository}) · "
         "[Project](https://yuzhenmao.github.io/DeLM/) · "
         "[Paper](https://arxiv.org/abs/2606.10662)\n")
@@ -203,12 +301,35 @@ def verify(output, revision=None, repository=None, require_qualified=False):
     version = metadata.get("version", "")
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
         raise RuntimeError("Invalid release version.")
-    package = output / "plugins/delm"
-    manifest = json.loads((package / ".codex-plugin/plugin.json").read_text())
-    if (manifest.get("name") != "delm" or manifest.get("version") != version
-            or manifest.get("repository") != "https://github.com/" + metadata["repository"]
-            or (package / "plugin.json").exists()):
-        raise RuntimeError("Native plugin manifest differs from release provenance.")
+    packages = metadata.get("hostPackages", {})
+    if set(packages) != set(HOST_PATHS):
+        raise RuntimeError("Release must contain both native host packages.")
+    for host, relative in HOST_PATHS.items():
+        package = output / relative
+        manifest = json.loads((package / HOST_MANIFESTS[host]).read_text())
+        if (manifest.get("name") != "delm" or manifest.get("version") != version
+                or manifest.get("repository") != "https://github.com/" + metadata["repository"]
+                or (package / "plugin.json").exists() or packages[host].get("path") != relative):
+            raise RuntimeError("Native plugin manifest differs from release provenance.")
+        plugin_files = package_files(package)
+        if plugin_files != packages[host].get("files"):
+            raise RuntimeError("Package files, permissions, or checksums changed.")
+        if set(plugin_files) != {*HOST_PACKAGE_FILES[host], "bin/delm"}:
+            raise RuntimeError("Release plugin contents differ from the runtime resource allowlist.")
+        if plugin_files.get("bin/delm", {}).get("mode") != 0o755:
+            raise RuntimeError("Release runtime must be executable with mode 0755.")
+    if metadata.get("files") != packages["codex"]["files"]:
+        raise RuntimeError("Codex package metadata differs from its host record.")
+    if packages["codex"]["files"]["bin/delm"] != packages["claude"]["files"]["bin/delm"]:
+        raise RuntimeError("Native hosts must contain identical shared runtime bytes and permissions.")
+    if metadata.get("claudeAdapterSha256") != claude_adapter_digest(output / HOST_PATHS["claude"]):
+        raise RuntimeError("Claude adapter differs from its qualified resource identity.")
+    validation = metadata.get("claudeValidation", {})
+    if (validation.get("kind") != "claude-plugin-validation" or validation.get("strict") is not True
+            or validation.get("passed") is not True or validation.get("modelCalls") != 0
+            or not isinstance(validation.get("hostVersion"), str) or not validation["hostVersion"]
+            or validation.get("payloadSha256") != payload_digest(output / HOST_PATHS["claude"])):
+        raise RuntimeError("Claude payload requires matching strict native plugin validation.")
     catalog = json.loads((output / ".agents/plugins/marketplace.json").read_text())
     expected_source = {"source": "git-subdir", "url": "https://github.com/" + metadata["repository"] + ".git",
                        "path": "./plugins/delm", "ref": "delm-plugin-v" + version}
@@ -216,14 +337,12 @@ def verify(output, revision=None, repository=None, require_qualified=False):
     if (catalog.get("name") != "delm" or len(plugins) != 1 or plugins[0].get("name") != "delm"
             or plugins[0].get("source") != expected_source):
         raise RuntimeError("Marketplace catalog differs from the immutable release identity.")
-    plugin_files = package_files(package)
-    if plugin_files != metadata["files"]:
-        raise RuntimeError("Package files, permissions, or checksums changed.")
-    allowed_plugin_files = {*PACKAGE_FILES, "bin/delm"}
-    if set(plugin_files) != allowed_plugin_files:
-        raise RuntimeError("Release plugin contents differ from the runtime resource allowlist.")
-    if metadata["files"].get("bin/delm", {}).get("mode") != 0o755:
-        raise RuntimeError("Release runtime must be executable with mode 0755.")
+    claude_catalog = json.loads((output / ".claude-plugin/marketplace.json").read_text())
+    claude_plugins = claude_catalog.get("plugins", [])
+    if (claude_catalog.get("name") != "delm" or claude_catalog.get("owner", {}).get("name") != "DeLM"
+            or len(claude_plugins) != 1 or claude_plugins[0].get("name") != "delm"
+            or claude_plugins[0].get("source") != "./plugins/delm-claude"):
+        raise RuntimeError("Claude marketplace catalog differs from the release identity.")
     expected = {}
     for line in (output / "SHA256SUMS").read_text().splitlines():
         digest, name = line.split("  ", 1)
@@ -233,18 +352,21 @@ def verify(output, revision=None, repository=None, require_qualified=False):
         expected[name] = digest
     distribution_files = package_files(output)
     allowed_distribution_files = {"README.md", "release.json", "SHA256SUMS",
-                                  ".agents/plugins/marketplace.json"}
-    allowed_distribution_files.update("plugins/delm/" + name for name in allowed_plugin_files)
+                                  ".agents/plugins/marketplace.json", ".claude-plugin/marketplace.json"}
+    for host, relative in HOST_PATHS.items():
+        allowed_distribution_files.update(relative + "/" + name for name in {*HOST_PACKAGE_FILES[host], "bin/delm"})
     if set(distribution_files) != allowed_distribution_files:
         raise RuntimeError("Release distribution contains missing or unexpected artifacts.")
     actual = {name: info["sha256"] for name, info in distribution_files.items()
               if name != "SHA256SUMS"}
     if actual != expected:
         raise RuntimeError("Distribution files or checksums changed.")
+    verify_claude_qualification(metadata)
     if require_qualified or metadata["signedAndNotarized"]:
         if metadata["sourceDirty"]:
             raise RuntimeError("An uncommitted working-tree artifact cannot qualify for publication.")
         verify_qualification(metadata)
+        verify_claude_qualification(metadata, require_all=True)
     if metadata["signedAndNotarized"] and not re.fullmatch(
             r"[0-9a-f]{64}", metadata.get("unsignedRuntimeSha256", "")):
         raise RuntimeError("Signed release must identify its qualified unsigned runtime.")
@@ -261,7 +383,10 @@ def main():
     parser.add_argument("--signed-and-notarized", action="store_true")
     parser.add_argument("--qualification", action="append", default=[], type=Path)
     parser.add_argument("--unsigned-origin", type=Path)
+    parser.add_argument("--claude-qualification", action="append", default=[], type=Path,
+                        help="Manual native Claude qualification record or JSON array; repeat for both architectures")
     parser.add_argument("--require-qualified", action="store_true")
+    parser.add_argument("--claude", default="claude", help="Claude Code CLI for native payload validation")
     args = parser.parse_args()
     if args.verify:
         verify(args.verify, revision=args.revision, repository=args.repository,
@@ -273,12 +398,12 @@ def main():
             subprocess.run(["codesign", "--verify", "--strict", "--check-notarization",
                             "-R=notarized", str(args.runtime)], check=True)
         assemble(SOURCE, args.runtime, args.output, args.repository, args.revision,
-                 args.signed_and_notarized, args.qualification, args.unsigned_origin)
+                 args.signed_and_notarized, args.qualification, args.unsigned_origin, args.claude, args.claude_qualification)
         verify(args.output)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         sys.exit(str(error))

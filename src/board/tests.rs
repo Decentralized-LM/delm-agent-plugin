@@ -780,6 +780,148 @@ fn native_check(root: &Path, started: u64, exit: i64) -> HashMap<String, Value> 
 }
 
 #[test]
+fn explicit_native_scopes_preserve_read_write_and_denied_boundaries() {
+    let fixture = Fixture::new();
+    fixture.seed("main.js", b"old");
+    fixture.seed("private.txt", b"private");
+    fs::write(fixture.workers[0].join("main.js"), b"new").unwrap();
+    let mut board = fixture.board();
+    board
+        .set_worker_scopes(
+            1,
+            vec![
+                FilesystemScope {
+                    path: fixture.workers[0].clone(),
+                    access: FilesystemAccess::Read,
+                },
+                FilesystemScope {
+                    path: fixture.workers[0].join("private.txt"),
+                    access: FilesystemAccess::Deny,
+                },
+            ],
+        )
+        .unwrap();
+    let publication = publish(&mut board, 1, "read-allowed", &["main.js"]);
+    assert!(board.input_snapshot(1, &["private.txt".into()]).is_err());
+    board
+        .set_worker_scopes(
+            2,
+            vec![FilesystemScope {
+                path: fixture.workers[1].clone(),
+                access: FilesystemAccess::Read,
+            }],
+        )
+        .unwrap();
+    let apply = json!({"idempotency_key":"apply","publication_id":publication});
+    assert!(board.call(2, "delm_apply", apply.clone()).is_err());
+    board
+        .set_worker_scopes(
+            2,
+            vec![FilesystemScope {
+                path: fixture.workers[1].join("main.js"),
+                access: FilesystemAccess::Write,
+            }],
+        )
+        .unwrap();
+    board.call(2, "delm_apply", apply).unwrap();
+    assert_eq!(
+        fs::read(fixture.workers[1].join("main.js")).unwrap(),
+        b"new"
+    );
+    for path in [PathBuf::from("relative"), fixture.workers[1].join("*.js")] {
+        assert!(
+            board
+                .set_worker_scopes(
+                    2,
+                    vec![FilesystemScope {
+                        path,
+                        access: FilesystemAccess::Write
+                    }]
+                )
+                .is_err()
+        );
+    }
+    assert!(board.input_snapshot(2, &["main.js".into()]).is_ok());
+    board.set_worker_scopes(2, vec![]).unwrap();
+    assert!(board.input_snapshot(2, &["main.js".into()]).is_err());
+}
+
+#[test]
+fn native_tool_receipts_reuse_scoped_success_without_claiming_a_process_exit() {
+    use crate::evidence::{CommandCompletion, CommandEvidence, NativeHost};
+    let fixture = Fixture::new();
+    fixture.seed("main.js", b"ready");
+    let mut board = fixture.board();
+    let begun = board.begin_check(1,json!({"idempotency_key":"begin-native","summary":"Focused native check","paths":["main.js"]}),||10).unwrap();
+    let mut command = CommandEvidence {
+        host: NativeHost::Claude,
+        id: "bash-7".into(),
+        command: "node --test".into(),
+        cwd: fixture.workers[0].clone(),
+        revision: 1,
+        started_sequence: Some(11),
+        completion: CommandCompletion::NativeTool {
+            result_ref: "7".into(),
+            is_error: false,
+            interrupted: false,
+            background_task_id: Some("pending".into()),
+            timed_out: false,
+        },
+    };
+    let finish = json!({"idempotency_key":"finish-native","snapshot_id":begun["result"]["snapshot_id"],"command_id":"bash-7"});
+    assert!(
+        board
+            .finish_check_with_evidence(
+                1,
+                finish.clone(),
+                &HashMap::from([("bash-7".into(), command.clone())])
+            )
+            .is_err()
+    );
+    if let CommandCompletion::NativeTool {
+        background_task_id, ..
+    } = &mut command.completion
+    {
+        *background_task_id = None;
+    }
+    let receipt = board
+        .finish_check_with_evidence(
+            1,
+            finish.clone(),
+            &HashMap::from([("bash-7".into(), command)]),
+        )
+        .unwrap();
+    assert_eq!(receipt["result"]["passed"], true);
+    assert_eq!(
+        receipt["result"]["evidence"]["completion"]["kind"],
+        "native_tool"
+    );
+    assert_eq!(
+        receipt["result"]["evidence"]["completion"]["result_ref"],
+        "7"
+    );
+    assert!(receipt["result"]["native"].get("exitCode").is_none());
+    assert!(
+        receipt["result"]["evidence"]["completion"]
+            .get("exit_code")
+            .is_none()
+    );
+    assert_eq!(
+        board
+            .finish_check_with_evidence(1, finish, &HashMap::new())
+            .unwrap(),
+        receipt
+    );
+    let declaration = json!({"shared_checks":[receipt["result"]["receipt_id"]]});
+    assert_eq!(
+        board.shared_checks(2, &declaration, 1).unwrap()[0]["reusable"],
+        true
+    );
+    fs::write(fixture.workers[1].join("main.js"), b"changed").unwrap();
+    assert!(board.shared_checks(2, &declaration, 1).is_err());
+}
+
+#[test]
 fn shared_evidence_requires_precommand_snapshot_and_matching_imported_inputs() {
     let fixture = Fixture::new();
     fixture.seed("parser.js", b"before");

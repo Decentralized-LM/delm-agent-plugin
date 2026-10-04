@@ -1,12 +1,12 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     ffi::{CString, OsStr},
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{
@@ -153,6 +153,17 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 pub struct RunLock(File);
 impl RunLock {
     pub fn acquire(project: &Path) -> Result<Self> {
+        Self::acquire_internal(project, None)
+    }
+
+    /// Recovery may bypass only the selected run's durable admission record.
+    /// It still obtains the same project lock and rejects every other owner.
+    pub(crate) fn acquire_for_recovery(project: &Path, run_id: &str) -> Result<Self> {
+        let id = uuid::Uuid::parse_str(run_id).context("Invalid recovery run identity")?;
+        Self::acquire_internal(project, Some(&id.to_string()))
+    }
+
+    fn acquire_internal(project: &Path, recovery_run: Option<&str>) -> Result<Self> {
         check_storage_boundary(project)?;
         let root = root()?;
         let dir = directory_at(&root.1, OsStr::new("locks"), true)?;
@@ -184,9 +195,72 @@ impl RunLock {
         );
         file.try_lock_exclusive()
             .context("Another DeLM task already owns this project")?;
-        Ok(Self(file))
+        let lock = Self(file);
+        directory_at(&root.1, OsStr::new("runs"), true)?;
+        check_native_admission(project, &root.0.join("runs"), recovery_run)?;
+        Ok(lock)
     }
 }
+/// A native host can outlive its bridge and therefore its file lock. Every
+/// host checks these durable records under the common project lock before a
+/// new run starts; only authenticated recovery excludes its specific run.
+pub(crate) fn check_native_admission(
+    project: &Path,
+    runs: &Path,
+    recovery_run: Option<&str>,
+) -> Result<()> {
+    for (index, entry) in fs::read_dir(runs)?.enumerate() {
+        ensure!(
+            index < 16384,
+            "Too many private runs to prove project admission safely"
+        );
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || recovery_run.is_some_and(|id| entry.file_name() == OsStr::new(id))
+        {
+            continue;
+        }
+        let path = entry.path().join("claude.json");
+        let mut file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("Inspect native run admission"),
+        };
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.len() <= 64 * 1024 * 1024,
+            "Unsafe or oversized native run admission record"
+        );
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(64 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() <= 64 * 1024 * 1024,
+            "Native run admission record exceeded its bound"
+        );
+        let saved: Value = serde_json::from_slice(&bytes)?;
+        let original = saved.get("project").or_else(|| {
+            saved
+                .get("workspace")
+                .and_then(|workspace| workspace.get("original"))
+        });
+        if original.and_then(Value::as_str) == project.to_str() && saved["finished"] != true {
+            bail!(
+                "An unfinished Claude DeLM run still owns this project: {}. Stop its native agents and recover that run before starting another",
+                entry.file_name().to_string_lossy()
+            );
+        }
+    }
+    Ok(())
+}
+
 impl Drop for RunLock {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.0);
@@ -267,5 +341,64 @@ mod tests {
         assert!(storage_at(&original).is_err());
         assert_eq!(fs::metadata(&original).unwrap().mode(), before);
         assert_eq!(fs::read_dir(&original).unwrap().count(), 0);
+    }
+    #[test]
+    fn every_host_respects_orphaned_native_admission_and_recovery_excludes_only_its_run() {
+        struct Runs(Vec<PathBuf>);
+        impl Drop for Runs {
+            fn drop(&mut self) {
+                for path in &self.0 {
+                    let _ = fs::remove_dir_all(path);
+                }
+            }
+        }
+        let project = tempfile::tempdir().unwrap();
+        let project = project.path().canonicalize().unwrap();
+        let mut records = Runs(Vec::new());
+        let first = create_run().unwrap();
+        records.0.push(first.clone());
+        let second = create_run().unwrap();
+        records.0.push(second.clone());
+        let first_id = first.file_name().unwrap().to_str().unwrap();
+        let lock = RunLock::acquire(&project).unwrap();
+        atomic_json(
+            &first.join("claude.json"),
+            &json!({"host":"claude","project":project,"status":"running","finished":false}),
+        )
+        .unwrap();
+        drop(lock); // The bridge died, but native peers may still be running.
+        assert!(
+            RunLock::acquire(&project).is_err(),
+            "Codex and Claude use this same entry point"
+        );
+        let recovery = RunLock::acquire_for_recovery(&project, first_id).unwrap();
+        assert!(
+            RunLock::acquire(&project).is_err(),
+            "Recovery still owns the real project lock"
+        );
+        drop(recovery);
+        atomic_json(
+            &second.join("claude.json"),
+            &json!({"host":"claude","workspace":{"original":project},"finished":false}),
+        )
+        .unwrap();
+        assert!(
+            RunLock::acquire_for_recovery(&project, first_id).is_err(),
+            "Recovery cannot bypass a second unfinished run"
+        );
+        atomic_json(
+            &second.join("claude.json"),
+            &json!({"host":"claude","project":project,"finished":true}),
+        )
+        .unwrap();
+        let recovery = RunLock::acquire_for_recovery(&project, first_id).unwrap();
+        atomic_json(
+            &first.join("claude.json"),
+            &json!({"host":"claude","project":project,"status":"stopped","finished":true}),
+        )
+        .unwrap();
+        drop(recovery);
+        RunLock::acquire(&project).unwrap();
+        assert!(RunLock::acquire_for_recovery(&project, "../different-run").is_err());
     }
 }

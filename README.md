@@ -4,8 +4,8 @@
   </a>
 </p>
 
-<h1 align="center">DeLM for Codex</h1>
-<p align="center">Decentralized collaboration in your Codex workflow.</p>
+<h1 align="center">DeLM for Codex and Claude Code</h1>
+<p align="center">Build faster with agents that work together.</p>
 
 <p align="center">
   <a href="https://arxiv.org/abs/2606.10662"><img src="docs/assets/paper.svg" alt="Read the paper on arXiv" height="28"></a>
@@ -22,52 +22,101 @@
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-DeLM brings two collaborating agents to your existing Codex conversation. They claim work, share findings, and reuse each other's code through a shared context and task queue. Both contribute to one result, which DeLM applies to your project before removing its temporary workspaces.
+DeLM lets agents work in parallel in your existing Codex or Claude Code workflow. A shared task queue coordinates the work, while shared context lets agents exchange findings and reuse each other's code. Their contributions come together in your project.
 
-Invoke **`$delm:run`** when you want them to work together. DeLM uses your Codex account and starts its workers only when you ask.
+- **Work in parallel.** Agents claim tasks and pick up new work as it becomes available.
+- **Share progress.** Findings, files, and relevant checks are available to the other agents as they work.
+- **Keep your workflow.** Start a run in your usual conversation, send clarifications there, and receive the changes in your original project.
+
+DeLM uses your existing host account and starts agents only when you ask.
 
 <p align="center">
-  <a href="video-demo/renders/delm-demo.mp4"><img src="video-demo/renders/poster.png" alt="Watch DeLM for Codex: two agents building and sharing their work" width="800"></a>
+  <a href="video-demo/renders/delm-demo.mp4"><img src="video-demo/renders/poster.png" alt="Watch DeLM for Codex: agents building and sharing their work" width="800"></a>
   <br>
-  <a href="video-demo/renders/delm-demo.mp4">Watch the 56-second demo</a>
+  <a href="video-demo/renders/delm-demo.mp4">Watch the 56-second Codex demo</a>
 </p>
 
 ## Install on macOS
 
-The plugin currently installs from source through Codex's native plugin manager. Prebuilt releases have not yet been published.
+Build from source with Git, Python 3, Rust, and Xcode Command Line Tools. Install the CLI for your chosen host and complete its login first. Run the installation commands below from this repository's root. You can install either plugin or both.
 
-You'll need Codex CLI with an existing login, Git, Python 3, Rust, and Xcode Command Line Tools. From this repository's root, run:
+### Codex
 
 ```sh
 ./scripts/install.sh
 ```
 
-Restart Codex, open `/hooks`, and review and trust the DeLM hooks. Restart once more to load the configuration. Installation leaves your Codex executable and account credentials unchanged. See [development setup](docs/development.md) for build details.
+Restart Codex, open `/hooks`, and review and trust the DeLM hooks. Restart once more to load the configuration, then open Codex in the project you want to work on.
 
-The planned npm command is `npx --yes delm-agent@latest install`. The `delm-agent` package is not published or reserved yet; use the source installation above. Contributors can [test the installer privately](packages/installer/README.md).
+### Claude Code
+
+Requires **Claude Code 2.1.289 or later**.
+
+```sh
+./scripts/build.sh --host claude
+claude plugin marketplace add "$PWD" --scope user
+claude plugin install delm@delm-local --scope user
+```
+
+Restart Claude Code, then open it in the project you want to work on. DeLM uses Claude's native plugins, skills, hooks, and MCP tools. Review any trust or permission prompts Claude presents.
+
+See [support](docs/support.md) for updates, removal, and troubleshooting, or [development setup](docs/development.md) for local builds.
+
+### Planned one-command install
+
+The proposed package name is **`delm-agent`**. Once the package and prebuilt releases are published, installation will be:
+
+```sh
+npx --yes delm-agent@latest install               # Codex
+npx --yes delm-agent@latest install --host claude # Claude Code
+```
+
+These commands are not available yet; the package name is not reserved. Contributors can [verify the installer locally](packages/installer/README.md).
 
 ## Run a task
 
-Open Codex in the project you want to work on and enter a request:
+Open your host in the project you want to change, then invoke DeLM with a request:
+
+| Host | Start a run |
+| --- | --- |
+| Codex | `$delm:run <your task>` |
+| Claude Code | `/delm:run <your task>` |
+
+For example, in Claude Code:
 
 ```text
-$delm:run Build a task board with drag-and-drop columns, local persistence,
+/delm:run Build a task board with drag-and-drop columns, local persistence,
 and keyboard controls. Include a README and test the main interactions.
 ```
 
-The trusted invocation hook starts the runtime directly. Both agents work in private project copies, share contributions, and take new tasks as work becomes available. Independent checks can run in parallel; applicable recorded checks can be reused instead of repeating a full acceptance pass. You can clarify the request or ask Codex to stop from the same conversation.
+Use `$delm:run` for the same request in Codex. Send clarifications in the same conversation while the agents work. In Claude Code, `/delm-status` shows progress and `/delm-stop` stops the run and preserves unfinished work. See [run control and recovery](docs/support.md) for both hosts.
 
-**Changes are delivered to your original project.** DeLM preserves the Git index, merges compatible concurrent edits, and saves conflicting changes for recovery. Both worker directories are removed after safe delivery or recovery. Dependency environments stay local to each project; when delivery changes dependency manifests, omits worker-local environments, or merges your edits, Codex performs the necessary setup or focused check in the original project before reporting it ready.
+The current version runs two agents in private project copies. They share contributions and divide useful checks, so a recorded check can be reused when it still applies to the result.
 
-Workers use native Codex forks and preserve ordinary saved skills, plugins, hooks, MCP configuration, and permissions instead of disabling them. The current host API omits parent-process CLI overrides when creating a separate fork host, so this development build does not yet provide exact live-session parity. See [capability inheritance](docs/support.md#codex-setup-and-capability-inheritance) for the precise boundary.
+**The result is delivered to your original project.** DeLM preserves your Git index, merges compatible edits, and retains conflicts for recovery. Temporary worker directories are removed after safe delivery or recovery. When the delivered project needs dependency setup or a focused check, the parent completes it before reporting the result ready.
 
-Select one project smaller than 10 GB, including ignored files and Git history. DeLM initializes Git in that exact folder if needed; it does not create a commit. Runs have a 30-minute default allowance. Stop an active run before disabling DeLM or revoking its hook trust.
+Choose one project smaller than 10 GB, including ignored files and Git history. DeLM initializes Git in that folder if needed without creating a commit. Runs have a 30-minute default allowance.
 
-## Learn more
+### Your host setup
 
-- [Support](docs/support.md) covers project requirements, permissions, updates, and recovery.
-- [Architecture](docs/architecture.md) explains workspaces, coordination, and completion.
-- [Contributing](CONTRIBUTING.md) covers development and checks.
-- [Research code](https://github.com/yuzhenmao/DeLM) contains the paper's evaluation framework and results.
+Claude's native forks inherit the current conversation, model, system prompt, and available tools. Coordination tools pass through Claude's normal permission checks.
 
-Licensed under [Apache-2.0](LICENSE).
+Codex workers preserve saved skills, plugins, hooks, MCP configuration, and permissions. Codex's current fork API does not expose all parent-process CLI overrides, so exact live-session parity is still a limitation. The [support guide](docs/support.md#codex-setup-and-capability-inheritance) explains what is inherited and how to check your setup.
+
+## Documentation
+
+| Guide | Contents |
+| --- | --- |
+| [Support](docs/support.md) | Requirements, permissions, updates, and recovery |
+| [Architecture](docs/architecture.md) | Host adapters, shared coordination, and project delivery |
+| [Contributing](CONTRIBUTING.md) | Development setup and verification |
+| [Release guide](docs/releases.md) | Build qualification and distribution |
+| [Claude integration](docs/claude-integration.md) | Native integration design and validation |
+
+## Research
+
+DeLM builds on **Decentralized Multi-Agent Systems with Shared Context**. See the [paper](https://arxiv.org/abs/2606.10662), [project website](https://yuzhenmao.github.io/DeLM/), and [research code](https://github.com/yuzhenmao/DeLM) for the method, evaluations, and agent trajectories.
+
+## License
+
+DeLM is licensed under [MIT](LICENSE). Third-party components retain their own licenses; see [NOTICE](NOTICE).

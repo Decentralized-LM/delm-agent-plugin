@@ -16,6 +16,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::evidence::{FilesystemAccess, FilesystemScope};
 use files::{FileVersion, Root};
 
 const VIEW_LIMIT: i64 = 24;
@@ -192,7 +193,7 @@ impl Board {
         let filesystem = config["permissions"][profile]["filesystem"]
             .as_object()
             .context("missing worker filesystem profile")?;
-        let mut rules = Vec::new();
+        let mut scopes = Vec::new();
         for (path, access) in filesystem {
             if path == ":minimal" {
                 continue;
@@ -201,21 +202,41 @@ impl Board {
                 !path.starts_with(':') && !path.contains(['*', '?', '[', ']', '{', '}']),
                 "board transfer policy requires literal paths; unsupported glob or special rule: {path}"
             );
-            let path = PathBuf::from(path);
+            let access = match access.as_str() {
+                Some("read") => FilesystemAccess::Read,
+                Some("write") => FilesystemAccess::Write,
+                Some("deny") => FilesystemAccess::Deny,
+                _ => bail!("unknown board permission access"),
+            };
+            scopes.push(FilesystemScope {
+                path: PathBuf::from(path),
+                access,
+            });
+        }
+        self.set_worker_scopes(worker, scopes)
+    }
+
+    /// Bind effective project scopes supplied by a native host adapter. An
+    /// empty scope grants no board reads or writes; paths are never inferred.
+    pub fn set_worker_scopes(&mut self, worker: usize, scopes: Vec<FilesystemScope>) -> Result<()> {
+        ensure!((1..=2).contains(&worker), "unbound worker identity");
+        let mut rules = Vec::new();
+        for scope in scopes {
+            let text = scope.path.to_string_lossy();
             ensure!(
-                path.is_absolute()
-                    && !path
+                !text.contains(['*', '?', '[', ']', '{', '}']),
+                "board transfer policy requires literal paths; unsupported glob rule: {text}"
+            );
+            ensure!(
+                scope.path.is_absolute()
+                    && !scope
+                        .path
                         .components()
                         .any(|part| matches!(part, std::path::Component::ParentDir)),
                 "board permission paths must be absolute"
             );
-            let access = access.as_str().context("invalid board permission access")?;
-            ensure!(
-                ["read", "write", "deny"].contains(&access),
-                "unknown board permission access"
-            );
-            let path = files::normalize_rule_path(&path)?;
-            rules.push((path, access.to_owned()));
+            let path = files::normalize_rule_path(&scope.path)?;
+            rules.push((path, scope.access.as_str().to_owned()));
         }
         self.policies[worker - 1] = Some(rules);
         Ok(())

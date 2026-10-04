@@ -1,7 +1,10 @@
 pub mod board;
+pub mod claude;
 pub mod cli;
 pub mod compatibility;
+pub(crate) mod completion;
 pub mod config;
+pub mod evidence;
 pub(crate) mod inputs;
 pub mod lifecycle;
 pub mod package;

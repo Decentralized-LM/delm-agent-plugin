@@ -1,6 +1,7 @@
 //! Explicitly scoped evidence reuse. A native command must start after the
 //! snapshot fence; neither publication text nor model-supplied results attest it.
 use super::*;
+use crate::evidence::CommandEvidence;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 impl Board {
@@ -83,6 +84,49 @@ impl Board {
         args: Value,
         native_checks: &HashMap<String, Value>,
     ) -> Result<Value> {
+        self.finish_check_record(worker, args, |id| {
+            let native = native_checks
+                .get(id)
+                .context("command was not observed from this native worker")?;
+            let evidence = CommandEvidence::from_codex(native)?;
+            // Full native output remains in the run journal.
+            let native = [
+                "type",
+                "id",
+                "command",
+                "cwd",
+                "status",
+                "exitCode",
+                "_delm_revision",
+                "_delm_started_sequence",
+            ]
+            .into_iter()
+            .map(|key| (key.to_owned(), native[key].clone()))
+            .collect::<serde_json::Map<_, _>>();
+            Ok((evidence, Value::Object(native)))
+        })
+    }
+
+    pub fn finish_check_with_evidence(
+        &mut self,
+        worker: usize,
+        args: Value,
+        native_checks: &HashMap<String, CommandEvidence>,
+    ) -> Result<Value> {
+        self.finish_check_record(worker, args, |id| {
+            let evidence = native_checks
+                .get(id)
+                .context("command was not observed from this native worker")?;
+            Ok((evidence.clone(), serde_json::to_value(evidence)?))
+        })
+    }
+
+    fn finish_check_record(
+        &mut self,
+        worker: usize,
+        args: Value,
+        native_record: impl FnOnce(&str) -> Result<(CommandEvidence, Value)>,
+    ) -> Result<Value> {
         ensure!((1..=2).contains(&worker), "unbound worker identity");
         self.lock.lock_exclusive()?;
         let result = (|| {
@@ -112,39 +156,17 @@ impl Board {
             );
             let before: Value = serde_json::from_str(&encoded)?;
             let id = string(&args, "command_id", 256)?;
-            let native = native_checks
-                .get(id)
-                .context("command was not observed from this native worker")?;
-            ensure!(
-                native["type"] == "commandExecution" && native["id"].as_str() == Some(id),
-                "invalid native command record"
-            );
-            ensure!(
-                native["_delm_revision"].as_u64() == Some(revision),
-                "command belongs to an obsolete or unbound request revision"
-            );
-            let started = native["_delm_started_sequence"]
-                .as_u64()
+            let (evidence, native) = native_record(id)?;
+            let passed = evidence.validate_for(id, revision)?;
+            let started = evidence
+                .started_sequence
                 .context("native command has no observed start boundary")?;
             ensure!(
                 started > before["fence"].as_u64().context("invalid check fence")?,
                 "command started before the check input snapshot; capture scope before running it"
             );
-            ensure!(
-                matches!(native["status"].as_str(), Some("completed" | "failed")),
-                "native command has not finished"
-            );
-            let exit = native["exitCode"]
-                .as_i64()
-                .context("native command has no exit status")?;
-            ensure!(
-                native["command"].as_str().is_some_and(|s| !s.is_empty()),
-                "native command omitted its command text"
-            );
-            let cwd = native["cwd"]
-                .as_str()
-                .context("native command omitted its cwd")?;
-            let cwd = fs::canonicalize(cwd).context("check execution directory is unavailable")?;
+            let cwd = fs::canonicalize(&evidence.cwd)
+                .context("check execution directory is unavailable")?;
             ensure!(
                 cwd.starts_with(&self.workers[worker - 1].path),
                 "shared check must execute inside its worker project"
@@ -157,25 +179,9 @@ impl Board {
                 .collect::<Vec<_>>();
             let after = self.check_versions(worker, &scope)?;
             let unchanged = serde_json::to_value(&after)? == before["files"];
-            let passed = exit == 0 && native["status"] == "completed";
-            // The run journal retains native output. Coordination needs the
-            // observed command identity and outcome, not another full log copy.
-            let native = [
-                "type",
-                "id",
-                "command",
-                "cwd",
-                "status",
-                "exitCode",
-                "_delm_revision",
-                "_delm_started_sequence",
-            ]
-            .into_iter()
-            .map(|key| (key.to_owned(), native[key].clone()))
-            .collect::<serde_json::Map<_, _>>();
             let mut receipt = json!({"snapshot_id":snapshot,"worker":worker,"request_revision":revision,
                 "summary":before["summary"],"scope":"explicit_input_files","files":before["files"],
-                "inputs_unchanged":unchanged,"passed":passed,"reusable":unchanged&&passed,"native":native});
+                "inputs_unchanged":unchanged,"passed":passed,"reusable":unchanged&&passed,"native":native,"evidence":evidence});
             let tx = self
                 .db
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;

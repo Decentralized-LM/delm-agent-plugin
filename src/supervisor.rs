@@ -673,6 +673,167 @@ fn references_run(_pid: u32, _roots: &[PathBuf]) -> Result<bool> {
     bail!("process metadata requires macOS")
 }
 
+/// A shared native host cannot be killed as if it were DeLM's child. After
+/// native task shutdown, require two metadata-only workspace scans separated by
+/// a quiet interval. Inspect same-user processes born since the runtime boundary
+/// plus explicitly known host/service identities, including older ones. This is
+/// a DeLM-scoped fence: untracked preexisting external writers are unsupported.
+/// A reference vetoes cleanup and never authorizes a signal.
+pub(crate) fn ensure_workspace_quiet(
+    roots: &[PathBuf],
+    started_after: ProcessIdentity,
+    known: &[ProcessIdentity],
+) -> Result<()> {
+    ensure!(
+        !roots.is_empty() && roots.len() <= 16,
+        "Provide the private workspace roots to verify"
+    );
+    let until = Instant::now() + STOP_BOUND;
+    let uid = unsafe { libc::geteuid() };
+    ensure!(
+        started_after.uid == uid,
+        "Workspace boundary must belong to this user"
+    );
+    ensure!(
+        known.iter().all(|identity| identity.uid == uid),
+        "Known workspace processes must belong to this user"
+    );
+    let mut identities = Vec::new();
+    for root in roots {
+        ensure!(
+            root.is_absolute(),
+            "Workspace quiet checks require absolute paths"
+        );
+        let metadata = fs::symlink_metadata(root)?;
+        ensure!(
+            metadata.is_dir() && metadata.uid() == uid,
+            "Workspace quiet checks require a user-owned directory: {}",
+            root.display()
+        );
+        let path = root.canonicalize()?;
+        identities.push((path, metadata.dev(), metadata.ino()));
+    }
+    let paths = identities
+        .iter()
+        .map(|(path, _, _)| path.clone())
+        .collect::<Vec<_>>();
+    for pass in 0..2 {
+        if pass != 0 {
+            std::thread::sleep(QUIET);
+        }
+        ensure!(
+            Instant::now() < until,
+            "Workspace quiet check exceeded its time bound"
+        );
+        let processes = same_user_processes(until, started_after, known)?;
+        inspect_workspace_references(&processes, &paths, until)?;
+        for (path, device, inode) in &identities {
+            let current = fs::symlink_metadata(path)?;
+            ensure!(
+                current.is_dir() && current.dev() == *device && current.ino() == *inode,
+                "Workspace changed during the quiet check: {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn same_user_processes(
+    until: Instant,
+    started_after: ProcessIdentity,
+    known: &[ProcessIdentity],
+) -> Result<Vec<Process>> {
+    // PROC_UID_ONLY comes from the installed macOS sys/proc_info.h. Unlike the
+    // watchdog's ownership discovery, this inventory must not skip inspection
+    // failures for a live process that could still reference a workspace.
+    const PROC_UID_ONLY: u32 = 4;
+    let uid = unsafe { libc::geteuid() };
+    let mut ids = vec![0i32; MAX_PROCESSES];
+    let capacity = std::mem::size_of_val(ids.as_slice());
+    let bytes = unsafe {
+        libc::proc_listpids(PROC_UID_ONLY, uid, ids.as_mut_ptr().cast(), capacity as i32)
+    };
+    ensure!(
+        bytes > 0
+            && (bytes as usize) < capacity
+            && (bytes as usize).is_multiple_of(std::mem::size_of::<i32>()),
+        "Same-user process inventory failed or exceeded its bound"
+    );
+    ids.truncate(bytes as usize / std::mem::size_of::<i32>());
+    let mut found = Vec::new();
+    for pid in ids
+        .into_iter()
+        .filter(|pid| *pid > 0 && *pid as u32 != std::process::id())
+    {
+        ensure!(
+            Instant::now() < until,
+            "Workspace quiet check exceeded its time bound"
+        );
+        match process(pid as u32).with_context(|| {
+            format!("Cannot inspect same-user PID {pid}; workspace cleanup is not safe")
+        })? {
+            Some(info)
+                if info.identity.uid == uid
+                    && !info.zombie
+                    && (birth(info.identity) >= birth(started_after)
+                        || known.contains(&info.identity)) =>
+            {
+                found.push(info)
+            }
+            _ => {}
+        }
+    }
+    Ok(found)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn same_user_processes(
+    _until: Instant,
+    _started_after: ProcessIdentity,
+    _known: &[ProcessIdentity],
+) -> Result<Vec<Process>> {
+    bail!("Workspace quiet checks require macOS process metadata")
+}
+
+fn inspect_workspace_references(
+    processes: &[Process],
+    roots: &[PathBuf],
+    until: Instant,
+) -> Result<()> {
+    for info in processes {
+        ensure!(
+            Instant::now() < until,
+            "Workspace quiet check exceeded its time bound"
+        );
+        let references = references_run(info.identity.pid, roots);
+        // Exited/reused PIDs cannot carry a reference from this observation.
+        // A live identity that cannot be inspected still vetoes cleanup.
+        if !info.identity.is_running().with_context(|| {
+            format!(
+                "Cannot recheck same-user PID {}; workspace cleanup is not safe",
+                info.identity.pid
+            )
+        })? {
+            continue;
+        }
+        ensure!(
+            Instant::now() < until,
+            "Workspace quiet check exceeded its time bound"
+        );
+        ensure!(
+            !references.with_context(|| format!(
+                "Cannot exclude a workspace reference for live PID {}; preserve the workspaces",
+                info.identity.pid
+            ))?,
+            "Live PID {} still references a private workspace; stop its native task before cleanup",
+            info.identity.pid
+        );
+    }
+    Ok(())
+}
+
 fn reference_fence(tracker: &mut Tracker, spec: &Spec, snapshot: &BTreeMap<u32, Process>) {
     for info in snapshot
         .values()
@@ -917,4 +1078,118 @@ pub fn watchdog(path: &Path) -> Result<()> {
     };
     write_new(&spec.report, &report)?;
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod quiet_tests {
+    use super::*;
+
+    struct ReferencingProcess(Child);
+    impl ReferencingProcess {
+        fn start(root: &Path, descriptor: bool) -> Self {
+            let code = if descriptor {
+                "import sys; f=open(sys.argv[1]); print('ready',flush=True); sys.stdin.read()"
+            } else {
+                "import sys; print('ready',flush=True); sys.stdin.read()"
+            };
+            let mut child = Command::new("/usr/bin/python3")
+                .args(["-u", "-c", code])
+                .arg(root.join("input.txt"))
+                .current_dir(if descriptor {
+                    root.parent().unwrap()
+                } else {
+                    root
+                })
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut ready = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap();
+            assert_eq!(ready, "ready\n");
+            Self(child)
+        }
+        fn finish(&mut self) {
+            self.0.stdin.take();
+            assert!(self.0.wait().unwrap().success());
+        }
+    }
+    impl Drop for ReferencingProcess {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_cwd_or_open_file_vetoes_cleanup_without_signalling_the_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("input.txt"), "held").unwrap();
+        let roots = vec![root.canonicalize().unwrap()];
+        for descriptor in [false, true] {
+            let mut child = ReferencingProcess::start(&root, descriptor);
+            let identity = ProcessIdentity::capture(child.0.id()).unwrap();
+            let observed = process(child.0.id()).unwrap().unwrap();
+            let error =
+                inspect_workspace_references(&[observed], &roots, Instant::now() + STOP_BOUND)
+                    .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("Live PID {}", child.0.id()))
+            );
+            assert!(
+                identity.is_running().unwrap(),
+                "quiet checks must never stop the process"
+            );
+            child.finish();
+            inspect_workspace_references(&[observed], &roots, Instant::now() + STOP_BOUND).unwrap();
+        }
+    }
+
+    #[test]
+    fn older_known_reference_is_included_and_fresh_unowned_reference_is_included() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("input.txt"), "held").unwrap();
+        let mut older = ReferencingProcess::start(&root, true);
+        let older_id = ProcessIdentity::capture(older.0.id()).unwrap();
+        let mut fresh = ReferencingProcess::start(&root, false);
+        let boundary = ProcessIdentity::capture(fresh.0.id()).unwrap();
+        let scanned =
+            same_user_processes(Instant::now() + STOP_BOUND, boundary, &[older_id]).unwrap();
+        assert!(scanned.iter().any(|p| p.identity == older_id));
+        assert!(scanned.iter().any(|p| p.identity == boundary));
+        let error = ensure_workspace_quiet(&[root.canonicalize().unwrap()], boundary, &[older_id])
+            .unwrap_err();
+        assert!(error.to_string().contains("still references"));
+        assert!(older_id.is_running().unwrap());
+        assert!(boundary.is_running().unwrap());
+        older.finish();
+        fresh.finish();
+        ensure_workspace_quiet(&[root.canonicalize().unwrap()], boundary, &[older_id]).unwrap();
+    }
+
+    #[test]
+    fn quiet_workspaces_require_two_complete_same_user_scans() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let start = Instant::now();
+        ensure_workspace_quiet(
+            &[root],
+            ProcessIdentity::capture(std::process::id()).unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert!(start.elapsed() >= QUIET);
+        assert!(start.elapsed() < STOP_BOUND);
+    }
 }

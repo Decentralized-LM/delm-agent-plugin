@@ -29,6 +29,12 @@ const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Native Claude Code plugin integration.
+    #[command(hide = true)]
+    Claude {
+        #[command(subcommand)]
+        command: crate::claude::Command,
+    },
     #[command(hide = true)]
     CapturedRun {
         #[arg(long)]
@@ -295,6 +301,7 @@ struct AuthenticatedControl {
 
 pub async fn execute(command: Command) -> Result<()> {
     match command {
+        Command::Claude { command } => crate::claude::execute(command).await,
         Command::Respond {
             run_id,
             request_id,

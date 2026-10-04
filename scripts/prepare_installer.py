@@ -13,7 +13,7 @@ import tempfile
 
 SOURCE = Path(__file__).resolve().parents[1] / "packages/installer"
 PACKAGE_FILES = ["LICENSE", "NOTICE", "README.md", "bin/delm-agent.mjs",
-                 "lib/installer.mjs", "package.json", "release.json"]
+                 "lib/claude.mjs", "lib/installer.mjs", "lib/native.mjs", "package.json", "release.json"]
 REPOSITORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
 
 
@@ -26,26 +26,33 @@ def sha256(path):
 
 
 def readme(repository):
-    return f"""# DeLM installer for Codex
+    return f"""# DeLM installer
 
-Install and manage DeLM through stock Codex's native plugin manager. The installer
-uses the `marketplace` branch of [the DeLM distribution](https://github.com/{repository})
-and installs `delm@delm`. It does not replace Codex, grant hook trust, or start workers.
+Install and manage native DeLM plugins for Codex or Claude Code. Both use the
+`marketplace` branch of [the DeLM distribution](https://github.com/{repository})
+and the identity `delm@delm`. Select one host per command; Codex is the default.
 
 ## Install
 
-Requirements: macOS, Node.js 22+, Git, and stock Codex CLI on `PATH`. A desktop or
-IDE installation alone is insufficient. Complete account login through Codex before
-running DeLM. No Rust compiler or source checkout is needed.
+Requirements: macOS, Node.js 22+, Git, and the selected host CLI on `PATH`.
+Claude Code requires version 2.1.289 or newer, our qualified support floor for
+the native fork/Mods API contract. Install and update check this before changing
+anything; status and removal remain available with compatible older native JSON.
+Complete account login through your host before running DeLM. No Rust compiler
+or source checkout is needed.
 
 ```sh
 npx --yes delm-agent@latest install
+npx --yes delm-agent@latest install --host claude
 ```
 
-Restart Codex, open `/hooks`, and review and trust DeLM when requested. Restart
-after granting trust, then enter `$delm:run <task>` in a Git repository.
-Repeating `install` leaves an enabled plugin in place. Installation status does
-not verify hook trust in your current session.
+For Codex, restart, open `/hooks`, and review and trust DeLM when requested.
+Restart after granting trust, then enter `$delm:run <task>`. A desktop or IDE
+installation alone is insufficient without stock Codex CLI.
+
+For Claude Code, restart to load the plugin, then enter `/delm:run <task>`.
+The installer manages Claude's user scope and respects `CLAUDE_CONFIG_DIR`.
+It does not grant tool permissions, inspect credentials, or start workers.
 
 ## Manage
 
@@ -53,24 +60,33 @@ not verify hook trust in your current session.
 npx --yes delm-agent@latest status
 npx --yes delm-agent@latest update
 npx --yes delm-agent@latest remove
+
+npx --yes delm-agent@latest status --host claude
+npx --yes delm-agent@latest update --host claude
+npx --yes delm-agent@latest remove --host claude
 ```
 
-Stop active DeLM work before updating or removing the plugin. Updates retain
-native hook review and keep a disabled plugin disabled; `install` enables it.
-Removal retains saved work, accounts, unrelated plugins, and the marketplace.
-Installer and plugin versions are independent; plugin updates use Codex's manager.
+Stop active DeLM work before updating or removing the plugin. Repeating `install`
+leaves an enabled plugin in place. Updating a disabled plugin keeps it disabled;
+`install` enables it. Installation status does not verify activation or permissions
+in an existing session. Removal retains saved work and the marketplace; Claude
+removal uses its native `--keep-data` option. Native removal may clear that plugin's
+stored options. Unrelated plugins and host account credentials are preserved.
+Installer and plugin versions are independent; plugin updates use the host's manager.
 
-Use `--codex PATH` to select an existing CLI and `--json` for structured output.
-`CODEX_HOME` is respected. `--help`, `--version`, and read-only `status` are also
-available on other operating systems. Git access to the distribution repository
-is required; a private repository requires your own authorized Git access.
+Use `--codex PATH` or `--host claude --claude PATH` to select an existing CLI and
+`--json` for structured output. `CODEX_HOME` and `CLAUDE_CONFIG_DIR` are respected.
+`--help`, `--version`, and read-only `status` are also available on other operating
+systems. Git access to the distribution is required; a private repository requires
+your own authorized Git access.
 
-Conflicting marketplace registrations are preserved. An existing `delm@delm-local`
-source installation blocks install and update. Stop active work, then run
-`./scripts/uninstall.sh` from its original checkout before retrying. That script
-preserves results and refuses modified cached files; use the checkout's documented
-migration procedure if you need to preserve those modifications. This installer
-does not remove or migrate the source installation automatically.
+Conflicting source registrations are preserved. Claude registrations on another
+branch or in another plugin scope block changes. An existing `delm@delm-local`
+source installation blocks install and update. For Codex, stop active work, run
+`./scripts/uninstall.sh` from its original checkout, and follow that checkout's
+migration instructions if cached files were modified. For Claude, review the
+source installation in its native plugin manager. This installer does not remove
+or migrate source installations automatically.
 """
 
 

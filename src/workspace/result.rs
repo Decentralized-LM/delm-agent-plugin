@@ -1,9 +1,16 @@
 use super::*;
 
-/// The caller supplies the worker's effective read-only runtime grants and
-/// denials. This is a result policy, never authority to read more worker files.
+/// Artifact inspection policy supplied by the host adapter. Native read grants
+/// and explicit Python dependency inspection are distinct sources of authority;
+/// neither expands the board's worker-file access scopes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResultPolicy {
+    /// Explicit native-plugin completion inspection of structurally qualified
+    /// Python virtualenv interpreter dependencies. This is not a native Read
+    /// permission grant, and every denied root still applies. Codex keeps this
+    /// disabled and qualifies interpreters through its exported read-only grants.
+    #[serde(default)]
+    pub native_python_runtime: bool,
     pub readonly_runtime_roots: Vec<PathBuf>,
     pub denied_roots: Vec<PathBuf>,
 }
@@ -42,7 +49,7 @@ pub fn manifest_for_result(root: &Path, policy: &ResultPolicy) -> Result<Manifes
                 && anchor
                     .components()
                     .all(|component| component != Component::ParentDir),
-            "virtual environment interpreter is outside qualified read-only runtimes: {path}"
+            "virtual environment interpreter is outside the qualified runtime policy: {path}"
         );
         let name = target.file_name().and_then(OsStr::to_str).unwrap_or("");
         ensure!(
@@ -97,7 +104,7 @@ fn allowed_runtime(
     anchor: &Path,
     home: &Path,
 ) -> Result<bool> {
-    let mut readable = false;
+    let mut readable = policy.native_python_runtime;
     for scope in &policy.readonly_runtime_roots {
         if scope.is_absolute() && within_scope(target, scope)? {
             readable = true;

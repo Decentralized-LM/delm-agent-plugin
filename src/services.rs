@@ -222,6 +222,15 @@ fn refresh(entry: &mut Service, board: &Board) -> Result<()> {
 }
 
 impl Services {
+    /// Previously observed ownership is retained for shutdown checks. A service
+    /// can keep serving loaded bytes after releasing every source descriptor.
+    pub(crate) fn process_identities(&self) -> Vec<ProcessIdentity> {
+        self.entries
+            .values()
+            .filter_map(|service| service.process)
+            .collect()
+    }
+
     pub fn call(&mut self, worker: usize, args: Value, host: u32, board: &Board) -> Result<Value> {
         ensure!((1..=2).contains(&worker), "Unknown worker");
         let action = field(&args, "action")?;

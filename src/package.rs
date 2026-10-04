@@ -15,6 +15,13 @@ use std::{
 
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 
+pub(crate) fn retained_executable() -> Result<PathBuf> {
+    preserve(
+        &std::env::current_exe()?.canonicalize()?,
+        &crate::run::state::runtime_storage()?,
+    )
+}
+
 /// Re-exec before starting Tokio or workers, keeping the foreground process and
 /// its PID, streams, arguments, and environment. No persistent daemon is added.
 pub fn preserve_for_run(project: &Path) -> Result<()> {

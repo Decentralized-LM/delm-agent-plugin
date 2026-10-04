@@ -28,7 +28,9 @@ security set-keychain-settings -lut 21600 "$release_keychain"
 security unlock-keychain -p "$release_password" "$release_keychain"
 security import "$release_certificate" -k "$release_keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
 security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$release_password" "$release_keychain" >/dev/null
-# Preserve the qualified unsigned package and its checksums for provenance.
+# Preserve the qualified unsigned packages and their checksums for provenance.
+# package_release verifies identical runtime bytes in both host payloads and
+# copies this one signed binary into each self-contained host package.
 release_binary="$RUNNER_TEMP/delm-signed"
 cp unsigned-review/plugins/delm/bin/delm "$release_binary"
 codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" --keychain "$release_keychain" "$release_binary"

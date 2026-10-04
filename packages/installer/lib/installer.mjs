@@ -1,11 +1,11 @@
-import {execFile} from 'node:child_process';
 import {readFileSync} from 'node:fs';
 import {mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
-import {promisify} from 'node:util';
 
-const execFileAsync = promisify(execFile);
+import {InstallerError, execute} from './native.mjs';
+import {manageClaude, describeClaude} from './claude.mjs';
+export {InstallerError, execute} from './native.mjs';
 const configuration = JSON.parse(readFileSync(new URL('../release.json', import.meta.url), 'utf8'));
 export const RELEASE = Object.freeze({
   ...configuration,
@@ -13,28 +13,6 @@ export const RELEASE = Object.freeze({
 });
 export const COMMANDS = ['install', 'update', 'remove', 'status'];
 
-export class InstallerError extends Error {
-  constructor(message, code = 'INSTALLER_ERROR') {
-    super(message);
-    this.name = 'InstallerError';
-    this.code = code;
-  }
-}
-
-export async function execute(file, args, options = {}) {
-  try {
-    return await execFileAsync(file, args, {
-      env: process.env, encoding: 'utf8', timeout: 120_000,
-      maxBuffer: 4 * 1024 * 1024, ...options,
-    });
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      throw new InstallerError(`Cannot find ${file}. Install it and make it available on PATH.`, 'MISSING_EXECUTABLE');
-    }
-    const detail = String(error.stderr || error.stdout || error.message).trim();
-    throw new InstallerError(`${file} ${args.join(' ')} failed: ${detail}`, 'NATIVE_COMMAND_FAILED');
-  }
-}
 
 function collection(value, key) {
   if (!value || !Array.isArray(value[key])) {
@@ -45,8 +23,14 @@ function collection(value, key) {
 
 // Distribution identity is fixed at package preparation, never by a CLI flag.
 // Unit tests inject release/run; native tests exercise a prepared package.
-export async function manage(command, {codex = 'codex', platform = process.platform, run = execute, release = RELEASE} = {}) {
-  if (codex.includes('/') || codex.includes('\\')) codex = resolve(codex);
+export async function manage(command, {host = 'codex', codex, claude, platform = process.platform, run = execute, release = RELEASE} = {}) {
+  if (!['codex', 'claude'].includes(host)) throw new InstallerError('Choose --host codex or --host claude.', 'USAGE');
+  if ((host !== 'codex' && codex !== undefined) || (host !== 'claude' && claude !== undefined)) {
+    throw new InstallerError('The executable option must match --host. Use --codex with codex or --claude with claude.', 'USAGE');
+  }
+  let executable = (host === 'codex' ? codex : claude) ?? host;
+  if (typeof executable !== 'string' || !executable.trim()) throw new InstallerError(`--${host} requires an executable path.`, 'USAGE');
+  if (executable.includes('/') || executable.includes('\\')) executable = resolve(executable);
   if (!COMMANDS.includes(command)) throw new InstallerError(`Unknown command: ${command}`, 'USAGE');
   if (release.repository === null) {
     throw new InstallerError('This source installer has no release destination. Use a prepared installer package; contributors can run scripts/prepare_installer.py with --repository OWNER/REPO and --out DIRECTORY.', 'UNCONFIGURED_RELEASE');
@@ -61,7 +45,11 @@ export async function manage(command, {codex = 'codex', platform = process.platf
   }
   const cwd = await mkdtemp(join(tmpdir(), 'delm-installer-'));
   try {
-    return await manageNative(command, {codex, release, run: (file, args) => run(file, args, {cwd})});
+    const nativeRun = (file, args) => run(file, args, {cwd});
+    const result = host === 'claude'
+      ? await manageClaude(command, {claude: executable, release, run: nativeRun})
+      : await manageNative(command, {codex: executable, release, run: nativeRun});
+    return {host, ...result};
   } finally {
     await rm(cwd, {recursive: true, force: true});
   }
@@ -156,6 +144,7 @@ async function manageNative(command, {codex, release: RELEASE, run}) {
 }
 
 export function describe(result) {
+  if (result.host === 'claude') return describeClaude(result);
   const label = result.version ? `DeLM ${result.version}` : 'DeLM';
   if (result.command === 'status') {
     const lines = result.installed

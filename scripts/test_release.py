@@ -11,11 +11,12 @@ import unittest
 from unittest import mock
 
 import package_release
+import build
 import publish_release
 import qualify_release
 import release_identity
 from install_support import fingerprint, package_files
-from test_installation import executable, fixture_source
+from test_installation import executable, fixture_claude_qualifications, fixture_claude_validation, fixture_runtime, fixture_source
 
 
 @contextlib.contextmanager
@@ -30,7 +31,7 @@ def fixture():
                         "-c", "core.hooksPath=/dev/null", "commit", "-qm", "Source"], check=True)
         revision = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
         runtime = root / "delm"
-        executable(runtime, "#!/bin/sh\necho 'delm " + package_release.source_version(source) + "'\n")
+        fixture_runtime(runtime, package_release.source_version(source))
         real_run = subprocess.run
 
         def run(arguments, **kwargs):
@@ -40,7 +41,8 @@ def fixture():
                 return subprocess.CompletedProcess(arguments, 0)
             return real_run(arguments, **kwargs)
 
-        with mock.patch.object(package_release.subprocess, "run", side_effect=run):
+        with mock.patch.object(package_release.subprocess, "run", side_effect=run), \
+             mock.patch.object(package_release, "validate_claude_package", side_effect=fixture_claude_validation):
             yield root, source, runtime, revision
 
 
@@ -73,6 +75,170 @@ def checksums(output):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_adapter_provenance_ignores_native_editor_generation_but_binds_executed_resources(self):
+        with fixture() as (root, source, runtime, revision):
+            package = root / "claude"
+            build.stage_package(source, runtime, package, "claude")
+            before = build.claude_adapter_digest(package)
+            generated = package / ".claude-plugin/types/claude-code"
+            generated.mkdir(parents=True)
+            (generated / "index.d.ts").write_text("// Native-generated editor types\n")
+            (package / ".claude-plugin/types/tsconfig.json").write_text('{"compilerOptions":{}}')
+            (package / "tsconfig.json").write_text('{"extends":"./.claude-plugin/types/tsconfig.json"}')
+            self.assertEqual(build.claude_adapter_digest(package), before)
+            manifest = package / ".claude-plugin/plugin.json"
+            data = json.loads(manifest.read_text())
+            data["repository"] = "https://github.com/example/delm"
+            manifest.write_text(json.dumps(data))
+            self.assertEqual(build.claude_adapter_digest(package), before)
+            module = package / "hooks/delm.js"
+            module.write_text(module.read_text() + "\n// changed executed adapter")
+            self.assertNotEqual(build.claude_adapter_digest(package), before)
+            module.unlink()
+            with self.assertRaisesRegex(RuntimeError, "adapter resources are missing"):
+                build.claude_adapter_digest(package)
+
+    def test_claude_payload_is_required_self_contained_and_bound_to_native_validation(self):
+        with fixture() as (root, source, runtime, revision):
+            output = root / "review"
+            package_release.assemble(source, runtime, output, "example/delm", revision)
+            metadata = package_release.verify(output)
+            self.assertEqual(metadata["claudeValidation"]["payloadSha256"],
+                             build.payload_digest(output / "plugins/delm-claude"))
+            self.assertEqual(set(metadata["hostPackages"]["claude"]["files"]), {*build.CLAUDE_PACKAGE_FILES, "bin/delm"})
+            (source / "hosts/claude/hooks/protocol.js").unlink()
+            with self.assertRaises((OSError, RuntimeError)):
+                package_release.assemble(source, runtime, root / "missing", "example/delm", revision)
+            self.assertFalse((root / "missing/release.json").exists())
+
+    def test_public_qualification_requires_actual_claude_evidence_for_each_architecture(self):
+        with fixture() as (root, source, runtime, revision):
+            codex = qualifications(root, source, runtime, revision)
+            output = root / "unsigned"
+            package_release.assemble(source, runtime, output, "example/delm", revision, qualifications=codex)
+            self.assertEqual(package_release.verify(output)["claudeQualifiedArchitectures"], [])
+            with self.assertRaisesRegex(RuntimeError, "arm64, x86_64"):
+                package_release.verify(output, require_qualified=True)
+            native = fixture_claude_qualifications(root, source, runtime, ["arm64"])
+            arm = root / "arm"
+            package_release.assemble(source, runtime, arm, "example/delm", revision,
+                                     qualifications=codex, claude_qualifications=native)
+            self.assertEqual(package_release.verify(arm)["claudeQualifiedArchitectures"], ["arm64"])
+            with self.assertRaisesRegex(RuntimeError, "for x86_64"):
+                package_release.verify(arm, require_qualified=True)
+            native = fixture_claude_qualifications(root, source, runtime)
+            array = root / "records.json"
+            package_release.write_json(array, [dict(json.loads(path.read_text()), account="never distribute this") for path in native])
+            both = root / "both"
+            package_release.assemble(source, runtime, both, "example/delm", revision,
+                                     qualifications=codex, claude_qualifications=[array])
+            self.assertEqual(package_release.verify(both, require_qualified=True)["claudeQualifiedArchitectures"], ["arm64", "x86_64"])
+            self.assertNotIn("never distribute this", (both / "release.json").read_text())
+
+    def test_claude_release_proof_rejects_stale_bytes_sources_fixture_and_false_claims(self):
+        for field, value in [("runtimeSha256", "0" * 64), ("runtimeSourcesSha256", "0" * 64),
+                             ("fixtureSha256", "0" * 64), ("adapterSha256", "0" * 64), ("hostVersion", "2.1.288 (Claude Code)"),
+                             ("bothWorkersPublishedFiles", False), ("matchingNativeToolPools", False),
+                             ("workspacesRemoved", False), ("deliveredOutputChecked", False),
+                             ("workerCount", 1), ("modelCalls", 0), ("passed", False), ("outputProof", {"../secret": "a" * 64})]:
+            with self.subTest(field=field), fixture() as (root, source, runtime, revision):
+                paths = fixture_claude_qualifications(root, source, runtime)
+                record = json.loads(paths[0].read_text())
+                record[field] = value
+                package_release.write_json(paths[0], record)
+                with self.assertRaisesRegex(RuntimeError, "native Claude qualification"):
+                    package_release.assemble(source, runtime, root / "invalid", "example/delm", revision,
+                                             claude_qualifications=paths)
+                self.assertFalse((root / "invalid/release.json").exists())
+        with fixture() as (root, source, runtime, revision):
+            paths = fixture_claude_qualifications(root, source, runtime)
+            with self.assertRaisesRegex(RuntimeError, "Duplicate Claude"):
+                package_release.assemble(source, runtime, root / "duplicate", "example/delm", revision,
+                                         claude_qualifications=paths + paths)
+
+    def test_claude_version_and_source_symlinks_are_rejected(self):
+        with fixture() as (root, source, runtime, revision):
+            manifest = source / "hosts/claude/.claude-plugin/plugin.json"
+            value = json.loads(manifest.read_text())
+            value["version"] = "99.0.0"
+            package_release.write_json(manifest, value)
+            with self.assertRaisesRegex(RuntimeError, "must identify"):
+                package_release.source_version(source)
+        with fixture() as (root, source, runtime, revision):
+            module = source / "hosts/claude/hooks/protocol.js"
+            module.unlink()
+            module.symlink_to(source / "hosts/claude/hooks/delm.js")
+            with self.assertRaises((OSError, RuntimeError)):
+                build.stage_package(source, runtime, root / "linked", "claude")
+
+    def test_claude_catalog_runtime_and_validation_cannot_be_resealed_incorrectly(self):
+        for mutation in ["catalog", "runtime", "extra", "validation", "host-path"]:
+            with self.subTest(mutation=mutation), fixture() as (root, source, runtime, revision):
+                output = root / "review"
+                package_release.assemble(source, runtime, output, "example/delm", revision)
+                metadata = json.loads((output / "release.json").read_text())
+                package = output / "plugins/delm-claude"
+                if mutation == "catalog":
+                    path = output / ".claude-plugin/marketplace.json"
+                    catalog = json.loads(path.read_text())
+                    catalog["plugins"][0]["source"] = "../elsewhere"
+                    package_release.write_json(path, catalog)
+                elif mutation == "runtime":
+                    (package / "bin/delm").write_text("different runtime")
+                    metadata["hostPackages"]["claude"]["files"] = package_files(package)
+                elif mutation == "extra":
+                    (package / "private.txt").write_text("never ship")
+                    metadata["hostPackages"]["claude"]["files"] = package_files(package)
+                elif mutation == "validation":
+                    metadata["claudeValidation"]["payloadSha256"] = "0" * 64
+                else:
+                    metadata["hostPackages"]["claude"]["path"] = "plugins/delm"
+                package_release.write_json(output / "release.json", metadata)
+                checksums(output)
+                with self.assertRaisesRegex(RuntimeError, "catalog|identical shared|allowlist|validation|manifest"):
+                    package_release.verify(output)
+
+    def test_claude_untracked_input_changes_provenance(self):
+        with fixture() as (_, source, _, _):
+            before = package_release.source_state(source)
+            (source / "hosts/claude/hooks/additional.js").write_text("// new adapter source")
+            after = package_release.source_state(source)
+            self.assertTrue(after["sourceDirty"])
+            self.assertNotEqual(before["runtimeSourcesSha256"], after["runtimeSourcesSha256"])
+
+    def test_native_claude_validator_uses_isolated_config_and_detects_mutation(self):
+        with fixture() as (root, source, runtime, _):
+            package = root / "plugin"
+            build.stage_package(source, runtime, package, "claude")
+            calls = []
+
+            def run(command, **kwargs):
+                calls.append((command, kwargs))
+                if command[-1] == "--version":
+                    return subprocess.CompletedProcess(command, 0, "2.1.289 (Claude Code)\n", "")
+                return subprocess.CompletedProcess(command, 0, json.dumps({"success": True, "strict": True}), "")
+
+            with mock.patch.object(build.shutil, "which", return_value="/fixture/claude"), \
+                 mock.patch.object(build.subprocess, "run", side_effect=run):
+                evidence = build.validate_claude_package(package)
+            self.assertTrue(evidence["passed"])
+            self.assertEqual(evidence["modelCalls"], 0)
+            self.assertEqual(calls[1][0][1:], ["plugin", "validate", str(package.resolve()), "--strict", "--json"])
+            environment = calls[1][1]["env"]
+            self.assertNotEqual(environment["HOME"], str(Path.home()))
+            self.assertEqual(Path(environment["CLAUDE_CONFIG_DIR"]).parent, Path(environment["HOME"]))
+            self.assertFalse(Path(environment["HOME"]).exists())
+
+            def mutate(command, **kwargs):
+                if "validate" in command:
+                    (package / "hooks/delm.js").write_text("changed during validation")
+                return run(command, **kwargs)
+
+            with mock.patch.object(build.shutil, "which", return_value="/fixture/claude"), \
+                 mock.patch.object(build.subprocess, "run", side_effect=mutate), \
+                 self.assertRaisesRegex(RuntimeError, "changed during"):
+                build.validate_claude_package(package)
+
     def test_inheritance_proof_is_bound_to_source_runtime_architecture_and_host(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary)
@@ -173,6 +339,7 @@ class ReleaseTests(unittest.TestCase):
                 (output / name).write_text("must not be distributed")
                 metadata = json.loads((output / "release.json").read_text())
                 metadata["files"] = package_files(output / "plugins/delm")
+                metadata["hostPackages"]["codex"]["files"] = metadata["files"]
                 package_release.write_json(output / "release.json", metadata)
                 checksums(output)
                 with self.assertRaisesRegex(RuntimeError, "allowlist|unexpected artifacts"):
@@ -183,7 +350,8 @@ class ReleaseTests(unittest.TestCase):
             records = qualifications(root, source, runtime, revision)
             origin, signed = root / "unsigned", root / "signed"
             package_release.assemble(source, runtime, origin, "example/delm", revision,
-                                     qualifications=records)
+                                     qualifications=records,
+                                     claude_qualifications=fixture_claude_qualifications(root, source, runtime))
             package_release.assemble(source, runtime, signed, "example/delm", revision,
                                      signed=True, unsigned_origin=origin)
             with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RELEASE_SOURCE_SHA": revision,
@@ -196,20 +364,30 @@ class ReleaseTests(unittest.TestCase):
                 remote.assert_not_called()
 
     def test_signed_payload_must_match_qualified_unsigned_payload(self):
-        with fixture() as (root, source, runtime, revision):
-            records = qualifications(root, source, runtime, revision)
-            origin = root / "unsigned"
-            package_release.assemble(source, runtime, origin, "example/delm", revision,
-                                     qualifications=records)
-            skill = origin / "plugins/delm/skills/run/SKILL.md"
-            skill.write_text(skill.read_text() + "\nAltered payload\n")
-            metadata = json.loads((origin / "release.json").read_text())
-            metadata["files"] = package_files(origin / "plugins/delm")
-            package_release.write_json(origin / "release.json", metadata)
-            checksums(origin)
-            with self.assertRaisesRegex(RuntimeError, "Signed plugin payload differs"):
-                package_release.assemble(source, runtime, root / "signed", "example/delm", revision,
-                                         signed=True, unsigned_origin=origin)
+        for host, relative in package_release.HOST_PATHS.items():
+            with self.subTest(host=host), fixture() as (root, source, runtime, revision):
+                records = qualifications(root, source, runtime, revision)
+                origin = root / "unsigned"
+                package_release.assemble(source, runtime, origin, "example/delm", revision,
+                                         qualifications=records,
+                                     claude_qualifications=fixture_claude_qualifications(root, source, runtime))
+                package = origin / relative
+                skill = package / "skills/run/SKILL.md"
+                skill.write_text(skill.read_text() + "\nAltered payload\n")
+                metadata = json.loads((origin / "release.json").read_text())
+                metadata["hostPackages"][host]["files"] = package_files(package)
+                if host == "codex":
+                    metadata["files"] = metadata["hostPackages"][host]["files"]
+                else:
+                    metadata["claudeValidation"] = fixture_claude_validation(package)
+                    metadata["claudeAdapterSha256"] = build.claude_adapter_digest(package)
+                    for record in metadata["claudeQualification"].values():
+                        record["adapterSha256"] = metadata["claudeAdapterSha256"]
+                package_release.write_json(origin / "release.json", metadata)
+                checksums(origin)
+                with self.assertRaisesRegex(RuntimeError, "Signed plugin payload differs"):
+                    package_release.assemble(source, runtime, root / "signed", "example/delm", revision,
+                                             signed=True, unsigned_origin=origin)
 
     def test_unsigned_review_accepts_clean_branch_without_a_tag(self):
         with fixture() as (_, source, _, revision), mock.patch.object(release_identity, "SOURCE", source):
@@ -247,7 +425,8 @@ class ReleaseTests(unittest.TestCase):
         with fixture() as (root, source, runtime, revision):
             records = qualifications(root, source, runtime, revision)
             package_release.assemble(source, runtime, root / "review", "example/delm", revision,
-                                     qualifications=records)
+                                     qualifications=records,
+                                     claude_qualifications=fixture_claude_qualifications(root, source, runtime))
             package_release.verify(root / "review", require_qualified=True)
             record = json.loads(records[1].read_text())
             record["runtimeSha256"] = "0" * 64
@@ -255,7 +434,8 @@ class ReleaseTests(unittest.TestCase):
             package_release.write_json(records[1], record)
             with self.assertRaisesRegex(RuntimeError, "differs from the tested binary"):
                 package_release.assemble(source, runtime, root / "mismatch", "example/delm", revision,
-                                         qualifications=records)
+                                         qualifications=records,
+                                     claude_qualifications=fixture_claude_qualifications(root, source, runtime))
 
     def test_catalog_and_provenance_are_validated_beyond_checksums(self):
         with fixture() as (root, source, runtime, revision):
@@ -292,7 +472,8 @@ class ReleaseTests(unittest.TestCase):
             records = qualifications(root, source, runtime, revision)
             origin, signed = root / "unsigned", root / "signed"
             package_release.assemble(source, runtime, origin, "example/delm", revision,
-                                     qualifications=records)
+                                     qualifications=records,
+                                     claude_qualifications=fixture_claude_qualifications(root, source, runtime))
             package_release.assemble(source, runtime, signed, "example/delm", revision,
                                      signed=True, unsigned_origin=origin)
             reports = root / "reports"

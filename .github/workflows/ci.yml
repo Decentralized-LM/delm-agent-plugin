@@ -47,18 +47,20 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
-      - name: Install stock Codex for compatibility checks
+      - name: Install native hosts for compatibility checks
         env:
           CODEX_VERSION: ${{ matrix.codex }}
-        run: npm install --global "@openai/codex@$CODEX_VERSION"
+        run: npm install --global "@openai/codex@$CODEX_VERSION" @anthropic-ai/claude-code@2.1.289
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
       - name: Check runtime and native plugin installation
         run: ./scripts/verify.sh
-      - name: Build the plugin bundle
-        run: ./scripts/build.sh
+      - name: Build both native plugin bundles and validate the Claude payload
+        run: ./scripts/build.sh --host all
       - name: Verify the packed npm installer with native Codex
         run: npm --prefix packages/installer run test:native
+      - name: Verify native Claude distribution without account or model access
+        run: npm --prefix packages/installer run test:native:claude
       - name: Verify native configuration inheritance without model calls
         run: DELM_TEST_HOST="$(command -v codex)" cargo test --locked --test native_inheritance -- --ignored
       - name: Verify native cancellation and lifecycle ownership without model calls

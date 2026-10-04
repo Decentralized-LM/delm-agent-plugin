@@ -1,0 +1,52 @@
+# Native Claude Code integration
+
+Claude Code and Codex share DeLM's worker policy, task board, contribution format, check receipts, service ownership, workspace preparation, and guarded delivery. Each host supplies native execution and lifecycle events. Claude's resources live in `hosts/claude/`; its controller and transport live in `src/claude/`.
+
+## Native execution
+
+The official `/delm:run` skill is explicit-only. A plugin module intercepts it, checks the MCP connection, and prepares the project before the parent makes a short launch turn. That turn issues exactly two native `fork` Agent calls together. Spawn middleware assigns the two prepared directories and binds each returned agent identity. Forks inherit the conversation, system prompt, model, and available native tools. The worker policy appears once in the inherited context, with a short pointer in each launch call.
+
+The parent launch turn is deliberate. On Claude Code 2.1.289 in Auto mode, direct plugin-origin `$.agent.spawn` has no server classifier verdict and is refused. Native model-issued Agent calls receive the ordinary permission review. DeLM uses this supported path without changing permission mode or adding allow rules. Finished peers resume through native SendMessage under their existing identities. Active peers receive context updates through native session append.
+
+## Coordination and permissions
+
+The official `.mcp.json` sidecar exposes DeLM's common coordination tools. Loading the plugin starts this lightweight transport, not a team. A native tool-call hook reserves a one-use ticket for the observed agent, turn, revision, tool, and exact arguments. It then calls `next` so Claude performs its own tool permissions, approvals, and MCP dispatch. The sidecar can consume only that matching ticket. It cannot trust worker identities supplied by the model.
+
+Board transfers remain confined to the prepared private copies. These are additional MCP capabilities, with their own native permissions; native Read or Edit deny rules are not an operating-system sandbox around plugin code. Ordinary worker tools keep their host permission handling. This is a trusted local development plugin.
+
+Native Bash observations supply check evidence. Claude's interface exposes a tool result reference and completion state, not a numeric exit code. DeLM records that distinction. Missing, interrupted, timed-out, and background outcomes cannot qualify a completed check. Relevant file changes invalidate shared evidence.
+
+## Lifecycle and delivery
+
+Each peer can claim, split, publish, import, verify, and integrate work. Both contribute to one assembled result. There is no separate Claude collaboration algorithm or mandatory duplicate full-suite pass.
+
+The module records peer identities, their descendants, and native background-task IDs. Settlement confirms their terminal states and stopped services, then checks for live references to the private trees. A successful native stop acknowledgment may precede the host's updated agent status; bounded native polling handles that interval without assuming shutdown.
+
+Only then does shared delivery apply accepted changes to the original project, preserving its Git index and unrelated edits. Conflicts save recoverable work. After safe delivery or recovery, both worker copies and the temporary baseline are removed. Dependencies remain local to each project, so the parent performs necessary setup or a focused relocated-result check when the delivery report requires it.
+
+Run ownership is durable. Reload recovery confirms the old bridge and owned execution have stopped. An unfinished Claude run also blocks a new Codex run on that project. Uncertain shutdown or an unreconstructable interrupted capture preserves the copies instead of guessing what is safe to remove. `/delm-status` and `/delm-stop` provide native controls.
+
+## Implementation and qualification
+
+The implementation followed these stages:
+
+1. Qualify native forks, inherited context and tools, private working directories, active updates, completed-agent resumption, and exact owned-task stops against the installed host.
+2. Extract host-neutral evidence and filesystem scopes while preserving Codex's existing wire records and behavior.
+3. Implement the native Claude module, authenticated bridge, revision-bound board calls, and guarded lifecycle using the shared runtime.
+4. Extend the installer with explicit `--host claude`, native marketplace registration, update, status, and removal. Codex remains the default.
+5. Stage self-contained host packages from explicit allowlists, validate through the official CLI, and bind release qualification to the actual runtime and adapter bytes.
+6. Run focused regression tests and the small account-backed collaboration fixture before the local commit.
+
+Native boundary checks use Claude Code 2.1.289 on Apple Silicon with the existing Auto permissions. They establish inherited conversation markers, project instructions, skills, model and observed tools, actual worker working directories, active updates, same-identity resumption, and exact native agent/background-task stops. The real collaboration fixture and its evidence format are documented in [development](development.md#claude-code). It requires useful publications from both workers, checked output delivered to the original project, preservation of original files and staging, and removal of both worker trees.
+
+A small fixture establishes the exercised behavior, not universal task quality or a speedup guarantee. Intel native qualification and checks against the exact signed release candidate remain release requirements. [Release qualification](releases.md) distinguishes model-free CI checks, development fixtures, and publication evidence. Routine tests do not use an account or change the user's saved host settings.
+
+## Official references
+
+- [Plugin module APIs](https://code.claude.com/docs/en/plugins/mods/reference)
+- [Generating types for the installed host](https://code.claude.com/docs/en/plugins/mods/create)
+- [Native conversation forks](https://code.claude.com/docs/en/sub-agents#fork-the-current-conversation)
+- [Server-side Auto permission review](https://code.claude.com/docs/en/permission-modes#server-side-classifier-review)
+- [Plugin manifest reference](https://code.claude.com/docs/en/plugins/manifest-reference)
+- [Native marketplace reference](https://code.claude.com/docs/en/plugins/marketplace-reference)
+- [Native plugin CLI](https://code.claude.com/docs/en/plugins/cli-reference)

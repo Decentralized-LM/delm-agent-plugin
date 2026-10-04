@@ -832,6 +832,7 @@ async fn drive(
             .as_object()
             .context("Worker filesystem policy missing")?;
         saved.workers[index].result_policy = workspace::ResultPolicy {
+            native_python_runtime: false,
             readonly_runtime_roots: scopes
                 .iter()
                 .filter(|(path, access)| path.starts_with('/') && access.as_str() == Some("read"))

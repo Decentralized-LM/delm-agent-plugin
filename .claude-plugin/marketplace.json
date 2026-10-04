@@ -1,0 +1,11 @@
+{
+  "name": "delm-local",
+  "owner": {"name": "DeLM"},
+  "description": "Local source builds of DeLM for Claude Code.",
+  "plugins": [
+    {
+      "name": "delm",
+      "source": "./.build/plugin-claude"
+    }
+  ]
+}

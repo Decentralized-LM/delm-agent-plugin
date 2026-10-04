@@ -11,6 +11,11 @@ on:
         description: 'GitHub OWNER/REPO for native and npm installation; blank uses this repository'
         required: false
         type: string
+      claude_qualifications:
+        description: 'JSON array from manual native Claude qualification.json records; both architectures required to publish'
+        default: '[]'
+        required: false
+        type: string
       publish:
         description: 'Sign, notarize, qualify, and publish to the native marketplace'
         default: false
@@ -77,14 +82,18 @@ jobs:
       - name: Install build and qualification tools
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
-          npm install --global @openai/codex@0.160.0
+          npm install --global @openai/codex@0.160.0 @anthropic-ai/claude-code@2.1.289
       - name: Verify source, native installation, and release packaging
-        run: |
-          ./scripts/verify.sh
+        run: ./scripts/verify.sh
       - name: Build and test release binaries on the native architecture
         run: |
           cargo build --locked --release --target "$BUILD_TARGET" --bin delm --example native-lifecycle-fixture
           cargo test --locked --release --target "$BUILD_TARGET"
+      - name: Validate both native packages and isolated installers
+        run: |
+          python3 scripts/build.py --prebuilt "target/$BUILD_TARGET/release/delm" --host all
+          npm --prefix packages/installer run test:native
+          npm --prefix packages/installer run test:native:claude
       - name: Qualify native inheritance and every lifecycle scenario without model calls
         run: |
           mkdir -p "$RUNNER_TEMP/qualification"
@@ -127,16 +136,23 @@ jobs:
         with:
           pattern: runtime-*
           path: artifacts
+      - name: Install the native Claude payload validator
+        run: npm install --global @anthropic-ai/claude-code@2.1.289
       - name: Assemble only the qualified native slices
         env:
           RELEASE_REPOSITORY: ${{ needs.identity.outputs.repository }}
           RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
+          RELEASE_PUBLISH: ${{ inputs.publish }}
+          CLAUDE_QUALIFICATIONS_JSON: ${{ inputs.claude_qualifications || '[]' }}
         run: |
           tar -xf artifacts/runtime-aarch64-apple-darwin/runtime.tar -C artifacts/runtime-aarch64-apple-darwin
           tar -xf artifacts/runtime-x86_64-apple-darwin/runtime.tar -C artifacts/runtime-x86_64-apple-darwin
           lipo -create artifacts/runtime-aarch64-apple-darwin/delm artifacts/runtime-x86_64-apple-darwin/delm -output artifacts/delm
-          python3 scripts/package_release.py --runtime artifacts/delm --output unsigned-review --repository "$RELEASE_REPOSITORY" --revision "$RELEASE_SOURCE_SHA" --qualification artifacts/runtime-aarch64-apple-darwin/qualification.json --qualification artifacts/runtime-x86_64-apple-darwin/qualification.json
-          python3 scripts/package_release.py --verify unsigned-review --revision "$RELEASE_SOURCE_SHA" --repository "$RELEASE_REPOSITORY" --require-qualified
+          printf '%s\n' "$CLAUDE_QUALIFICATIONS_JSON" > "$RUNNER_TEMP/claude-qualifications.json"
+          python3 scripts/package_release.py --runtime artifacts/delm --output unsigned-review --repository "$RELEASE_REPOSITORY" --revision "$RELEASE_SOURCE_SHA" --qualification artifacts/runtime-aarch64-apple-darwin/qualification.json --qualification artifacts/runtime-x86_64-apple-darwin/qualification.json --claude-qualification "$RUNNER_TEMP/claude-qualifications.json"
+          release_qualification_flags=()
+          if [[ "$RELEASE_PUBLISH" == "true" ]]; then release_qualification_flags+=(--require-qualified); fi
+          python3 scripts/package_release.py --verify unsigned-review --revision "$RELEASE_SOURCE_SHA" --repository "$RELEASE_REPOSITORY" "${release_qualification_flags[@]}"
           python3 scripts/prepare_installer.py --repository "$RELEASE_REPOSITORY" --native-release unsigned-review/release.json --out prepared-installer
           tar -cf unsigned-macos-review.tar -C unsigned-review .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -168,6 +184,11 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: unsigned-macos-review-not-for-distribution
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install the native Claude payload validator
+        run: npm install --global @anthropic-ai/claude-code@2.1.289
       - name: Sign and notarize the qualified package
         env:
           RELEASE_PUBLISH: ${{ inputs.publish }}

@@ -11,7 +11,7 @@ use tokio::{
     sync::{mpsc, watch},
 };
 
-/// Runtime for the explicitly invoked DeLM skill in stock Codex.
+/// Runtime for explicitly invoked DeLM tasks in Codex and Claude Code.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -50,7 +50,7 @@ async fn serve(args: Args) -> Result<()> {
     }
     anyhow::ensure!(
         args.stdio,
-        "In Codex, enter $delm:run followed by your task. Use --help for runtime commands."
+        "Enter $delm:run in Codex or /delm:run in Claude Code, followed by your task. Use --help for runtime commands."
     );
     let (commands_tx, commands_rx) = mpsc::channel(64);
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Event>();

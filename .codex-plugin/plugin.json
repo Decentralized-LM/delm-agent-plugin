@@ -1,7 +1,7 @@
 {
   "name": "delm",
   "version": "0.3.0",
-  "description": "Run a task with two isolated Codex workers that share progress through DeLM.",
+  "description": "Build in parallel with collaborating Codex agents and deliver their changes to your project.",
   "skills": "./skills",
   "hooks": "./hooks/hooks.json"
 }

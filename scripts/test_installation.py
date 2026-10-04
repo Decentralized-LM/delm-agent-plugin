@@ -23,6 +23,7 @@ import publish_release
 
 SOURCE = Path(__file__).resolve().parent.parent
 CODEX = shutil.which("codex")
+CLAUDE = shutil.which("claude")
 
 
 def executable(path, content):
@@ -31,19 +32,73 @@ def executable(path, content):
     path.chmod(0o755)
 
 
+def fixture_runtime(path, version="fixture"):
+    replies = [
+        {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "delm"}}},
+        {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": name} for name in
+            ["delm_status", "delm_complete", "delm_service"]]}},
+    ]
+    script = '#!/bin/sh\nif [ "$1" = claude ]; then\n'
+    script += "printf '%s\\n' '" + "' '".join(json.dumps(reply) for reply in replies) + "'\nexit 0\nfi\n"
+    script += "echo 'delm " + version + "'\n"
+    executable(path, script)
+
+
 def fixture_source(path):
     for directory in (".codex-plugin", ".agents/plugins", "skills/run/agents", "hooks", "scripts"):
         (path / directory).mkdir(parents=True, exist_ok=True)
     for name in (".codex-plugin/plugin.json", ".agents/plugins/marketplace.json",
                  "skills/run/agents/openai.yaml", "hooks/hooks.json", "Cargo.toml", "Cargo.lock",
-                 "rust-toolchain.toml", "LICENSE", "NOTICE"):
+                 "rust-toolchain.toml", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.txt"):
         shutil.copy2(SOURCE / name, path / name)
     for name in ("src", "plugin"):
         shutil.copytree(SOURCE / name, path / name)
     (path / "skills/run/SKILL.md").write_text("---\nname: run\ndescription: Run an explicitly requested DeLM task.\n---\nUse the bundled runtime.\n")
-    for name in ("install_support.py", "install.sh", "uninstall.sh", "migrate.sh", "build.py", "build.sh"):
+    for name in ("install_support.py", "install.sh", "uninstall.sh", "migrate.sh", "build.py", "build.sh", "dependency_notices.py", "verify_claude_native.py"):
         shutil.copy2(SOURCE / "scripts" / name, path / "scripts" / name)
+    version = json.loads((path / ".codex-plugin/plugin.json").read_text())["version"]
+    package_release.write_json(path / "hosts/claude/.claude-plugin/plugin.json", {
+        "name": "delm", "version": version, "description": "Native package fixture",
+        "author": {"name": "Fixture"}, "license": "MIT",
+    })
+    package_release.write_json(path / "hosts/claude/.mcp.json", {"mcpServers": {"delm": {
+        "command": "${CLAUDE_PLUGIN_ROOT}/bin/delm", "args": ["claude", "mcp"],
+    }}})
+    package_release.write_json(path / "hosts/claude/hooks/hooks.json", {"modules": ["./hooks/delm.js"]})
+    (path / "hosts/claude/hooks/delm.js").write_text("// Unit-test package fixture; not a working host adapter.\n")
+    (path / "hosts/claude/hooks/protocol.js").write_text("export const fixture = true;\n")
+    skill = path / "hosts/claude/skills/run/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: run\ndescription: Unit-test package fixture.\n---\nDo not run.\n")
     return path
+
+
+def fixture_claude_validation(package, claude="claude"):
+    return {"kind": "claude-plugin-validation", "hostVersion": "fixture Claude", "strict": True,
+            "passed": True, "modelCalls": 0, "payloadSha256": build.payload_digest(package)}
+
+
+
+def fixture_claude_qualifications(root, source, runtime, architectures=package_release.ARCHITECTURES):
+    paths = []
+    with tempfile.TemporaryDirectory(dir=root) as temporary:
+        package = Path(temporary) / "plugin"
+        build.stage_package(source, runtime, package, "claude")
+        adapter_sha = build.claude_adapter_digest(package)
+    for arch in architectures:
+        path = root / ("claude-" + arch + ".json")
+        package_release.write_json(path, {
+            "schema": 1, "kind": "claude-native-qualification", "architecture": arch,
+            "hostVersion": "2.1.289 (Claude Code)", "passed": True, "workerCount": 2, "modelCalls": 3,
+            "runtimeSha256": install_support.fingerprint(runtime)["sha256"],
+            "runtimeSourcesSha256": package_release.source_state(source)["runtimeSourcesSha256"],
+            "fixtureSha256": install_support.fingerprint(source / "scripts/verify_claude_native.py")["sha256"],
+            "adapterSha256": adapter_sha,
+            **{flag: True for flag in package_release.CLAUDE_PROOF_FLAGS},
+            "outputProof": {name: "a" * 64 for name in package_release.CLAUDE_PROOF_FILES},
+        })
+        paths.append(path)
+    return paths
 
 
 def fixture_package(source):
@@ -51,10 +106,85 @@ def fixture_package(source):
     package.mkdir(parents=True)
     for name in (".codex-plugin", "skills", "hooks"):
         shutil.copytree(source / name, package / name)
-    for name in ("LICENSE", "NOTICE"):
+    for name in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.txt"):
         shutil.copy2(source / name, package / name)
     executable(package / "bin/delm", "#!/bin/sh\necho 'delm fixture'\n")
     return package
+
+
+class LocalClaudeCatalogTests(unittest.TestCase):
+    def test_source_catalog_selects_only_the_staged_claude_payload(self):
+        catalog = json.loads((SOURCE / ".claude-plugin/marketplace.json").read_text())
+        self.assertEqual(catalog["name"], "delm-local")
+        self.assertTrue(catalog["owner"]["name"])
+        self.assertEqual(catalog["plugins"], [{"name": "delm", "source": "./.build/plugin-claude"}])
+        codex = json.loads((SOURCE / ".agents/plugins/marketplace.json").read_text())
+        self.assertEqual(codex["plugins"][0]["source"]["path"], "./.build/plugin")
+
+
+@unittest.skipUnless(CLAUDE and sys.platform == "darwin", "Native macOS Claude CLI is required")
+class LocalClaudeInstallationTests(unittest.TestCase):
+    def test_native_directory_install_rebuild_refresh_and_removal_preserve_settings(self):
+        with tempfile.TemporaryDirectory(prefix="delm Claude source catalog ") as temporary:
+            root = Path(temporary).resolve()
+            home, config, source = root / "home", root / "config", root / "source with spaces"
+            for directory in [home, config, source / ".claude-plugin"]:
+                directory.mkdir(parents=True)
+            shutil.copy2(SOURCE / ".claude-plugin/marketplace.json", source / ".claude-plugin/marketplace.json")
+            (source / ".gitignore").write_text("/.build/\n")
+            package = source / ".build/plugin-claude"
+            manifest = package / ".claude-plugin/plugin.json"
+            package_release.write_json(manifest, {"name": "delm", "version": "0.3.0",
+                                                 "description": "Native directory-install fixture"})
+            skill = package / "skills/run/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text("---\nname: run\ndescription: Native installer fixture.\n---\nNever run a model task.\n")
+            executable(package / "bin/delm", "#!/bin/sh\necho fixture-initial\n")
+            settings = {"model": "fixture-model", "permissions": {"deny": ["Bash(unrelated-command)"]}}
+            package_release.write_json(config / "settings.json", settings)
+            (config / ".credentials.json").write_text("{}\n")
+            env = {"HOME": str(home), "CLAUDE_CONFIG_DIR": str(config),
+                   "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "en_US.UTF-8"}
+
+            def native(*arguments):
+                result = subprocess.run([CLAUDE, "plugin", *arguments, "--json"], cwd=root, env=env,
+                                        text=True, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                text = result.stdout.strip()
+                return json.loads(text if text.startswith("[") else text.splitlines()[-1])
+
+            native("marketplace", "add", str(source), "--scope", "user")
+            native("install", "delm@delm-local", "--scope", "user")
+            installed = next(entry for entry in native("list") if entry["id"] == "delm@delm-local")
+            self.assertEqual(installed["scope"], "user")
+            self.assertTrue(installed["enabled"])
+            self.assertEqual(Path(installed["readFromFolder"]), package)
+            # Directory sources resolve rebuilt files directly, including the
+            # ignored build folder, without requiring a manifest version bump.
+            executable(package / "bin/delm", "#!/bin/sh\necho fixture-rebuilt\n")
+            rebuilt = next(entry for entry in native("list") if entry["id"] == "delm@delm-local")
+            self.assertEqual(Path(rebuilt["readFromFolder"]), package)
+            self.assertIn("fixture-rebuilt", (Path(rebuilt["readFromFolder"]) / "bin/delm").read_text())
+            native("marketplace", "update", "delm-local")
+            same_version = native("update", "delm@delm-local", "--scope", "user")
+            self.assertEqual(same_version["updateOutcome"], "up_to_date")
+            package_release.write_json(manifest, {"name": "delm", "version": "0.3.1",
+                                                 "description": "Native directory-install fixture"})
+            native("marketplace", "update", "delm-local")
+            native("update", "delm@delm-local", "--scope", "user")
+            updated = next(entry for entry in native("list") if entry["id"] == "delm@delm-local")
+            self.assertEqual(updated["folderVersion"], "0.3.1")
+            removed = native("uninstall", "delm@delm-local", "--scope", "user", "--keep-data")
+            self.assertTrue(removed["keptData"])
+            self.assertFalse(any(entry["id"] == "delm@delm-local" for entry in native("list")))
+            self.assertTrue(any(entry["name"] == "delm-local" for entry in native("marketplace", "list")))
+            self.assertTrue((package / "bin/delm").exists())
+            native("marketplace", "remove", "delm-local")
+            self.assertEqual(native("marketplace", "list"), [])
+            final = json.loads((config / "settings.json").read_text())
+            self.assertEqual(final["model"], settings["model"])
+            self.assertEqual(final["permissions"], settings["permissions"])
+            self.assertEqual((config / ".credentials.json").read_text(), "{}\n")
 
 
 class InstallationPreflightTests(unittest.TestCase):
@@ -361,12 +491,17 @@ class NativeInstallationTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def setUp(self):
+        validator = mock.patch.object(package_release, "validate_claude_package", side_effect=fixture_claude_validation)
+        self.native_validation = validator.start()
+        self.addCleanup(validator.stop)
+
     def test_release_package_has_pinned_catalog_integrity_and_no_source_artifacts(self):
         with tempfile.TemporaryDirectory(prefix="delm release fixture ") as temporary:
             source = fixture_source(Path(temporary) / "source")
             runtime = Path(temporary) / "delm"
             version = package_release.source_version(source)
-            executable(runtime, f"#!/bin/sh\necho 'delm {version}'\n")
+            fixture_runtime(runtime, version)
             (source / "skills/run/local-notes.txt").write_text("never ship local notes")
             output = Path(temporary) / "release"
             real_run = subprocess.run
@@ -383,11 +518,17 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(catalog["name"], "delm")
             self.assertEqual(catalog["plugins"][0]["source"]["ref"], f"delm-plugin-v{version}")
             self.assertEqual(set(path.name for path in (output / "plugins/delm").iterdir()),
-                             {"bin", "skills", "hooks", ".codex-plugin", "LICENSE", "NOTICE"})
+                             {"bin", "skills", "hooks", ".codex-plugin", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.txt"})
             self.assertEqual((output / "plugins/delm/bin/delm").stat().st_mode & 0o777, 0o755)
             self.assertFalse((output / "plugins/delm/skills/run/local-notes.txt").exists())
             metadata = json.loads((output / "release.json").read_text())
             self.assertIn("hooks/hooks.json", metadata["files"])
+            self.assertEqual(set(metadata["hostPackages"]), {"codex", "claude"})
+            self.assertEqual(metadata["hostPackages"]["claude"]["files"]["bin/delm"], metadata["files"]["bin/delm"])
+            self.assertEqual((output / "plugins/delm-claude/hooks/worker.md").read_bytes(),
+                             (source / "plugin/worker.md").read_bytes())
+            self.assertEqual(json.loads((output / ".claude-plugin/marketplace.json").read_text())["plugins"][0]["source"],
+                             "./plugins/delm-claude")
             self.assertIn("plugins/delm/hooks/hooks.json", (output / "SHA256SUMS").read_text())
             (output / "plugins/delm/extra.txt").write_text("unexpected")
             with self.assertRaisesRegex(RuntimeError, "changed"):
@@ -425,6 +566,67 @@ class BuildTests(unittest.TestCase):
             self.assertFalse((source / ".build/plugin/host").exists())
             self.assertFalse((source / ".build/plugin/qualification.txt").exists())
 
+    def test_both_hosts_share_one_build_and_only_native_payloads(self):
+        with tempfile.TemporaryDirectory(prefix="delm both-host build ") as temporary:
+            source = fixture_source(Path(temporary) / "source")
+            (source / "hosts/claude/private-notes.txt").write_text("never package this")
+            calls = []
+            real_run = subprocess.run
+
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[0] == "cargo":
+                    target = Path(command[command.index("--target-dir") + 1])
+                    fixture_runtime(target / "release/delm")
+                    return subprocess.CompletedProcess(command, 0)
+                return real_run(command, **kwargs)
+
+            with mock.patch.object(build.subprocess, "run", side_effect=run), \
+                 mock.patch.object(build.shutil, "which", return_value="cargo"), \
+                 mock.patch.object(build, "validate_claude_package", side_effect=fixture_claude_validation) as validation, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                build.build(source, host="all")
+            self.assertEqual(sum(call[0] == "cargo" for call in calls), 1)
+            validation.assert_called_once()
+            self.assertEqual((source / ".build/plugin/bin/delm").read_bytes(),
+                             (source / ".build/plugin-claude/bin/delm").read_bytes())
+            self.assertEqual(set(install_support.package_files(source / ".build/plugin-claude")),
+                             {*build.CLAUDE_PACKAGE_FILES, "bin/delm"})
+            self.assertEqual((source / ".build/plugin-claude/hooks/worker.md").read_bytes(),
+                             (source / "plugin/worker.md").read_bytes())
+
+    def test_old_same_version_runtime_cannot_activate_claude_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = fixture_source(Path(temporary) / "source")
+            original = fixture_package(source)
+            before = install_support.package_files(original)
+            runtime = Path(temporary) / "old-runtime"
+            executable(runtime, "#!/bin/sh\necho 'delm fixture'\n")
+            with mock.patch.object(build, "validate_claude_package") as validation, \
+                 contextlib.redirect_stdout(io.StringIO()), \
+                 self.assertRaisesRegex(RuntimeError, "native Claude MCP transport"):
+                build.build(source, runtime, host="all")
+            validation.assert_not_called()
+            self.assertEqual(install_support.package_files(original), before)
+            self.assertFalse((source / ".build/plugin-claude").exists())
+
+    def test_missing_or_invalid_claude_payload_cannot_replace_a_working_build(self):
+        for failure in ["missing", "invalid"]:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                source = fixture_source(Path(temporary) / "source")
+                original = fixture_package(source)
+                before = install_support.package_files(original)
+                runtime = Path(temporary) / "runtime"
+                fixture_runtime(runtime)
+                if failure == "missing":
+                    (source / "hosts/claude/hooks/delm.js").unlink()
+                with mock.patch.object(build, "validate_claude_package", side_effect=RuntimeError("Invalid native payload")), \
+                     contextlib.redirect_stdout(io.StringIO()), \
+                     self.assertRaises((OSError, RuntimeError)):
+                    build.build(source, runtime, host="all")
+                self.assertEqual(install_support.package_files(original), before)
+                self.assertFalse((source / ".build/plugin-claude").exists())
+
     def test_publication_uses_only_distribution_tree_and_never_replaces_a_tag(self):
         with tempfile.TemporaryDirectory(prefix="delm publishing fixture ") as temporary:
             root = Path(temporary).resolve()
@@ -445,7 +647,7 @@ class BuildTests(unittest.TestCase):
             git("remote", "add", "origin", str(remote))
             runtime = root / "delm"
             version = package_release.source_version(source)
-            executable(runtime, f"#!/bin/sh\necho 'delm {version}'\n")
+            fixture_runtime(runtime, version)
             output = root / "release"
             real_run = subprocess.run
 
@@ -479,7 +681,8 @@ class BuildTests(unittest.TestCase):
                     qualifications.append(path)
                 unsigned = root / "unsigned"
                 package_release.assemble(source, runtime, unsigned, "example/delm", revision,
-                                         qualifications=qualifications)
+                                         qualifications=qualifications,
+                                         claude_qualifications=fixture_claude_qualifications(root, source, runtime))
                 package_release.assemble(source, runtime, output, "example/delm", revision,
                                          signed=True, unsigned_origin=unsigned)
             previous_cwd = Path.cwd()
