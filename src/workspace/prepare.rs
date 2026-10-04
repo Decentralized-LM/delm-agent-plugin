@@ -5,13 +5,15 @@ use super::*;
 mod tests;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Ownership {
-    version: u8,
-    original: PathBuf,
-    root: (u64, u64),
-    children: BTreeMap<String, (u64, u64)>,
+pub(super) struct Ownership {
+    pub(super) version: u8,
+    pub(super) original: PathBuf,
+    #[serde(default)]
+    pub(super) original_identity: Option<(u64, u64)>,
+    pub(super) root: (u64, u64),
+    pub(super) children: BTreeMap<String, (u64, u64)>,
 }
-fn identity(path: &Path) -> Result<(u64, u64)> {
+pub(super) fn identity(path: &Path) -> Result<(u64, u64)> {
     let m = fs::symlink_metadata(path)?;
     ensure!(
         m.is_dir() && !m.file_type().is_symlink(),
@@ -19,7 +21,7 @@ fn identity(path: &Path) -> Result<(u64, u64)> {
     );
     Ok((m.dev(), m.ino()))
 }
-fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+pub(super) fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -32,8 +34,172 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-/// Capture a saved project and two workers. `project` must be the selected root.
-/// Preparation failures retain partial captures for explicit recovery/discard.
+/// Each directory is registered before any project data is written into it.
+/// Preparation has no worker writers, so failed captures are disposable copies.
+struct PreparationGuard {
+    workspace: PathBuf,
+    root: (u64, u64),
+    children: BTreeMap<String, (u64, u64)>,
+    journal: File,
+}
+
+impl PreparationGuard {
+    fn new(workspace: &Path) -> Result<Self> {
+        let root = identity(workspace)?;
+        let journal = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(workspace.join("preparation-ownership.jsonl"))?;
+        let mut guard = Self {
+            workspace: workspace.to_owned(),
+            root,
+            children: BTreeMap::new(),
+            journal,
+        };
+        guard.record("root", "", root)?;
+        Ok(guard)
+    }
+
+    fn record(&mut self, operation: &str, name: &str, identity: (u64, u64)) -> Result<()> {
+        serde_json::to_writer(
+            &mut self.journal,
+            &serde_json::json!({
+                "operation": operation, "name": name, "identity": identity,
+            }),
+        )?;
+        self.journal.write_all(b"\n")?;
+        self.journal.sync_all()?;
+        open_dir(&self.workspace)?.sync_all()?;
+        Ok(())
+    }
+
+    fn create(&mut self, name: &str) -> Result<PathBuf> {
+        use std::os::unix::fs::DirBuilderExt;
+        ensure!(
+            identity(&self.workspace)? == self.root,
+            "preparation root changed"
+        );
+        let path = self.workspace.join(name);
+        fs::DirBuilder::new().mode(0o700).create(&path)?;
+        let owned = identity(&path)?;
+        // Register in memory before a journal write can fail.
+        self.children.insert(name.to_owned(), owned);
+        self.record("create", name, owned)?;
+        Ok(path)
+    }
+
+    fn rename(&mut self, old: &str, new: &str) -> Result<PathBuf> {
+        ensure!(
+            identity(&self.workspace)? == self.root,
+            "preparation root changed"
+        );
+        let owned = *self.children.get(old).context("unowned preparation path")?;
+        ensure!(
+            identity(&self.workspace.join(old))? == owned,
+            "capture changed"
+        );
+        ensure!(
+            !self.workspace.join(new).try_exists()?,
+            "capture destination exists"
+        );
+        self.record("rename_intent", new, owned)?;
+        fs::rename(self.workspace.join(old), self.workspace.join(new))?;
+        self.children.remove(old);
+        self.children.insert(new.to_owned(), owned);
+        self.record("rename", new, owned)?;
+        Ok(self.workspace.join(new))
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        ensure!(
+            identity(&self.workspace)? == self.root,
+            "preparation root changed; preserved"
+        );
+        // Preflight all identities before removing any directory. Never follow a
+        // substituted link or treat an unrelated sibling as a failed capture.
+        for (name, expected) in &self.children {
+            ensure!(
+                identity(&self.workspace.join(name))? == *expected,
+                "preparation directory changed; preserved: {name}"
+            );
+        }
+        for (name, expected) in &self.children {
+            ensure!(
+                identity(&self.workspace)? == self.root,
+                "preparation root changed"
+            );
+            let path = self.workspace.join(name);
+            ensure!(
+                identity(&path)? == *expected,
+                "preparation directory changed: {name}"
+            );
+            fs::remove_dir_all(path)?;
+        }
+        self.record("cleaned", "", self.root)?;
+        Ok(())
+    }
+}
+
+/// Initialize only the explicitly selected directory, never an ancestor. An
+/// existing .git entry (including a broken link or unsupported Git file) is
+/// left untouched for the normal validation path to accept or reject.
+fn initialize_selected_root(original: &Path, root: &File, run_dir: &Path) -> Result<bool> {
+    match fs::symlink_metadata(original.join(".git")) {
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // Build administration privately, then publish it with a no-replace rename.
+    // A concurrent git init or any existing .git entry is never overwritten.
+    use std::os::unix::fs::DirBuilderExt;
+    let staging = run_dir.join("project-init");
+    fs::DirBuilder::new().mode(0o700).create(&staging)?;
+    let owned = identity(&staging)?;
+    let result = (|| -> Result<()> {
+        let mut command = git::command();
+        command
+            .args(["init", "--quiet", "--template=", "--initial-branch=main"])
+            .arg(&staging);
+        let output = git::execute(command, None)?;
+        ensure!(
+            output.status.success(),
+            "initialize selected project: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        ensure!(
+            identity(&staging)? == owned,
+            "Git initialization staging changed"
+        );
+        let root_identity = (root.metadata()?.dev(), root.metadata()?.ino());
+        ensure!(
+            identity(original)? == root_identity,
+            "selected project changed during initialization"
+        );
+        super::delivery::rename_guarded(
+            &open_dir(&staging)?,
+            OsStr::new(".git"),
+            root,
+            OsStr::new(".git"),
+            false,
+        )?;
+        root.sync_all()?;
+        Ok(())
+    })();
+    let cleanup = (|| -> Result<()> {
+        ensure!(
+            identity(&staging)? == owned,
+            "Git initialization staging changed; preserved"
+        );
+        fs::remove_dir_all(&staging)?;
+        Ok(())
+    })();
+    result.and(cleanup)?;
+    Ok(true)
+}
+
+/// Capture a saved project and two workers. `project` is the selected root.
+/// Failed preparation removes its identified partial captures before returning.
 pub fn prepare(project: &Path, run_dir: &Path, limit: u64) -> Result<PreparedWorkspace> {
     #[cfg(not(target_os = "macos"))]
     bail!("native COW workspaces require macOS");
@@ -41,16 +207,7 @@ pub fn prepare(project: &Path, run_dir: &Path, limit: u64) -> Result<PreparedWor
     let _clock = git::DeadlineGuard::new(until);
     let original = fs::canonicalize(project).context("resolve selected project")?;
     let root = open_dir(&original)?;
-    let git_dir = open_at(
-        &root,
-        OsStr::new(".git"),
-        libc::O_RDONLY | libc::O_DIRECTORY,
-    )
-    .context("select an explicit self-contained Git root; ancestor discovery is disabled")?;
-    ensure!(
-        git_dir.metadata()?.dev() == root.metadata()?.dev(),
-        "external Git administration is unsupported"
-    );
+    let original_identity = (root.metadata()?.dev(), root.metadata()?.ino());
     // This complete inventory precedes creation of any baseline or worker tree.
     let mut scan = inventory(&root, limit, until, true)?;
     for (path, (_, entry)) in &scan.entries {
@@ -111,98 +268,124 @@ pub fn prepare(project: &Path, run_dir: &Path, limit: u64) -> Result<PreparedWor
         capacity.f_bavail > 0,
         "private filesystem has no free space"
     );
+    if initialize_selected_root(&original, &root, &run_dir)? {
+        scan = inventory(&root, limit, until, true)?;
+    }
+    let git_dir = open_at(
+        &root,
+        OsStr::new(".git"),
+        libc::O_RDONLY | libc::O_DIRECTORY,
+    )
+    .context("select an explicit self-contained Git root; ancestor discovery is disabled")?;
+    ensure!(
+        git_dir.metadata()?.dev() == root.metadata()?.dev(),
+        "external Git administration is unsupported"
+    );
     let workspace = run_dir.join("workspace");
-    fs::create_dir(&workspace).context(
-        "workspace already exists or cannot be created; reconcile the existing run first",
-    )?;
-    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
-    let mut last_error = None;
-    for attempt in 0..3 {
-        within(until)?;
-        let baseline = workspace.join(format!("capture-{attempt}"));
-        fs::create_dir(&baseline)?;
-        fs::set_permissions(&baseline, fs::Permissions::from_mode(0o700))?;
-        match capture(&root, &original, &baseline, &scan, limit, until) {
-            Ok((baseline_manifest, baseline_inventory)) => {
-                let saved = workspace.join("baseline");
-                fs::rename(&baseline, &saved)?;
-                // Capture already inventoried this private baseline in full.
-                // No workers exist yet and we never write it during cloning.
-                // Each clone still checks source identities and independently
-                // verifies the worker's contents, metadata and staged state.
-                let baseline_root = open_dir(&saved)?;
-                let selected = baseline_inventory
-                    .entries
-                    .keys()
-                    .filter(|p| !p.is_empty())
-                    .cloned()
-                    .collect();
-                let baseline_index = git::run(&saved, &saved, &["ls-files", "--stage", "-z"])?;
-                let workers = [workspace.join("worker-1"), workspace.join("worker-2")];
-                for worker in &workers {
-                    fs::create_dir(worker)?;
-                    fs::set_permissions(worker, fs::Permissions::from_mode(0o700))?;
-                    clone_selected(
-                        &baseline_root,
-                        worker,
-                        &baseline_inventory,
-                        &selected,
-                        until,
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&workspace)
+        .context(
+            "workspace already exists or cannot be created; reconcile the existing run first",
+        )?;
+    let mut guard = PreparationGuard::new(&workspace)?;
+    let result = (|| -> Result<PreparedWorkspace> {
+        let mut last_error = None;
+        for attempt in 0..3 {
+            within(until)?;
+            let baseline = guard.create(&format!("capture-{attempt}"))?;
+            match capture(&root, &original, &baseline, &scan, limit, until) {
+                Ok((baseline_manifest, baseline_inventory)) => {
+                    let saved = guard.rename(&format!("capture-{attempt}"), "baseline")?;
+                    // Capture already inventoried this private baseline in full.
+                    // No workers exist yet and we never write it during cloning.
+                    // Each clone still checks source identities and independently
+                    // verifies the worker's contents, metadata and staged state.
+                    let baseline_root = open_dir(&saved)?;
+                    let selected = baseline_inventory
+                        .entries
+                        .keys()
+                        .filter(|p| !p.is_empty())
+                        .cloned()
+                        .collect();
+                    let baseline_index = git::run(&saved, &saved, &["ls-files", "--stage", "-z"])?;
+                    let workers = [workspace.join("worker-1"), workspace.join("worker-2")];
+                    for worker in &workers {
+                        guard.create(worker.file_name().unwrap().to_str().unwrap())?;
+                        clone_selected(
+                            &baseline_root,
+                            worker,
+                            &baseline_inventory,
+                            &selected,
+                            until,
+                        )?;
+                        ensure!(
+                            manifest(worker)?.files == baseline_manifest.files,
+                            "worker did not match saved baseline"
+                        );
+                        ensure!(
+                            git::run(worker, worker, &["ls-files", "--stage", "-z"])?
+                                == baseline_index,
+                            "worker staged state differs from baseline"
+                        );
+                    }
+                    write_json(
+                        &workspace.join("baseline-manifest.json"),
+                        &baseline_manifest,
                     )?;
-                    ensure!(
-                        manifest(worker)?.files == baseline_manifest.files,
-                        "worker did not match saved baseline"
-                    );
-                    ensure!(
-                        git::run(worker, worker, &["ls-files", "--stage", "-z"])? == baseline_index,
-                        "worker staged state differs from baseline"
-                    );
+                    let mut children = BTreeMap::new();
+                    for name in ["baseline", "worker-1", "worker-2"] {
+                        children.insert(name.to_owned(), identity(&workspace.join(name))?);
+                    }
+                    for previous in 0..attempt {
+                        let name = format!("capture-{previous}");
+                        children.insert(name.clone(), identity(&workspace.join(name))?);
+                    }
+                    write_json(
+                        &workspace.join("ownership.json"),
+                        &Ownership {
+                            version: 1,
+                            original: original.clone(),
+                            original_identity: Some(original_identity),
+                            root: identity(&workspace)?,
+                            children,
+                        },
+                    )?;
+                    return Ok(PreparedWorkspace {
+                        original,
+                        run_dir,
+                        baseline: saved,
+                        workers,
+                        baseline_manifest,
+                    });
                 }
-                write_json(
-                    &workspace.join("baseline-manifest.json"),
-                    &baseline_manifest,
-                )?;
-                let mut children = BTreeMap::new();
-                for name in ["baseline", "worker-1", "worker-2"] {
-                    children.insert(name.to_owned(), identity(&workspace.join(name))?);
+                Err(error) => {
+                    // Retry only verified source drift, never capacity, cloning or
+                    // compatibility failure. Failed captures remain owned copies.
+                    let current = inventory(&root, limit, until, true)?;
+                    if current == scan {
+                        return Err(error);
+                    }
+                    last_error = Some(error);
+                    scan = current;
                 }
-                for previous in 0..attempt {
-                    let name = format!("capture-{previous}");
-                    children.insert(name.clone(), identity(&workspace.join(name))?);
-                }
-                write_json(
-                    &workspace.join("ownership.json"),
-                    &Ownership {
-                        version: 1,
-                        original: original.clone(),
-                        root: identity(&workspace)?,
-                        children,
-                    },
-                )?;
-                return Ok(PreparedWorkspace {
-                    original,
-                    run_dir,
-                    baseline: saved,
-                    workers,
-                    baseline_manifest,
-                });
-            }
-            Err(error) => {
-                // Retry only verified source drift, never capacity, cloning or
-                // compatibility failure. Retained captures may contain unique data.
-                let current = inventory(&root, limit, until, true)?;
-                if current == scan {
-                    return Err(error);
-                }
-                last_error = Some(error);
-                scan = current;
             }
         }
+        bail!(
+            "source kept changing during three bounded capture attempts: {}",
+            last_error.map(|e| e.to_string()).unwrap_or_default()
+        )
+    })();
+    match result {
+        Ok(prepared) => Ok(prepared),
+        Err(error) => match guard.cleanup() {
+            Ok(()) => Err(error),
+            Err(cleanup) => {
+                Err(error.context(format!("preparation cleanup incomplete: {cleanup:#}")))
+            }
+        },
     }
-    bail!(
-        "source kept changing during three bounded capture attempts: {}",
-        last_error.map(|e| e.to_string()).unwrap_or_default()
-    )
 }
 
 pub(super) fn capture(
@@ -500,7 +683,7 @@ fn clone_selected(
     Ok(())
 }
 
-fn metadata(source: &File, destination: &File) -> Result<()> {
+pub(super) fn metadata(source: &File, destination: &File) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         unsafe extern "C" {

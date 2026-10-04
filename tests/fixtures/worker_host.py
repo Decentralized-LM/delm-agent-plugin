@@ -19,9 +19,17 @@ if "--version" in sys.argv:
 
 if "generate-json-schema" in sys.argv:
     methods = {
-        "thread/start": ["cwd", "model", "modelProvider", "serviceTier", "permissions", "config", "developerInstructions", "dynamicTools", "ephemeral", "environments", "runtimeWorkspaceRoots"],
+        "thread/start": ["cwd", "model", "modelProvider", "serviceTier", "approvalPolicy", "sandbox", "permissions", "config", "developerInstructions", "dynamicTools", "ephemeral", "environments", "runtimeWorkspaceRoots"],
         "thread/resume": ["threadId", "cwd", "model", "modelProvider", "serviceTier", "permissions", "config", "runtimeWorkspaceRoots"],
+        "thread/fork": ["threadId", "cwd", "config", "developerInstructions", "beforeTurnId", "deferGoalContinuation", "excludeTurns", "ephemeral", "runtimeWorkspaceRoots"],
         "thread/read": ["threadId", "includeTurns"],
+        "thread/unsubscribe": ["threadId"],
+        "config/read": ["cwd", "includeLayers"],
+        "configRequirements/read": [],
+        "skills/list": ["cwds", "forceReload"],
+        "hooks/list": ["cwds"],
+        "skills/extraRoots/set": ["extraRoots"],
+        "mcpServerStatus/list": ["threadId", "detail", "limit", "cursor"],
         "experimentalFeature/list": ["cursor", "limit"],
         "turn/start": ["threadId", "input"],
         "turn/steer": ["threadId", "expectedTurnId", "input"],
@@ -45,11 +53,22 @@ if "generate-json-schema" in sys.argv:
     (output / "ServerRequest.json").write_text(json.dumps(schema({
         "item/tool/call": ["threadId", "turnId", "callId", "tool", "arguments"],
         "item/tool/requestUserInput": ["threadId", "turnId", "itemId", "questions"],
+        "item/commandExecution/requestApproval": ["threadId", "turnId", "itemId", "availableDecisions"],
+        "item/fileChange/requestApproval": ["threadId", "turnId", "itemId"],
+        "item/permissions/requestApproval": ["threadId", "turnId", "itemId", "permissions"],
+        "mcpServer/elicitation/request": ["threadId", "turnId", "serverName"],
     })))
-    (output / "ServerNotification.json").write_text(json.dumps(schema({
+    notifications = schema({
+        "item/started": ["threadId", "turnId", "item"],
         "item/completed": ["threadId", "turnId", "item"],
         "turn/completed": ["threadId", "turn"],
-    })))
+        "serverRequest/resolved": ["threadId", "requestId"],
+    })
+    notifications["oneOf"][0]["properties"]["params"]["properties"]["item"] = {"oneOf": [{"properties": {
+        "type": {"enum": ["mcpToolCall"]}, "id": {"type": "string"},
+        "server": {"type": "string"}, "tool": {"type": "string"}, "arguments": {},
+    }}]}
+    (output / "ServerNotification.json").write_text(json.dumps(notifications))
     sys.exit(0)
 
 
@@ -107,19 +126,20 @@ def send(value):
 
 
 def native_thread(thread, params):
-    profile = params["permissions"]
-    scopes = params["config"]["permissions"][profile]["filesystem"]
-    writable = [path for path, access in scopes.items() if access == "write"]
+    inherited = config.get("native_settings", {})
+    cwd = params["cwd"]
     return {
-        "thread": {"id": thread, "environments": params.get("environments")}, "model": params["model"],
-        "modelProvider": params["modelProvider"], "cwd": params["cwd"],
-        "approvalPolicy": "never", "activePermissionProfile": {"id": profile},
-        "reasoningEffort": params["config"].get("model_reasoning_effort"),
+        "thread": {"id": thread, "environments": [{"environmentId":"local", "cwd":cwd, "runtimeWorkspaceRoots":[cwd]}]},
+        "model": params.get("model", effective_config.get("model", "fixture")),
+        "modelProvider": params.get("modelProvider", "openai"), "cwd": cwd,
+        "approvalPolicy": params.get("approvalPolicy", inherited.get("approvalPolicy", "never")),
+        "activePermissionProfile": inherited.get("activePermissionProfile", {"id": ":workspace"}),
+        "reasoningEffort": params.get("config", {}).get("model_reasoning_effort"),
         "serviceTier": params.get("serviceTier"),
-        "runtimeWorkspaceRoots": params.get("runtimeWorkspaceRoots"),
-        "sandbox": {"type": "workspaceWrite", "writableRoots": writable,
-                    "excludeTmpdirEnvVar": True, "excludeSlashTmp": True,
-                    "networkAccess": params["config"]["permissions"][profile]["network"]["enabled"]},
+        "disabledPluginIds": [], "instructionSources": [],
+        "runtimeWorkspaceRoots": params.get("runtimeWorkspaceRoots", [cwd]),
+        "sandbox": inherited.get("sandbox", {"type": "workspaceWrite", "writableRoots": [cwd],
+                    "excludeTmpdirEnvVar": False, "excludeSlashTmp": False, "networkAccess": True}),
     }
 
 
@@ -137,6 +157,17 @@ def tool(thread, turn, name, arguments, stage):
 
 def status(thread, turn):
     tool(thread, turn, "delm_status", {}, "status")
+
+
+def approval(thread, turn):
+    global serial
+    serial += 1
+    request = "approval-" + str(serial)
+    calls[request] = (thread, turn, "approval")
+    send({"id": request, "method": "item/commandExecution/requestApproval", "params": {
+        "threadId": thread, "turnId": turn, "itemId": request,
+        "command": "fixture-check", "cwd": threads[thread]["cwd"],
+        "availableDecisions": ["accept", "decline"], "startedAtMs": 1}})
 
 
 def complete(thread, turn, revision):
@@ -182,7 +213,13 @@ for line in sys.stdin:
     elif method == "model/list":
         send({"id": request_id, "result": {"data": [{"id": "fixture", "model": "fixture", "isDefault": True}], "nextCursor": None}})
     elif method == "thread/read":
-        send({"id": request_id, "error": {"code": -32000, "message": "No persisted parent thread in lifecycle fixture"}})
+        send({"id": request_id, "result": config.get("parent_history", {"thread":{"id":params["threadId"],"turns":[]}})})
+    elif method == "skills/list":
+        send({"id": request_id, "result": config.get("skill_listing", {"data":[{"cwd":params.get("cwds", [""])[0], "skills":[], "errors":[]}]})})
+    elif method == "skills/extraRoots/set":
+        send({"id": request_id, "result": {}})
+    elif method == "mcpServerStatus/list":
+        send({"id": request_id, "result": config.get("mcp_listing", {"data":[],"nextCursor":None})})
     elif method == "command/exec":
         if mode == "failed_compatibility_probe":
             send({"id": request_id, "result": {"exitCode": 1, "stdout": "", "stderr": "fixture sandbox is incompatible"}})
@@ -191,14 +228,14 @@ for line in sys.stdin:
         for key in ("HOME", "TMPDIR"):
             (pathlib.Path(environment[key]) / "canary").write_text("probe write\n")
         send({"id": request_id, "result": {"exitCode": 0, "stdout": "delm-isolation-ok\n", "stderr": "", "futureField": True}})
-    elif method in ("thread/start", "thread/resume"):
+    elif method in ("thread/start", "thread/resume", "thread/fork"):
         if params.get("environments") == []:
             send({"id": request_id, "error": {"code": -32602,
                                               "message": "Empty environments disables native filesystem and exec tools"}})
             continue
         if params.get("ephemeral"):
             thread = "ephemeral-compatibility"
-        elif method == "thread/start":
+        elif method in ("thread/start", "thread/fork"):
             thread = "thread-" + str(len(threads) + 1)
         else:
             thread = params["threadId"]
@@ -224,7 +261,14 @@ for line in sys.stdin:
         if mode == "lose_turn_ack":
             continue
         send({"id": request_id, "result": {"turn": {"id": turn}}})
-        if mode == "questions":
+        if mode == "approvals":
+            approval(thread, turn)
+        elif mode == "stale_approval":
+            approval(thread, "retired-turn")
+            status(thread, turn)
+        elif mode == "late_approval" and thread == "thread-2":
+            pass
+        elif mode == "questions":
             serial += 1
             question = "question-" + str(serial)
             calls[question] = (thread, turn, "question")
@@ -245,13 +289,18 @@ for line in sys.stdin:
             }, "notice")
         else:
             status(thread, turn)
-    elif method in ("turn/interrupt", "thread/backgroundTerminals/clean", "thread/archive"):
+    elif method in ("turn/interrupt", "thread/backgroundTerminals/clean", "thread/archive", "thread/unsubscribe"):
         send({"id": request_id, "result": {}})
     elif method is None and request_id in calls:
         thread, turn, stage = calls.pop(request_id)
         if active.get(thread) != turn or stage == "notice":
             continue
         result = message.get("result", {})
+        if stage == "approval":
+            send({"method": "serverRequest/resolved", "params": {"threadId": thread, "requestId": request_id}})
+            if result.get("decision") == "accept":
+                status(thread, turn)
+            continue
         if stage == "question":
             send({"method": "serverRequest/resolved", "params": {"threadId": thread, "requestId": request_id}})
             continue
@@ -264,6 +313,8 @@ for line in sys.stdin:
             active.pop(thread, None)
             send({"method": "turn/completed", "params": {
                 "threadId": thread, "turn": {"id": turn, "status": "completed"}}})
+            if mode == "late_approval" and thread == "thread-1":
+                approval("thread-2", active["thread-2"])
         elif "board" in body:
             # A rejected stale declaration cannot complete the native turn.
             complete(thread, turn, body["board"]["request_revision"])

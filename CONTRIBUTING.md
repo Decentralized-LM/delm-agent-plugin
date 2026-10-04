@@ -10,7 +10,7 @@ Before submitting, run:
 ./scripts/verify.sh
 ```
 
-Changes to permissions or process ownership also need the relevant [native sandbox checks](docs/development.md) or [lifecycle checks](docs/native-lifecycle-qualification.md). These use disposable fixtures without model calls. Report which checks passed and any you could not run.
+Changes to capability inheritance or process ownership also need the relevant [native inheritance checks](docs/development.md) or [lifecycle checks](docs/native-lifecycle-qualification.md). These use disposable fixtures without model calls. Report which checks passed and any you could not run; saved-configuration checks alone do not prove exact live-session parity.
 
 Keep credentials, private run folders, local builds, and research notes out of contributions. Bug reports should include the DeLM and Codex versions, macOS version, exact error, and a small reproduction. Share only the logs needed to explain the issue, with private content removed.
 

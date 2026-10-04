@@ -12,6 +12,110 @@ fn fixture() -> (TempDir, PathBuf) {
     (temp, root)
 }
 
+#[test]
+#[cfg(target_os = "macos")]
+fn absent_git_is_initialized_at_selected_root_without_discovering_parent() {
+    let (temp, ancestor) = fixture();
+    let before_index = fs::read(ancestor.join(".git/index")).unwrap();
+    let project = ancestor.join("new project");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("notes.txt"), "existing untracked input\n").unwrap();
+    let prepared = prepare(&project, &temp.path().join("new-run"), 1_000_000).unwrap();
+    assert_eq!(fs::read(ancestor.join(".git/index")).unwrap(), before_index);
+    assert_eq!(
+        fs::read(project.join(".git/HEAD")).unwrap(),
+        b"ref: refs/heads/main\n"
+    );
+    assert!(!project.join(".git/index").exists());
+    assert!(!project.join(".git/refs/heads/main").exists());
+    for worker in &prepared.workers {
+        assert_eq!(
+            fs::read(worker.join("notes.txt")).unwrap(),
+            b"existing untracked input\n"
+        );
+        assert!(!worker.join("tracked.txt").exists());
+    }
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn existing_broken_git_entry_is_not_replaced() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().unwrap();
+    for kind in ["file", "symlink", "directory"] {
+        let project = temp.path().join(kind);
+        fs::create_dir(&project).unwrap();
+        match kind {
+            "file" => fs::write(project.join(".git"), "gitdir: /unavailable\n").unwrap(),
+            "symlink" => symlink("missing", project.join(".git")).unwrap(),
+            _ => fs::create_dir(project.join(".git")).unwrap(),
+        }
+        let entry = fs::symlink_metadata(project.join(".git")).unwrap();
+        assert!(
+            prepare(
+                &project,
+                &temp.path().join(format!("run-{kind}")),
+                1_000_000
+            )
+            .is_err()
+        );
+        let after = fs::symlink_metadata(project.join(".git")).unwrap();
+        assert_eq!(
+            (entry.dev(), entry.ino(), entry.mode()),
+            (after.dev(), after.ino(), after.mode())
+        );
+        match kind {
+            "file" => assert_eq!(
+                fs::read(project.join(".git")).unwrap(),
+                b"gitdir: /unavailable\n"
+            ),
+            "symlink" => assert_eq!(
+                fs::read_link(project.join(".git")).unwrap(),
+                PathBuf::from("missing")
+            ),
+            _ => assert_eq!(fs::read_dir(project.join(".git")).unwrap().count(), 0),
+        }
+    }
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn failed_capture_removes_owned_directories_and_preserves_source() {
+    let (temp, project) = fixture();
+    fs::write(project.join(".git/index.lock"), "external lock\n").unwrap();
+    let before = fs::read(project.join(".git/index")).unwrap();
+    let run = temp.path().join("failed-run");
+    assert!(prepare(&project, &run, 1_000_000).is_err());
+    assert!(!run.join("workspace/capture-0").exists());
+    assert!(!run.join("workspace/baseline").exists());
+    assert!(!run.join("workspace/worker-1").exists());
+    assert!(!run.join("workspace/worker-2").exists());
+    let journal = fs::read_to_string(run.join("workspace/preparation-ownership.jsonl")).unwrap();
+    assert!(journal.contains("cleaned"));
+    assert_eq!(fs::read(project.join(".git/index")).unwrap(), before);
+    assert_eq!(
+        fs::read(project.join(".git/index.lock")).unwrap(),
+        b"external lock\n"
+    );
+}
+
+#[test]
+fn preparation_guard_preserves_replacement_and_unowned_siblings() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let mut guard = PreparationGuard::new(&workspace).unwrap();
+    let owned = guard.create("capture-0").unwrap();
+    fs::write(owned.join("partial"), "capture\n").unwrap();
+    fs::create_dir(workspace.join("unrelated")).unwrap();
+    fs::rename(&owned, temp.path().join("moved-capture")).unwrap();
+    fs::create_dir(&owned).unwrap();
+    fs::write(owned.join("user.txt"), "preserve\n").unwrap();
+    assert!(guard.cleanup().is_err());
+    assert_eq!(fs::read(owned.join("user.txt")).unwrap(), b"preserve\n");
+    assert!(workspace.join("unrelated").exists());
+}
+
 fn git_command(root: &Path, arguments: &[&str]) {
     let output = git::command()
         .arg("-C")

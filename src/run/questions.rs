@@ -41,6 +41,9 @@ pub(crate) fn validate_answers(
 }
 
 impl Questions {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
     pub fn insert(
         &mut self,
         native_id: Value,

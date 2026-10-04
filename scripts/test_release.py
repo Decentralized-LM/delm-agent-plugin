@@ -53,6 +53,14 @@ def qualifications(root, source, runtime, revision):
             "target": target, "sourceRevision": revision, **package_release.source_state(source),
             "runtimeSha256": fingerprint(runtime)["sha256"], "passed": True,
             "modelCalls": 0, "lifecycleCases": package_release.LIFECYCLE_CASES,
+            "codexVersion": "fixture 1", "exactLiveSessionParity": False,
+            "evidenceSha256": {name: "a" * 64 for name in ["smoke", "inheritance", *package_release.LIFECYCLE_CASES]},
+            "nativeInheritance": {
+                "runtimeSha256": fingerprint(runtime)["sha256"], "architecture": architecture,
+                "hostVersion": "fixture 1", "gatewayToolCalled": True,
+                "parentCliOverridesNotExported": True, "exactLiveSessionParity": False,
+                "nativeTestSha256": "b" * 64, "sourceDigest": "c" * 64,
+            },
         })
         result.append(path)
     return result
@@ -65,6 +73,50 @@ def checksums(output):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_inheritance_proof_is_bound_to_source_runtime_architecture_and_host(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            for name in qualify_release.INHERITANCE_INPUTS:
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(name + " fixture bytes\n")
+            proof = {
+                "kind": "native-inheritance", "model_turns": 0,
+                "saved_skill_contents_match": True, "saved_mcp_tools_match": True,
+                "native_permission_profile_match": True, "mcp_tool_called": True,
+                "delm_gateway_tool_called": True, "parent_cli_overrides_not_exported": True,
+                "exact_live_session_parity": False, "runtime_sha256": "a" * 64,
+                "host_version": "codex fixture", "architecture": "aarch64",
+                "native_test_sha256": fingerprint(source / "tests/native_inheritance.rs")["sha256"],
+                "source_digest": qualify_release.inheritance_source_digest(source),
+                "skills": [{"path": "/private/fixture/path"}],
+            }
+            checked = qualify_release.validate_inheritance(proof, source, "a" * 64, "arm64", "codex fixture")
+            self.assertNotIn("private", json.dumps(checked))
+            for key, value in [("runtime_sha256", "b" * 64), ("architecture", "x86_64"),
+                               ("host_version", "different"), ("native_test_sha256", "c" * 64),
+                               ("source_digest", "d" * 64), ("exact_live_session_parity", True),
+                               ("delm_gateway_tool_called", False)]:
+                with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "inheritance evidence"):
+                    qualify_release.validate_inheritance(dict(proof, **{key: value}), source,
+                                                         "a" * 64, "arm64", "codex fixture")
+            (source / "src/worker_tools.rs").write_text("changed adapter")
+            with self.assertRaisesRegex(RuntimeError, "inheritance evidence"):
+                qualify_release.validate_inheritance(proof, source, "a" * 64, "arm64", "codex fixture")
+
+    def test_package_qualification_requires_native_inheritance_evidence(self):
+        with fixture() as (root, source, runtime, revision):
+            records = qualifications(root, source, runtime, revision)
+            metadata = {"sourceRevision": revision, **package_release.source_state(source),
+                        "qualification": {json.loads(path.read_text())["architecture"]:
+                                          json.loads(path.read_text()) for path in records}}
+            package_release.verify_qualification(metadata)
+            for key in ["nativeInheritance", "evidenceSha256", "exactLiveSessionParity", "codexVersion"]:
+                incomplete = json.loads(json.dumps(metadata))
+                incomplete["qualification"]["arm64"].pop(key)
+                with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "native release qualification"):
+                    package_release.verify_qualification(incomplete)
+
     def test_untracked_installer_inputs_mark_source_dirty(self):
         with fixture() as (_, source, _, _):
             self.assertFalse(package_release.source_state(source)["sourceDirty"])
@@ -199,6 +251,7 @@ class ReleaseTests(unittest.TestCase):
             package_release.verify(root / "review", require_qualified=True)
             record = json.loads(records[1].read_text())
             record["runtimeSha256"] = "0" * 64
+            record["nativeInheritance"]["runtimeSha256"] = "0" * 64
             package_release.write_json(records[1], record)
             with self.assertRaisesRegex(RuntimeError, "differs from the tested binary"):
                 package_release.assemble(source, runtime, root / "mismatch", "example/delm", revision,
@@ -249,7 +302,8 @@ class ReleaseTests(unittest.TestCase):
                     "runtimeSha256": fingerprint(runtime)["sha256"], "passed": True,
                     "signedAndNotarized": True, "modelCalls": 0, **package_release.source_state(source),
                     "cases": [{"case": case, "passed": True, "workerCount": 2,
-                               "originalUnchanged": True} for case in ["complete", "stop"]]})
+                               "originalPreserved": True, "resultDelivered": case == "complete",
+                               "workspacesRemoved": True} for case in ["complete", "stop"]]})
             with mock.patch.object(qualify_release, "command"):
                 self.assertTrue(qualify_release.verify_signed(signed, reports)["passed"])
                 path = reports / "signed-qualification-x86_64/result.json"

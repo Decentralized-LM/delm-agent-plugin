@@ -68,6 +68,12 @@ def task_handoff(expected, actual):
             "task_terminal_newline_normalized": same_content and not exact}
 
 
+def git_state(files):
+    """Project delivery must leave the existing branch, objects, and index alone."""
+    return {path: value for path, value in files.items()
+            if path == ".git" or path.startswith(".git/")}
+
+
 def identity_running(expected):
     """Compare Darwin process birth identity, never just a reusable PID."""
     class BsdInfo(ctypes.Structure):
@@ -135,7 +141,15 @@ def inspect_run(run, evidence_root):
               "task": saved["request"]["task"], "model": saved["request"]["model"],
               "reasoning_effort": saved["request"]["reasoning_effort"],
               "worker_threads": [worker.get("thread") for worker in workers],
-              "worker_paths": saved["workspace"]["workers"]}
+              "worker_paths": saved["workspace"]["workers"],
+              "capability_report": saved["request"].get("auth_settings", {}).get("capability_report")}
+    delivery = run / "workspace/delivery/result.json"
+    if delivery.exists():
+        result["delivery"] = json.loads(delivery.read_text())
+    temporary_paths = [*saved["workspace"]["workers"]]
+    if saved["workspace"].get("baseline"):
+        temporary_paths.append(saved["workspace"]["baseline"])
+    result["temporary_workspaces_removed"] = all(not Path(path).exists() for path in temporary_paths)
     database = run / "board/board.sqlite3"
     if database.exists():
         # Apple's SQLite cannot reopen this WAL-mode database read-only once
@@ -297,7 +311,7 @@ def main():
         created = owner.request("thread/start", {"cwd": str(project), "model": args.model,
                 "modelProvider": "openai", "approvalPolicy": "never", "sandbox": "danger-full-access",
                 "ephemeral": False,
-                "developerInstructions": f"This is an authorized isolated qualification. The user task applies only to {project}. Use the installed DeLM skill and its native runtime. Keep all task output in its retained worker result. Do not modify any existing repository, user configuration, installed plugin, or browser profile outside {root}; do not read credentials. Native Codex alone may use its configured login store."})
+                "developerInstructions": f"This is an authorized isolated qualification. The user task applies only to {project}. Use the installed DeLM skill and native invocation capture. Deliver the assembled source into this original project and perform only necessary focused follow-up checks there. Do not stage or commit changes. Do not modify any existing repository, user configuration, installed plugin, or browser profile outside {root}; do not read credentials. Native Codex alone may use its configured login store."})
         thread = created["thread"]["id"]
         evidence["parent_thread"] = thread
         start = owner.request("turn/start", {"threadId": thread, "input": [
@@ -334,7 +348,8 @@ def main():
         runs = list(runs_root.glob("*/run.json"))
         evidence["runs"] = [inspect_run(path.parent, root) for path in runs]
         evidence["source_unchanged"] = snapshot(project) == before
-        assert evidence["source_unchanged"], "Original test project changed"
+        evidence["git_state_preserved"] = git_state(snapshot(project)) == git_state(before)
+        assert evidence["git_state_preserved"], "Original Git administration or staging changed"
         assert (project.stat().st_dev, project.stat().st_ino) == source_identity, "Original project identity changed"
         assert len(evidence["runs"]) == 1, "Expected exactly one native DeLM invocation"
         run = evidence["runs"][0]
@@ -347,10 +362,17 @@ def main():
         assert binding["binding"]["session_id"] == thread and binding["binding"]["turn_id"] == turn, "Native launch was bound to a different parent"
         evidence.update(task_handoff(task.removeprefix("$delm:run "), run["task"]))
         assert evidence["task_content_unchanged"], "Task content changed beyond a terminal newline"
-        assert run["status"] == "complete", "DeLM did not return a complete retained result"
+        assert run["status"] in ["complete", "delivered"], "DeLM did not deliver its result"
+        delivery = run.get("delivery", {})
+        assert delivery.get("delivered") is True and Path(delivery["project"]) == project, "Result was not delivered to the original project"
+        assert delivery.get("cleanup_complete") is True and run["temporary_workspaces_removed"], "Temporary workspaces were not cleaned"
         assert all(report["ownership_resolved"] and not report["survivors"] and not report["errors"]
                    for report in run["shutdown_reports"]) and run["shutdown_reports"], "Shutdown was not verified"
-        evidence["status"] = "passed"
+        evidence["delivery_qualified"] = True
+        evidence["parent_followup_verification_required"] = delivery.get("verification_required", False)
+        # Do not infer a successful relocated check merely from the parent's
+        # final message. Preserve this distinct outcome for manual evidence review.
+        evidence["status"] = "delivered_requires_verification" if delivery.get("verification_required") else "passed"
     except Exception as error:
         evidence["status"] = "failed"
         evidence["failure"] = str(error)
@@ -381,10 +403,11 @@ def main():
                 evidence["lifecycle_binding"] = json.loads(registration.read_text())
         evidence["elapsed_seconds"] = round(time.monotonic() - started, 3)
         evidence["source_unchanged"] = snapshot(project) == before
+        evidence["git_state_preserved"] = git_state(snapshot(project)) == git_state(before)
         evidence["source_identity_unchanged"] = (project.stat().st_dev, project.stat().st_ino) == source_identity
         finalization_errors = []
-        if not evidence["source_unchanged"] or not evidence["source_identity_unchanged"]:
-            finalization_errors.append("Original project changed during finalization")
+        if not evidence["git_state_preserved"] or not evidence["source_identity_unchanged"]:
+            finalization_errors.append("Original project identity or Git administration changed")
         if evidence.get("client_close_errors"):
             finalization_errors.append("Native client shutdown failed")
         if not evidence["auth_reference_removed"]:

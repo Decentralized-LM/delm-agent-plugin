@@ -47,7 +47,7 @@ impl Fixture {
 }
 
 #[test]
-fn inherited_restrictions_follow_the_private_clone_and_broad_writes_do_not() {
+fn board_permissions_map_project_rules_without_stripping_native_capabilities() {
     let fixture = Fixture::new();
     let config = fixture.config().unwrap();
     let filesystem = &config["permissions"]["delm_worker_1"]["filesystem"];
@@ -60,131 +60,186 @@ fn inherited_restrictions_follow_the_private_clone_and_broad_writes_do_not() {
         filesystem[fixture.project.join("private").to_str().unwrap()],
         "deny"
     );
-    assert_eq!(
-        filesystem[fixture.request.project.to_str().unwrap()],
-        "deny"
-    );
-    assert_eq!(filesystem[fixture.run.to_str().unwrap()], "deny");
-    let controls = PathBuf::from("/tmp")
-        .canonicalize()
-        .unwrap()
-        .join(format!("delm-{}", unsafe { libc::geteuid() }));
-    assert_eq!(filesystem[controls.to_str().unwrap()], "deny");
-    assert_eq!(
-        config["permissions"]["delm_worker_1"]["network"]["enabled"],
-        false
-    );
-    assert_eq!(config["approval_policy"], "never");
-    let env = &config["shell_environment_policy"]["set"];
-    for key in ["HOME", "TMPDIR", "CARGO_HOME"] {
+    for key in [
+        "features",
+        "agents",
+        "skills",
+        "cloud",
+        "mcp_servers",
+        "shell_environment_policy",
+        "approval_policy",
+    ] {
         assert!(
-            PathBuf::from(env[key].as_str().unwrap())
-                .starts_with(fixture.run.join("environment/worker-1"))
+            config.get(key).is_none(),
+            "board scope must not replace native {key}"
         );
     }
 }
 
 #[test]
-fn stock_overrides_disable_named_extensions_and_blank_inherited_environment() {
-    let mut fixture = Fixture::new();
-    fixture.request.auth_settings = json!({
-        "stock_mcp_servers":["external.server"],
-        "stock_environment_keys":["NATIVE_SECRET","HOME"]
-    });
-    let config = fixture.config().unwrap();
-    assert_eq!(config["mcp_servers"]["external.server"]["enabled"], false);
+fn ordinary_configuration_and_managed_integrations_are_preserved() {
+    let fixture = Fixture::new();
+    let native = json!({"features":{"plugins":true,"hooks":true,"multi_agent":true,"memories":true},
+        "mcp_servers":{"docs":{"command":"docs-server","enabled":true}},
+        "skills":{"include_instructions":true},"shell_environment_policy":{"inherit":"all","set":{"PROJECT_FEATURE":"enabled"}},
+        "notify":["native-notifier"],"approval_policy":"on-request"});
     assert_eq!(
-        config["shell_environment_policy"]["set"]["NATIVE_SECRET"],
-        ""
-    );
-    assert!(
-        PathBuf::from(
-            config["shell_environment_policy"]["set"]["HOME"]
-                .as_str()
-                .unwrap()
-        )
-        .starts_with(&fixture.run)
+        stock_overrides(&json!({"native_config_overrides":native}), &fixture.run).unwrap(),
+        native
     );
     assert_eq!(
-        config["projects"][fixture.project.to_str().unwrap()]["trust_level"],
-        "untrusted"
+        stock_overrides(&json!({}), &fixture.run).unwrap(),
+        json!({})
     );
-    for feature in [
-        "hooks",
-        "plugins",
-        "memories",
-        "external_agent_memory_import",
-        "multi_agent",
-        "multi_agent_v2",
-        "recommended_plugins",
-    ] {
-        assert_eq!(config["features"][feature], false);
-    }
+    verify_stock_configuration(
+        &json!({"config":native}),
+        &json!({"requirements":{"hooks":{},"network":{},"featureRequirements":{"plugins":true}}}),
+    )
+    .unwrap();
+    assert!(verify_stock_configuration(&json!({}), &json!({"requirements":null})).is_err());
 }
 
 #[test]
-fn stock_config_verification_rejects_capability_drift_before_threads_start() {
-    let fixture = Fixture::new();
-    let config = stock_overrides(&json!({}), &fixture.run).unwrap();
-    let safe = json!({"config":config,"layers":[{"name":{"type":"project"},"disabledReason":"untrusted"}]});
-    let requirements = json!({"requirements":null});
-    verify_stock_configuration(&safe, &requirements).unwrap();
-    for changed in [
-        ("/config/features/hooks", json!(true)),
-        (
-            "/config/features/default_mode_request_user_input",
-            json!(false),
-        ),
-        ("/config/agents/enabled", json!(true)),
-        ("/config/notify", json!(["/usr/bin/false"])),
-        ("/config/shell_environment_policy/inherit", json!("all")),
+fn native_fork_adds_coordination_without_replacing_permissions_or_plugins() {
+    let mut fixture = Fixture::new();
+    fixture.request.auth_settings = json!({"parent_thread_id":"parent","parent_turn_id":"invocation", "saved_developer_instructions":"Keep existing conventions.",
+        "native_config_overrides":{"mcp_servers":{"docs":{"command":"docs-server"}},"features":{"hooks":true,"plugins":true}}});
+    let mut additions = fixture.config().unwrap();
+    additions["mcp_servers"] =
+        json!({"delm_coordination_1":{"command":"delm","args":["worker-mcp"]}});
+    let (method, params) = delm::workers::worker_thread_request(
+        &fixture.request,
+        &fixture.project,
+        1,
+        additions,
+        "Collaborate on the task.",
+    )
+    .unwrap();
+    assert_eq!(method, "thread/fork");
+    assert_eq!(params["beforeTurnId"], "invocation");
+    assert_eq!(params["deferGoalContinuation"], true);
+    assert_eq!(
+        params["config"]["mcp_servers"]["docs"]["command"],
+        "docs-server"
+    );
+    assert_eq!(
+        params["config"]["mcp_servers"]["delm_coordination_1"]["command"],
+        "delm"
+    );
+    assert_eq!(
+        params["developerInstructions"],
+        "Keep existing conventions.\n\nCollaborate on the task."
+    );
+    for field in [
+        "permissions",
+        "approvalPolicy",
+        "sandbox",
+        "baseInstructions",
+        "dynamicTools",
     ] {
-        let mut unsafe_config = safe.clone();
-        *unsafe_config.pointer_mut(changed.0).unwrap() = changed.1;
-        assert!(verify_stock_configuration(&unsafe_config, &requirements).is_err());
+        assert!(params.get(field).is_none());
     }
-    let mut enabled_server = safe.clone();
-    enabled_server["config"]["mcp_servers"]["new_server"] = json!({"enabled":true});
-    assert!(verify_stock_configuration(&enabled_server, &requirements).is_err());
-    let mut leaked_environment = safe.clone();
-    leaked_environment["config"]["shell_environment_policy"]["set"]["TOKEN"] = json!("secret");
-    assert!(verify_stock_configuration(&leaked_environment, &requirements).is_err());
-    let mut trusted_project = safe.clone();
-    trusted_project["layers"][0]["disabledReason"] = Value::Null;
-    assert!(verify_stock_configuration(&trusted_project, &requirements).is_err());
+    assert!(params["config"].get("permissions").is_none());
+    assert!(params["config"].get("default_permissions").is_none());
+}
+
+#[test]
+fn coordination_server_never_overwrites_a_saved_or_plugin_integration() {
+    let mut fixture = Fixture::new();
+    let additions = json!({"mcp_servers":{"delm_coordination_1":{"command":"delm"}}});
+    for evidence in [
+        json!({"native_config_overrides":{"mcp_servers":{"delm_coordination_1":{"command":"ordinary","enabled":false}}}}),
+        json!({"configured_mcp_server_names":["delm_coordination_1"]}),
+        json!({"mcp_manifest":[{"name":"delm_coordination_1","plugin_id":"ordinary-plugin"}]}),
+    ] {
+        fixture.request.auth_settings = evidence;
+        let error = delm::workers::worker_thread_request(
+            &fixture.request,
+            &fixture.project,
+            1,
+            additions.clone(),
+            "Coordinate",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot replace an existing integration")
+        );
+    }
     assert!(
-        verify_stock_configuration(
-            &safe,
-            &json!({"requirements":{"featureRequirements":{"hooks":true}}})
+        delm::workers::compare_capability_manifests(
+            &json!([]),
+            &json!([]),
+            &json!([]),
+            &json!([{"name":"delm_coordination_unrelated","tools_sha256":"ordinary"}])
         )
         .is_err()
     );
-    assert!(verify_stock_configuration(&safe, &json!({"requirements":{"hooks":{}}})).is_err());
+}
+
+#[test]
+fn invocation_inputs_keep_images_mentions_and_text_in_native_order() {
+    let content = json!([{"type":"text","text":"Build from this sketch"}, {"type":"image","fileId":"native-file","detail":"original"},
+        {"type":"skill","name":"design","path":"/skills/design/SKILL.md"}, {"type":"localImage","path":"/tmp/sketch.png"}]);
+    let history = json!({"thread":{"turns":[{"id":"chosen","itemsView":"full","items":[{"type":"userMessage","content":content}]}]}});
+    assert_eq!(
+        delm::workers::invocation_inputs(&history, "chosen")
+            .unwrap()
+            .unwrap(),
+        content.as_array().unwrap().clone()
+    );
     assert!(
-        verify_stock_configuration(
-            &safe,
-            &json!({"requirements":{"network":{"enabled":false}}})
+        delm::workers::invocation_inputs(&history, "different")
+            .unwrap()
+            .is_none()
+    );
+    let mut summarized = history;
+    summarized["thread"]["turns"][0]["itemsView"] = json!("summary");
+    assert!(delm::workers::invocation_inputs(&summarized, "chosen").is_err());
+}
+
+#[test]
+fn skill_content_and_mcp_tool_definitions_must_match_not_only_names() {
+    let skill = json!({"name":"frontend-design","enabled":true,"plugin_id":null,"instructions_sha256":"same","dependencies_sha256":"same"});
+    let server = json!({"name":"docs","plugin_id":null,"auth_status":"notLoggedIn","tools_sha256":"same","discovery_failed":false});
+    let expected_skills = json!([skill]);
+    let expected_tools = json!([server]);
+    delm::workers::compare_capability_manifests(
+        &expected_skills,
+        &expected_skills,
+        &expected_tools,
+        &expected_tools,
+    )
+    .unwrap();
+    let mut changed = expected_skills.clone();
+    changed[0]["instructions_sha256"] = json!("changed");
+    assert!(
+        delm::workers::compare_capability_manifests(
+            &expected_skills,
+            &changed,
+            &expected_tools,
+            &expected_tools
         )
         .is_err()
     );
-    let mut collision = safe.clone();
-    collision["config"]["permissions"] = json!({"delm_worker_1":{"filesystem":{"/":"write"}}});
-    assert!(verify_stock_configuration(&collision, &requirements).is_err());
-    let mut retired_optional = safe.clone();
-    retired_optional["config"]["features"]
-        .as_object_mut()
-        .unwrap()
-        .remove("multi_agent_v2");
-    verify_stock_configuration(&retired_optional, &requirements).unwrap();
-    retired_optional["config"]["features"]
-        .as_object_mut()
-        .unwrap()
-        .remove("multi_agent");
-    assert!(verify_stock_configuration(&retired_optional, &requirements).is_err());
+    let mut changed = expected_tools.clone();
+    changed[0]["tools_sha256"] = json!("changed");
     assert!(
-        verify_stock_configuration(
-            &safe,
-            &json!({"requirements":{"allowedWebSearchModes":["cached"]}})
+        delm::workers::compare_capability_manifests(
+            &expected_skills,
+            &expected_skills,
+            &expected_tools,
+            &changed
+        )
+        .is_err()
+    );
+    assert!(
+        delm::workers::compare_capability_manifests(
+            &expected_skills,
+            &json!([]),
+            &expected_tools,
+            &expected_tools
         )
         .is_err()
     );
@@ -236,6 +291,17 @@ async fn lifecycle_hook_discovery_checks_trust_without_starting_worker_threads()
         .unwrap();
         let result = delm::workers::verify_lifecycle_hooks(&fixture.request, &binding).await;
         assert_eq!(result.is_ok(), status == "trusted", "{result:?}");
+        fixture.request.auth_settings["startup_hook_listing"] = json!({"data":[{"hooks":hooks}]});
+        fixture.request.host_executable = PathBuf::from("/missing-host-must-not-be-launched");
+        let cached = delm::workers::verify_lifecycle_hooks(&fixture.request, &binding).await;
+        assert_eq!(cached.is_ok(), status == "trusted", "{cached:?}");
+        fixture
+            .request
+            .auth_settings
+            .as_object_mut()
+            .unwrap()
+            .remove("startup_hook_listing");
+        fixture.request.host_executable = host.clone();
     }
     let wire = fs::read_to_string(host.with_extension("jsonl")).unwrap();
     for record in wire
@@ -269,9 +335,12 @@ async fn native_stock_account_and_configuration_preflight_without_model_turns() 
     .await
     .unwrap();
     assert!(request.auth_settings["account_identity"].is_object());
-    assert!(request.auth_settings["stock_mcp_servers"].is_array());
-    assert!(request.auth_settings["stock_environment_keys"].is_array());
-    assert_eq!(request.policy["network"], "enabled");
+    assert!(request.auth_settings["skills_manifest"].is_array());
+    assert!(request.auth_settings["mcp_manifest"].is_array());
+    assert_eq!(
+        request.auth_settings["capability_report"]["exact_live_session_parity"],
+        false
+    );
     assert!(!request.model.is_empty());
     assert!(
         !request
@@ -287,11 +356,8 @@ fn managed_network_external_sandbox_and_glob_policies_fail_closed() {
     fixture.request.policy["network"] = json!("enabled");
     fixture.request.policy["network_proxy_active"] = json!(true);
     assert!(
-        fixture
-            .config()
-            .unwrap_err()
-            .to_string()
-            .contains("Managed")
+        fixture.config().is_ok(),
+        "managed policy is inherited natively rather than rewritten"
     );
     fixture.request.policy["network_proxy_active"] = json!(false);
     assert!(fixture.config().is_ok());
@@ -380,12 +446,11 @@ fn source_aliases_and_missing_denied_paths_remain_restricted_after_mapping() {
 }
 
 #[test]
-fn native_response_must_confirm_private_scope_before_any_model_turn() {
-    let fixture = Fixture::new();
-    fixture.config().unwrap();
-    let environment = fixture.run.join("environment/worker-1");
-    let response = json!({"futureField":{"accepted":true},"thread":{"id":"native-thread","environments":[{"environmentId":"local","cwd":fixture.project,"runtimeWorkspaceRoots":[fixture.project]}]},"cwd":fixture.project,"model":fixture.request.model,"modelProvider":"openai","approvalPolicy":"never","activePermissionProfile":{"id":"delm_worker_1"},"reasoningEffort":null,
-        "sandbox":{"type":"workspaceWrite","writableRoots":[environment],"networkAccess":false,"excludeTmpdirEnvVar":true,"excludeSlashTmp":true},"runtimeWorkspaceRoots":[fixture.project]});
+fn native_response_confirms_inherited_settings_without_forcing_never() {
+    let mut fixture = Fixture::new();
+    let sandbox = json!({"type":"workspaceWrite","writableRoots":[],"networkAccess":false});
+    fixture.request.auth_settings["native_thread_settings"] = json!({"activePermissionProfile":{"id":"native-project"},"sandbox":sandbox,"disabledPluginIds":[]});
+    let response = json!({"thread":{"id":"native-thread"},"cwd":fixture.project,"model":fixture.request.model,"modelProvider":"openai", "approvalPolicy":"on-request", "activePermissionProfile":{"id":"native-project"},"sandbox":sandbox,"disabledPluginIds":[]});
     verify_thread_response(
         &fixture.request,
         &fixture.run,
@@ -394,61 +459,36 @@ fn native_response_must_confirm_private_scope_before_any_model_turn() {
         &response,
     )
     .unwrap();
-    let mut unsafe_response = response.clone();
-    unsafe_response["sandbox"]["writableRoots"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!(fixture.request.project));
-    assert!(
-        verify_thread_response(
-            &fixture.request,
-            &fixture.run,
-            &fixture.project,
-            1,
-            &unsafe_response
-        )
-        .is_err()
-    );
-    let mut wrong_approval = response.clone();
-    wrong_approval["approvalPolicy"] = json!("on-request");
-    assert!(
-        verify_thread_response(
-            &fixture.request,
-            &fixture.run,
-            &fixture.project,
-            1,
-            &wrong_approval
-        )
-        .is_err()
-    );
-    let mut wrong_profile = response.clone();
-    wrong_profile["activePermissionProfile"]["id"] = json!(":workspace");
-    assert!(
-        verify_thread_response(
-            &fixture.request,
-            &fixture.run,
-            &fixture.project,
-            1,
-            &wrong_profile
-        )
-        .is_err()
-    );
-    let mut remote = response.clone();
-    remote["thread"]["environments"][0]["environmentId"] = json!("remote-worker");
-    assert!(
-        verify_thread_response(&fixture.request, &fixture.run, &fixture.project, 1, &remote)
-            .is_err()
-    );
-    let mut shared_tmp = response;
-    shared_tmp["sandbox"]["excludeSlashTmp"] = json!(false);
-    assert!(
-        verify_thread_response(
-            &fixture.request,
-            &fixture.run,
-            &fixture.project,
-            1,
-            &shared_tmp
-        )
-        .is_err()
-    );
+    for (key, value) in [
+        ("approvalPolicy", json!("never")),
+        ("model", json!("wrong-model")),
+        ("activePermissionProfile", json!({"id":"delm_worker_1"})),
+        ("disabledPluginIds", json!(["user-plugin"])),
+    ] {
+        let mut changed = response.clone();
+        changed[key] = value;
+        assert!(
+            verify_thread_response(
+                &fixture.request,
+                &fixture.run,
+                &fixture.project,
+                1,
+                &changed
+            )
+            .is_err(),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn nested_worker_launch_is_rejected_before_auth_or_model_work() {
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_delm"))
+        .arg("--stdio")
+        .env("DELM_WORKER_SESSION", "1")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("already a DeLM worker"));
+    assert!(result.stdout.is_empty());
 }

@@ -65,6 +65,8 @@ def verify_qualification(metadata, runtime=None):
     if set(records) != set(ARCHITECTURES):
         raise RuntimeError("Both native macOS architectures must pass release qualification.")
     for arch, record in records.items():
+        inheritance = record.get("nativeInheritance", {})
+        evidence = record.get("evidenceSha256", {})
         if (record.get("schema") != 1 or record.get("kind") != "native-release-build"
                 or record.get("architecture") != arch or record.get("target") != ARCHITECTURES[arch]
                 or record.get("sourceRevision") != metadata["sourceRevision"]
@@ -72,6 +74,20 @@ def verify_qualification(metadata, runtime=None):
                 or record.get("sourceDirty") is not False or record.get("passed") is not True
                 or record.get("modelCalls") != 0
                 or record.get("lifecycleCases") != LIFECYCLE_CASES
+                or record.get("exactLiveSessionParity") is not False
+                or not record.get("codexVersion")
+                or set(evidence) != {"smoke", "inheritance", *LIFECYCLE_CASES}
+                or not all(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+                           for digest in evidence.values())
+                or inheritance.get("runtimeSha256") != record.get("runtimeSha256")
+                or inheritance.get("architecture") != arch
+                or inheritance.get("hostVersion") != record.get("codexVersion")
+                or inheritance.get("gatewayToolCalled") is not True
+                or inheritance.get("parentCliOverridesNotExported") is not True
+                or inheritance.get("exactLiveSessionParity") is not False
+                or not all(isinstance(inheritance.get(key), str)
+                           and re.fullmatch(r"[0-9a-f]{64}", inheritance[key])
+                           for key in ["nativeTestSha256", "sourceDigest"])
                 or not re.fullmatch(r"[0-9a-f]{64}", record.get("runtimeSha256", ""))):
             raise RuntimeError(f"Invalid native release qualification for {arch}.")
         if runtime is not None:

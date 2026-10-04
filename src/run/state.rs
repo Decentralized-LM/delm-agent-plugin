@@ -18,6 +18,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -199,7 +206,10 @@ impl Journal {
     }
     pub fn record(&mut self, kind: &str, value: &impl Serialize) -> Result<()> {
         let value = serde_json::to_value(value)?;
-        serde_json::to_writer(&mut self.0, &json!({"time":now(),"kind":kind,"data":value}))?;
+        serde_json::to_writer(
+            &mut self.0,
+            &json!({"time":now(),"time_ms":now_ms(),"kind":kind,"data":value}),
+        )?;
         self.0.write_all(b"\n")?;
         if kind != "native"
             || !value

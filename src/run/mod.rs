@@ -1,11 +1,13 @@
 //! One durable two-worker invocation. The host owns presentation; this module
 //! owns worker lifetimes and accepts completions in native event order.
+pub(crate) mod approvals;
 mod completion;
 pub(crate) mod questions;
 pub(crate) mod state;
+mod tool_calls;
 
 use crate::{
-    board::{Board, tool_definitions},
+    board::Board,
     protocol::{Event, HostCommand, StartRequest},
     workers::{RpcClient, text_input, verify_thread_response, worker_config},
     workspace::{self, PreparedWorkspace},
@@ -38,7 +40,11 @@ struct Worker {
     #[serde(default)]
     command_revisions: HashMap<String, u64>,
     #[serde(default)]
+    command_sequences: HashMap<String, u64>,
+    #[serde(default)]
     revision_fences: Vec<(u64, u64)>,
+    #[serde(default)]
+    reported_task_versions: HashMap<i64, i64>,
     #[serde(default)]
     result_policy: workspace::ResultPolicy,
     waiting: bool,
@@ -53,6 +59,9 @@ fn record_command(worker: &mut Worker, item: &Value, started: bool, sequence: Op
         return;
     };
     if started {
+        if let Some(sequence) = sequence {
+            worker.command_sequences.insert(id.into(), sequence);
+        }
         if let Some(sequence) = sequence
             && let Some((_, revision)) = worker
                 .revision_fences
@@ -68,6 +77,7 @@ fn record_command(worker: &mut Worker, item: &Value, started: bool, sequence: Op
     } else {
         let mut record = item.clone();
         record["_delm_revision"] = json!(worker.command_revisions.remove(id));
+        record["_delm_started_sequence"] = json!(worker.command_sequences.remove(id));
         record["_delm_order"] = json!(worker.checks.len());
         worker.checks.insert(id.into(), record);
     }
@@ -90,6 +100,48 @@ fn recent_commands(worker: &Worker, revision: u64) -> Value {
     })).collect::<Vec<_>>())
 }
 
+fn task_event(worker: &mut Worker, index: usize, tool: &str, body: &Value) -> Option<Event> {
+    let verb = match tool {
+        "delm_task_claim" => "claimed",
+        "delm_task_finish" => "finished",
+        "delm_task_release" => "released",
+        "delm_task_split" => "split",
+        _ => return None,
+    };
+    let result = &body["result"];
+    let id = result["task_id"].as_i64()?;
+    let version = result["version"].as_i64()?;
+    if worker
+        .reported_task_versions
+        .get(&id)
+        .is_some_and(|previous| *previous >= version)
+    {
+        return None;
+    }
+    worker.reported_task_versions.insert(id, version);
+    let title = body["board"]["tasks"]
+        .as_array()
+        .and_then(|tasks| tasks.iter().find(|task| task["task_id"] == id))
+        .and_then(|task| task["title"].as_str());
+    let label = title.map_or_else(|| format!("task #{id}"), |title| format!("#{id}: {title}"));
+    let message = if tool == "delm_task_split" {
+        let count = result["created"].as_array().map_or(0, Vec::len);
+        format!(
+            "Worker {} exposed {count} available tasks and is continuing {label}",
+            index + 1
+        )
+    } else {
+        format!("Worker {} {verb} {label}", index + 1)
+    };
+    let mut event = Event::new("status", message);
+    event.id = Some(format!("task:{id}:{version}"));
+    event.details = Some(
+        json!({"worker":index+1,"action":tool.trim_start_matches("delm_"),
+        "task_id":id,"version":version,"state":result["state"],"title":title,"created":result["created"]}),
+    );
+    Some(event)
+}
+
 #[derive(Serialize, Deserialize)]
 struct Saved {
     request: StartRequest,
@@ -108,8 +160,8 @@ pub async fn serve(
     serve_inner(input, output, cancel, None).await
 }
 
-/// The public CLI admits model work only after its separate control command
-/// has authenticated. Protocol fixtures already own a bidirectional channel.
+/// Bound native invocations admit work as soon as authenticated control is
+/// registered. Standalone CLI users establish their monitoring lease explicitly.
 pub(crate) async fn serve_controlled(
     input: mpsc::Receiver<HostCommand>,
     output: mpsc::UnboundedSender<Event>,
@@ -213,7 +265,8 @@ async fn serve_inner(
             }
         };
         if !admitted {
-            saved.status = "paused".into();
+            let recovery = workspace::preserve_partial_and_cleanup(&saved.workspace)?;
+            saved.status = "stopped".into();
             atomic_json(&run_dir.join("run.json"), &saved)?;
             let mut stopped = Event::new(
                 "stopped",
@@ -223,24 +276,41 @@ async fn serve_inner(
                 .file_name()
                 .map(|id| id.to_string_lossy().into_owned());
             stopped.request_revision = Some(saved.revision);
-            stopped.partial_paths = saved.workspace.workers.to_vec();
+            stopped.partial_paths = vec![recovery.recovery.clone()];
+            stopped.details = Some(serde_json::to_value(recovery)?);
             let _ = output.send(stopped);
             return Ok(());
         }
-        atomic_json(&run_dir.join("run.json"), &saved)?;
+        if let Err(error) = atomic_json(&run_dir.join("run.json"), &saved) {
+            return Err(startup_failure(&mut saved, &output, error));
+        }
     }
-    let mut journal = Journal::open(&run_dir)?;
-    journal.record(
-        "started",
-        &json!({"deadline":saved.expires,"revision":saved.revision}),
-    )?;
-    let mut board = Board::open(
-        &run_dir,
-        &saved.workspace.baseline,
-        saved.workspace.workers.clone(),
-    )?;
-    board.set_revision(saved.revision)?;
-    let mut rpc = RpcClient::spawn(&saved.request, &run_dir).await?;
+    let startup = (|| -> Result<_> {
+        let mut journal = Journal::open(&run_dir)?;
+        journal.record(
+            "started",
+            &json!({"deadline":saved.expires,"revision":saved.revision}),
+        )?;
+        let mut board = Board::open(
+            &run_dir,
+            &saved.workspace.baseline,
+            saved.workspace.workers.clone(),
+        )?;
+        board.set_revision(saved.revision)?;
+        Ok((journal, board))
+    })();
+    let (mut journal, mut board) = match startup {
+        Ok(state) => state,
+        Err(error) => {
+            return Err(startup_failure(&mut saved, &output, error));
+        }
+    };
+    let mut rpc = match RpcClient::spawn(&saved.request, &run_dir).await {
+        Ok(rpc) => rpc,
+        Err(error) => {
+            return Err(startup_failure(&mut saved, &output, error));
+        }
+    };
     if saved.expires == 0 {
         saved.expires = now() + saved.request.seconds;
     }
@@ -250,13 +320,25 @@ async fn serve_inner(
         .duration_since(SystemTime::now())
         .unwrap_or_default();
     let execution_deadline = tokio::time::Instant::now() + remaining;
-    let guard = crate::supervisor::Guard::start_with_paths(
+    let guard = match crate::supervisor::Guard::start_with_paths(
         std::process::id(),
         rpc.pid,
         saved.expires * 1000 + WATCHDOG_HANDOFF_GRACE.as_millis() as u64,
         &rpc.launch_dir,
         std::slice::from_ref(&run_dir),
-    )?;
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            // No thread has been created; reap the metadata host before cleanup.
+            if rpc.shutdown(&[]).await.is_ok() {
+                cleanup_before_workers(&mut saved, &output)?;
+            } else {
+                saved.status = "recovery_required".into();
+                atomic_json(&run_dir.join("run.json"), &saved)?;
+            }
+            return Err(error.context("Could not supervise workers; no task was started"));
+        }
+    };
     let result = if *cancel.borrow() {
         Ok(None)
     } else {
@@ -271,9 +353,14 @@ async fn serve_inner(
         .iter()
         .map(|w| (w.thread.clone(), w.turn.clone()))
         .collect::<Vec<_>>();
+    journal.record("shutdown_started", &json!({"revision":saved.revision}))?;
     let shutdown_started = guard.begin_shutdown();
     let shutdown = rpc.shutdown(&threads).await.and(shutdown_started);
     let supervision = guard.finish();
+    journal.record(
+        "shutdown_finished",
+        &json!({"native_acknowledged":shutdown.is_ok()}),
+    )?;
     saved.workers.iter_mut().for_each(|w| w.turn = None);
     let mut result = result;
     if *cancel.borrow() {
@@ -293,7 +380,7 @@ async fn serve_inner(
                     &json!({"revision":saved.revision,"text":text}),
                 )?;
                 result = Err(anyhow::anyhow!(
-                    "Your update arrived while the workers were stopping. It is saved with the partial work and will be included if you resume"
+                    "Your update arrived while the workers were stopping. It is saved with the recovery bundle; the proposed result was not delivered"
                 ));
             }
             HostCommand::Answer { id, answers } => {
@@ -312,28 +399,28 @@ async fn serve_inner(
     }
     let writers_stopped =
         shutdown.is_ok() && supervision.as_ref().is_ok_and(|report| report.clean());
-    let mut retention_failed = false;
+    let mut delivery_failed = false;
     let result = match result {
         Ok(Some((winner, candidate))) => {
-            let retained = (|| -> Result<PathBuf> {
+            let delivery = (|| -> Result<workspace::DeliveryReport> {
                 ensure!(
                     writers_stopped,
                     "Worker processes did not stop cleanly; both projects are preserved"
                 );
                 candidate.verify(&saved.workspace.workers[winner])?;
                 atomic_json(&run_dir.join("completion.json"), &candidate)?;
-                // No owned writer remains before the result and its review are captured.
-                workspace::retain_result_with_policy(
+                // No owned writer remains before delivery and workspace cleanup.
+                workspace::deliver_result(
                     &saved.workspace,
                     winner,
                     &saved.workers[winner].result_policy,
                 )
             })();
-            match retained {
-                Ok(path) => Ok(Some((winner, path))),
+            match delivery {
+                Ok(delivery) => Ok(Some((winner, delivery))),
                 Err(error) => {
-                    retention_failed = true;
-                    Err(error.context("Result retention requires recovery"))
+                    delivery_failed = true;
+                    Err(error.context("Result delivery requires recovery"))
                 }
             }
         }
@@ -341,36 +428,69 @@ async fn serve_inner(
         Err(error) => Err(error),
     };
     match result {
-        Ok(Some((winner, path))) => {
-            saved.status = "complete".into();
+        Ok(Some((winner, delivery))) => {
+            saved.status = if !delivery.delivered {
+                "delivery_conflict"
+            } else if delivery.verification_required {
+                "delivered"
+            } else {
+                "complete"
+            }
+            .into();
             atomic_json(&run_dir.join("run.json"), &saved)?;
             let mut event = Event::new(
-                "result",
+                if !delivery.delivered {
+                    "stopped"
+                } else if delivery.verification_required {
+                    "delivered"
+                } else {
+                    "result"
+                },
                 saved.workers[winner]
                     .outcome
                     .as_ref()
                     .and_then(|v| v.get("summary"))
                     .and_then(Value::as_str)
-                    .unwrap_or("The completed project is ready to open."),
+                    .unwrap_or("Changes have been delivered to your project."),
             );
-            event.path = Some(path);
+            if !delivery.delivered {
+                event.message = format!(
+                    "Delivery needs conflict resolution for: {}. Your edits and the proposed changes are preserved.",
+                    delivery.conflicts.join(", ")
+                );
+            } else if delivery.verification_required {
+                event.message.push_str(" Changes are in your project. Run the necessary local setup or focused check for the merged/relocated result before reporting it ready.");
+            }
+            event.path = Some(delivery.project.clone());
+            if let Some(recovery) = &delivery.recovery {
+                event.partial_paths.push(recovery.clone());
+            }
             let completion: Value =
                 serde_json::from_slice(&fs::read(run_dir.join("completion.json"))?)?;
             event.request_revision = Some(saved.revision);
-            event.details = Some(
-                json!({"worker":winner+1,"review":run_dir.join("workspace/review"),
+            event.details = Some(json!({"worker":winner+1,"delivery":delivery,
                 "completion":run_dir.join("completion.json"),"checks":completion["checks"],
-                "original_unchanged":true,"previews_stopped":true}),
-            );
+                "shared_checks":completion["shared_checks"],"previews_stopped":true}));
             event.run_id = run_dir
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned());
             let _ = output.send(event);
-            journal.record("completed", &json!({"worker":winner+1}))?;
+            journal.record(&saved.status, &json!({"worker":winner+1}))?;
         }
         other => {
-            saved.status = if writers_stopped && !retention_failed {
-                "paused"
+            let recovery = if writers_stopped {
+                workspace::preserve_partial_and_cleanup(&saved.workspace)
+            } else {
+                Err(anyhow::anyhow!(
+                    "Worker shutdown or result delivery needs recovery"
+                ))
+            };
+            saved.status = if recovery.is_ok() {
+                if delivery_failed {
+                    "delivery_conflict"
+                } else {
+                    "stopped"
+                }
             } else {
                 "recovery_required"
             }
@@ -391,23 +511,75 @@ async fn serve_inner(
                     )
                 },
             );
-            if writers_stopped {
-                event.partial_paths = saved
-                    .workspace
-                    .workers
-                    .iter()
-                    .filter(|path| path.is_dir())
-                    .cloned()
-                    .collect();
+            match recovery {
+                Ok(report) => {
+                    event.partial_paths = vec![report.recovery.clone()];
+                    event.details = Some(serde_json::to_value(report)?);
+                }
+                Err(error) => {
+                    event
+                        .message
+                        .push_str(&format!(" Cleanup requires recovery: {error:#}."));
+                }
             }
             event.run_id = run_dir
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned());
             let _ = output.send(event);
-            journal.record("paused", &json!({"shutdown_ok":shutdown.is_ok()}))?;
+            journal.record(&saved.status, &json!({"shutdown_ok":shutdown.is_ok()}))?;
         }
     }
     Ok(())
+}
+
+fn startup_failure(
+    saved: &mut Saved,
+    output: &mpsc::UnboundedSender<Event>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match cleanup_before_workers(saved, output) {
+        Ok(()) => error,
+        Err(cleanup) => error.context(format!(
+            "Startup failed and cleanup needs recovery at {}: {cleanup:#}",
+            saved.workspace.run_dir.display()
+        )),
+    }
+}
+
+fn cleanup_before_workers(saved: &mut Saved, output: &mpsc::UnboundedSender<Event>) -> Result<()> {
+    let recovery = workspace::preserve_partial_and_cleanup(&saved.workspace)?;
+    saved.status = "stopped".into();
+    atomic_json(&saved.workspace.run_dir.join("run.json"), saved)?;
+    let mut event = Event::new(
+        "stopped",
+        "Startup stopped before any task turn. Temporary workspaces were removed.",
+    );
+    event.run_id = saved
+        .workspace
+        .run_dir
+        .file_name()
+        .map(|id| id.to_string_lossy().into_owned());
+    event.partial_paths = vec![recovery.recovery.clone()];
+    event.details = Some(serde_json::to_value(recovery)?);
+    let _ = output.send(event);
+    Ok(())
+}
+
+fn announce_ready(
+    candidate: Option<&(usize, completion::Completion)>,
+    revision: u64,
+    questions: &questions::Questions,
+    approvals: &approvals::Approvals,
+    output: &mpsc::UnboundedSender<Event>,
+) {
+    if candidate.is_some() && questions.is_empty() && approvals.is_empty() {
+        let mut ready = Event::new(
+            "ready",
+            "The shared result is ready. Stopping workers before delivery.",
+        );
+        ready.request_revision = Some(revision);
+        let _ = output.send(ready);
+    }
 }
 
 async fn prepare(
@@ -446,7 +618,7 @@ async fn prepare(
     );
     let mut preparing = Event::new(
         "status",
-        "Preparing two private workspaces. Your original project will stay unchanged.",
+        "Preparing two working copies. The completed changes will be applied to your project.",
     );
     preparing.run_id = run_dir
         .file_name()
@@ -457,6 +629,12 @@ async fn prepare(
     request.attachments = crate::inputs::capture(&request.attachments, &run_dir)?;
     let project = request.project.clone();
     let directory = run_dir.clone();
+    request.auth_settings["invocation_task"] = json!(request.task);
+    let mut preparation_journal = Journal::open(&run_dir)?;
+    preparation_journal.record(
+        "preparation_started",
+        &json!({"invocation_received_at_ms":request.auth_settings["invocation_received_at_ms"]}),
+    )?;
     let mut revision = 1;
     let mut prepare = tokio::task::spawn_blocking(move || {
         workspace::prepare(&project, &directory, crate::config::MAX_REPO_SIZE_BYTES)
@@ -468,7 +646,12 @@ async fn prepare(
                 Some(HostCommand::Stop) | None => {
                     // Capture is bounded and has no model work or source writes.
                     // Await it before returning so preparation cannot become an orphan.
-                    let _ = prepare.await;
+                    if let Ok(Ok(workspace)) = prepare.await {
+                        let recovery=workspace::preserve_partial_and_cleanup(&workspace)?;
+                        let mut event=Event::new("stopped","Preparation cancelled; temporary workspaces removed.");
+                        event.partial_paths=vec![recovery.recovery];
+                        let _=output.send(event);
+                    }
                     bail!("Preparation cancelled; no worker was started");
                 }
                 Some(HostCommand::Message{text, attachments}) => {
@@ -480,7 +663,7 @@ async fn prepare(
             }
         }
     };
-    let saved = Saved {
+    let mut saved = Saved {
         request,
         workspace,
         workers: Default::default(),
@@ -488,7 +671,12 @@ async fn prepare(
         expires: 0,
         status: "prepared".into(),
     };
-    atomic_json(&run_dir.join("run.json"), &saved)?;
+    if let Err(error) = preparation_journal
+        .record("workspaces_prepared", &json!({"revision":revision}))
+        .and_then(|()| atomic_json(&run_dir.join("run.json"), &saved))
+    {
+        return Err(startup_failure(&mut saved, output, error));
+    }
     Ok((saved, lock))
 }
 
@@ -516,6 +704,7 @@ async fn start_turn(
     );
     worker.revision = revision;
     worker.command_revisions.clear();
+    worker.command_sequences.clear();
     worker.revision_fences = vec![(0, revision)];
     worker.outcome = None;
     worker.waiting = false;
@@ -573,6 +762,47 @@ async fn update_worker(
     start_turn(rpc, worker, revision, &message, attachments).await
 }
 
+fn initial_turn_input(request: &StartRequest, revision: u64) -> (String, Vec<Value>) {
+    let mut task = format!(
+        "User request (revision {}):\n{}\n\nRelevant context supplied by the parent conversation:\n{}\n\nYour project is the private working directory. Start useful work now.",
+        revision, request.task, request.context
+    );
+    let mut initial_inputs = request.attachments.clone();
+    if let Some(native) = request.auth_settings["invocation_inputs"].as_array() {
+        task = format!(
+            "Execute the original user input below (request revision {}). DeLM is already running; do not invoke DeLM again. Use your inherited conversation context and ordinary Codex capabilities. Relevant additional context: {}",
+            revision, request.context
+        );
+        if let Some(original) = request.auth_settings["invocation_task"].as_str()
+            && let Some(updates) = request.task.strip_prefix(original)
+            && !updates.is_empty()
+        {
+            task.push_str(updates);
+        }
+        // Preserve native text elements and attachment offsets byte-for-byte.
+        // The wrapper consumes the DeLM invocation without rewriting user input.
+        let delm_skill = request.auth_settings["delm_skill_path"]
+            .as_str()
+            .and_then(|path| PathBuf::from(path).canonicalize().ok());
+        initial_inputs.extend(
+            native
+                .iter()
+                .filter(|item| {
+                    !(item["type"] == "skill"
+                        && delm_skill.as_ref().is_some_and(|own| {
+                            item["path"]
+                                .as_str()
+                                .and_then(|path| PathBuf::from(path).canonicalize().ok())
+                                .as_ref()
+                                == Some(own)
+                        }))
+                })
+                .cloned(),
+        );
+    }
+    (task, initial_inputs)
+}
+
 async fn drive(
     saved: &mut Saved,
     rpc: &mut RpcClient,
@@ -581,8 +811,17 @@ async fn drive(
     input: &mut mpsc::Receiver<HostCommand>,
     output: &mpsc::UnboundedSender<Event>,
 ) -> Result<Option<(usize, completion::Completion)>> {
+    let run_id = saved
+        .workspace
+        .run_dir
+        .file_name()
+        .context("Run identity missing")?
+        .to_string_lossy();
+    let mut gateway = crate::worker_tools::Gateway::start(&run_id)?;
+    let mut services = crate::services::Services::default();
+    crate::workers::prepare_worker_capabilities(rpc, &saved.request).await?;
     for index in 0..2 {
-        let config = worker_config(
+        let mut config = worker_config(
             &saved.request,
             &saved.workspace.run_dir,
             &saved.workspace.workers[index],
@@ -604,22 +843,29 @@ async fn drive(
                 .map(|(path, _)| PathBuf::from(path))
                 .collect(),
         };
-        let profile = format!("delm_worker_{}", index + 1);
-        let role = if index == 0 {
-            include_str!("../../plugin/worker-1.md")
-        } else {
-            include_str!("../../plugin/worker-2.md")
-        };
         let instructions = format!(
-            "{}\n\n{}\n\nThe original project path is {}. Interpret references beneath that path as the corresponding relative paths in your private working directory; never open the original path.",
+            "{}\n\nYou are worker {}.\n\nThe original project path is {}. Interpret references beneath that path as the corresponding relative paths in your private working directory; never open the original path.",
             include_str!("../../plugin/worker.md"),
-            role,
+            index + 1,
             serde_json::to_string(&saved.workspace.original)?
         );
+        config["mcp_servers"][format!("delm_coordination_{}", index + 1)] =
+            gateway.config(index)?;
         let result = if saved.workers[index].thread.is_empty() {
-            rpc.request("thread/start", json!({"cwd":saved.workspace.workers[index],"model":saved.request.model,"modelProvider":saved.request.model_provider,"serviceTier":saved.request.service_tier,"permissions":profile,"config":config,"developerInstructions":instructions,"dynamicTools":tool_definitions(),"ephemeral":false})).await?
+            let (method, params) = crate::workers::worker_thread_request(
+                &saved.request,
+                &saved.workspace.workers[index],
+                index + 1,
+                config,
+                &instructions,
+            )?;
+            rpc.request(method, params).await?
         } else {
-            rpc.request("thread/resume", json!({"threadId":saved.workers[index].thread,"cwd":saved.workspace.workers[index],"model":saved.request.model,"modelProvider":saved.request.model_provider,"serviceTier":saved.request.service_tier,"permissions":profile,"config":config})).await?
+            config
+                .as_object_mut()
+                .context("Worker configuration missing")?
+                .remove("permissions");
+            rpc.request("thread/resume", json!({"threadId":saved.workers[index].thread,"cwd":saved.workspace.workers[index],"model":saved.request.model,"modelProvider":saved.request.model_provider,"serviceTier":saved.request.service_tier,"config":config})).await?
         };
         verify_thread_response(
             &saved.request,
@@ -633,6 +879,20 @@ async fn drive(
             .and_then(Value::as_str)
             .context("Codex omitted thread identity")?
             .into();
+        let capabilities = crate::workers::verify_worker_capabilities(
+            rpc,
+            &saved.request,
+            &saved.workspace.workers[index],
+            &saved.workers[index].thread,
+        )
+        .await?;
+        atomic_json(
+            &saved
+                .workspace
+                .run_dir
+                .join(format!("worker-{}-capabilities.json", index + 1)),
+            &capabilities,
+        )?;
         atomic_json(&saved.workspace.run_dir.join("run.json"), saved)?;
     }
     if saved.expires == 0 {
@@ -640,19 +900,13 @@ async fn drive(
     }
     ensure!(saved.expires > now(), "The execution allowance has expired");
     saved.status = "running".into();
-    let task = format!(
-        "User request (revision {}):\n{}\n\nRelevant context supplied by the parent conversation:\n{}\n\nYour project is the private working directory. Start useful work now.",
-        saved.revision, saved.request.task, saved.request.context
-    );
-    for worker in &mut saved.workers {
-        start_turn(
-            rpc,
-            worker,
-            saved.revision,
-            &task,
-            &saved.request.attachments,
-        )
-        .await?;
+    let (task, initial_inputs) = initial_turn_input(&saved.request, saved.revision);
+    for (index, worker) in saved.workers.iter_mut().enumerate() {
+        journal.record(
+            "worker_turn_requested",
+            &json!({"worker":index+1,"revision":saved.revision}),
+        )?;
+        start_turn(rpc, worker, saved.revision, &task, &initial_inputs).await?;
     }
     atomic_json(&saved.workspace.run_dir.join("run.json"), saved)?;
     let mut started = Event::new(
@@ -661,9 +915,43 @@ async fn drive(
     );
     started.request_revision = Some(saved.revision);
     let _ = output.send(started);
+    let mut first_actions = [false; 2];
     let mut questions = questions::Questions::default();
+    let mut approvals = approvals::Approvals::default();
     let mut pending_candidate: Option<(usize, completion::Completion)> = None;
+    let mut pending_accept_revision = None;
+    let mut tool_calls = tool_calls::Calls::default();
     loop {
+        if input.is_empty() && rpc.events.is_empty() {
+            for call in tool_calls.take_ready(&saved.workers) {
+                let (success, body) = dispatch_tool(
+                    saved,
+                    rpc,
+                    board,
+                    &mut services,
+                    call.worker,
+                    &call.tool,
+                    call.arguments,
+                    output,
+                )
+                .await?;
+                let _ = call.reply.send(json!({"isError":!success,"content":[{"type":"text","text":serde_json::to_string(&body)?}]}));
+                atomic_json(&saved.workspace.run_dir.join("run.json"), saved)?;
+            }
+        }
+        // Drain already-received native requests before accepting. An approval
+        // can arrive after `ready` while the host acknowledgment is queued.
+        if pending_accept_revision == Some(saved.revision)
+            && pending_candidate
+                .as_ref()
+                .is_some_and(|(_, candidate)| candidate.revision == saved.revision)
+            && questions.is_empty()
+            && approvals.is_empty()
+            && input.is_empty()
+            && rpc.events.is_empty()
+        {
+            return Ok(pending_candidate.take());
+        }
         let remaining = saved.expires.saturating_sub(now());
         if remaining == 0 {
             bail!(TIME_LIMIT_REACHED);
@@ -674,6 +962,7 @@ async fn drive(
                 None | Some(HostCommand::Stop) => return Ok(None),
                 Some(HostCommand::Message{text, attachments}) => {
                     pending_candidate = None;
+                    pending_accept_revision = None;
                     saved.revision += 1; board.set_revision(saved.revision)?;
                     let mut accepted = Event::new("status", "Applying your update to both workers.");
                     accepted.request_revision = Some(saved.revision);
@@ -692,26 +981,21 @@ async fn drive(
                         Err(error) => {
                             let mut event = Event::new("answer_rejected", error.to_string()); event.id = Some(id);
                             let _ = output.send(event);
-                            if pending_candidate.is_some() {
-                                let mut ready = Event::new("ready", "The task is complete; the question had already ended.");
-                                ready.request_revision = Some(saved.revision); let _ = output.send(ready);
-                            }
+                            announce_ready(pending_candidate.as_ref(), saved.revision, &questions, &approvals, output);
                             continue;
                         }
                     };
                     if saved.workers[pending.worker].turn.as_deref() != Some(&pending.turn) {
                         let mut event = Event::new("answer_rejected", "This question belonged to a completed turn; your answer was not applied.");
                         event.id = Some(id); let _ = output.send(event);
-                        if pending_candidate.is_some() {
-                            let mut ready = Event::new("ready", "The task is complete; the question had already ended.");
-                            ready.request_revision = Some(saved.revision); let _ = output.send(ready);
-                        }
+                        announce_ready(pending_candidate.as_ref(), saved.revision, &questions, &approvals, output);
                         continue;
                     }
                     let response = answers.iter().map(|(key, values)| (key.clone(), json!({"answers":values}))).collect::<serde_json::Map<_,_>>();
                     rpc.respond(pending.native_id, json!({"answers":response})).await?;
                     let _ = output.send(questions::resolved(&id));
                     pending_candidate = None;
+                    pending_accept_revision = None;
                     saved.revision += 1;
                     board.set_revision(saved.revision)?;
                     let text = format!("User answered these questions: {}\nAnswers: {}", pending.items, serde_json::to_string(&answers)?);
@@ -726,11 +1010,25 @@ async fn drive(
                         update_worker(rpc,worker,saved.revision,&text,&[]).await?;
                     }
                 }
+                Some(HostCommand::Respond{id,response}) => {
+                    match approvals.take(&id,&response) {
+                        Ok(pending) => {
+                            if pending.turn.as_deref().is_none_or(|turn|saved.workers[pending.worker].turn.as_deref()==Some(turn)) {
+                                rpc.respond(pending.native_id,response).await?;
+                                let mut event=Event::new("approval_resolved","Your response was sent to Codex."); event.id=Some(id); let _=output.send(event);
+                            } else {
+                                let mut event=Event::new("approval_resolved","The native request ended before this response; it was not applied."); event.id=Some(id); let _=output.send(event);
+                            }
+                        },
+                        Err(error) => {let _=output.send(Event::new("notice",format!("Native response was not applied: {error}")));}
+                    }
+                    announce_ready(pending_candidate.as_ref(), saved.revision, &questions, &approvals, output);
+                },
                 Some(HostCommand::Approval{..}) => {},
                 Some(HostCommand::AcceptResult{request_revision})
                     if request_revision == saved.revision
                         && pending_candidate.as_ref().is_some_and(|(_,candidate)|candidate.revision == request_revision) => {
-                    return Ok(pending_candidate.take());
+                    pending_accept_revision = Some(request_revision);
                 }
                 _ => {}
             },
@@ -743,10 +1041,16 @@ async fn drive(
                 if method.starts_with("delm/transport") { bail!("The native worker connection closed"); }
                 if method == "serverRequest/resolved" {
                     if let Some(event) = questions.resolve(&params["requestId"]) { let _ = output.send(event); }
+                    if let Some(event) = approvals.resolve(&params["requestId"]) { let _ = output.send(event); }
+                    announce_ready(pending_candidate.as_ref(), saved.revision, &questions, &approvals, output);
                     continue;
                 }
                 let identity = params.get("threadId").and_then(Value::as_str).and_then(|id|saved.workers.iter().position(|w|w.thread == id));
                 let Some(index) = identity else { if let Some(id) = message.get("id") { rpc.reject(id.clone(),"Unbound worker thread").await?; } continue; };
+                if !first_actions[index] && matches!(method, "item/started" | "item/tool/call") {
+                    first_actions[index]=true;
+                    journal.record("worker_first_action", &json!({"worker":index+1,"method":method}))?;
+                }
                 match method {
                     "item/tool/call" => {
                         let id = message.get("id").context("Tool request identity missing")?.clone();
@@ -755,29 +1059,11 @@ async fn drive(
                         }
                         let tool = params.get("tool").and_then(Value::as_str).unwrap_or("");
                         let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-                        let checked = if tool == "delm_complete" {completion::validate_checks(&args,&saved.workers[index].checks,saved.revision).map(|_|())} else {Ok(())};
-                        let result = checked.and_then(|()|board.call(index+1,tool,args.clone()));
-                        let success = result.is_ok();
-                        let mut body = match result { Ok(value)=>value,Err(error)=>json!({"error":error.to_string(),"board":board.view()?}) };
-                        body["recent_commands"] = recent_commands(&saved.workers[index], saved.revision);
-                        if success && tool == "delm_complete" { saved.workers[index].outcome = Some(args); }
-                        if success && matches!(tool,"delm_publish"|"delm_status")
-                            && let Some(summary) = params.pointer("/arguments/summary").and_then(Value::as_str) {
-                            let summary: String = summary.chars().take(240).collect();
-                            let _ = output.send(Event::new("status",format!("Worker {}: {summary}",index+1)));
-                        }
+                        let (success,body) = dispatch_tool(saved,rpc,board,&mut services,index,tool,args,output).await?;
                         rpc.respond(id,json!({"contentItems":[{"type":"inputText","text":serde_json::to_string(&body)?}],"success":success})).await?;
-                        if success && matches!(tool,"delm_publish"|"delm_task_finish") {
-                            let other = 1-index;
-                            let dependency = saved.workers[other].outcome.as_ref().and_then(|value|value.get("dependency")).and_then(Value::as_str).unwrap_or("");
-                            let owner_matches = board.dependency_owner(dependency).ok().flatten() == Some(index+1);
-                            let task_matches = dependency.strip_prefix("task:").and_then(|id|id.parse::<u64>().ok()).is_some_and(|id|Some(id) == params.pointer("/arguments/task_id").and_then(Value::as_u64));
-                            if saved.workers[other].waiting && saved.workers[other].turn.is_none() && (owner_matches || task_matches) {
-                                start_turn(rpc,&mut saved.workers[other],saved.revision,"Your peer published new progress. Read the board and continue the named dependent work if it is now available.",&[]).await?;
-                            }
-                        }
                     }
                     "item/started" => {
+                        tool_calls.observe(index, &saved.workers[index], &params, message["_delm_received_sequence"].as_u64(), true)?;
                         if let Some(item) = params.get("item")
                             && item["type"].as_str() == Some("commandExecution")
                             && params["turnId"].as_str() == saved.workers[index].turn.as_deref()
@@ -787,6 +1073,7 @@ async fn drive(
                         }
                     }
                     "item/completed" => {
+                        tool_calls.observe(index, &saved.workers[index], &params, None, false)?;
                         if let Some(item) = params.get("item")
                             && item.get("type").and_then(Value::as_str) == Some("commandExecution")
                             && params.get("turnId").and_then(Value::as_str) == saved.workers[index].turn.as_deref()
@@ -798,28 +1085,41 @@ async fn drive(
                     "turn/completed" => {
                         let turn = params.get("turn").context("Turn result missing")?;
                         if saved.workers[index].turn.as_deref() != turn.get("id").and_then(Value::as_str) { continue; }
+                        tool_calls.retire(index);
                         for event in questions.retire_turn(index, turn["id"].as_str().unwrap_or("")) { let _ = output.send(event); }
+                        for event in approvals.retire_turn(index, turn["id"].as_str().unwrap_or("")) { let _ = output.send(event); }
                         saved.workers[index].turn = None;
                         let status = turn.get("status").and_then(Value::as_str).unwrap_or("");
-                        if status != "completed" { saved.workers[index].blocked = true; let _=output.send(Event::new("notice",format!("Worker {} stopped with status {status}. Its work is preserved.",index+1))); }
+                        if status != "completed" {
+                            saved.workers[index].blocked = true;
+                            for event in approvals.retire_worker(index) { let _=output.send(event); }
+                            let released=board.release_worker_claims(index+1,status)?;
+                            let retired_services=services.retire_worker(index+1)?;
+                            journal.record("worker_services_retired", &retired_services)?;
+                            let _=output.send(Event::new("notice",format!("Worker {} stopped with status {status}. {} tasks are available for its peer.",index+1,released.len())));
+                            let other=1-index;
+                            if !released.is_empty() && saved.workers[other].waiting && saved.workers[other].turn.is_none() {
+                                start_turn(rpc,&mut saved.workers[other],saved.revision,"Your peer stopped. Its task claims have been released. Read the board and continue from its published contributions.",&[]).await?;
+                            }
+                        }
                         else if saved.workers[index].revision == saved.revision {
                             let outcome = saved.workers[index].outcome.clone();
                             match outcome.as_ref().and_then(|o|o.get("outcome")).and_then(Value::as_str) {
                                 Some("complete") => {
-                                    // User commands already queued take precedence over acceptance.
-                                    if input.is_empty() && pending_candidate.is_none() {
+                                    // Keep the result even when unrelated host responses are queued.
+                                    // A task update invalidates it before acceptance.
+                                    if pending_candidate.is_none() {
                                         journal.record("candidate",&json!({"worker":index+1,"revision":saved.revision,"declaration":outcome,"commands":saved.workers[index].checks}))?;
                                         atomic_json(&saved.workspace.run_dir.join("run.json"),saved)?;
-                                        let candidate = completion::Completion::capture(&saved.workspace.workers[index],outcome.as_ref().context("Completion declaration missing")?,&saved.workers[index].checks,saved.revision,&saved.workers[index].result_policy)?;
-                                        let mut ready = Event::new("ready","The task is complete. Stopping the workers before opening the result.");
-                                        ready.request_revision = Some(saved.revision);
-                                        let _ = output.send(ready);
+                                        let declaration = outcome.as_ref().context("Completion declaration missing")?;
+                                        let shared = board.shared_checks(index+1,declaration,saved.revision)?;
+                                        let candidate = completion::Completion::capture_with_shared(&saved.workspace.workers[index],declaration,&saved.workers[index].checks,saved.revision,&saved.workers[index].result_policy,shared)?;
                                         pending_candidate = Some((index,candidate));
                                     }
                                 }
                                 Some("partial") => {
                                     let summary = outcome.as_ref().and_then(|o|o.get("summary")).and_then(Value::as_str).unwrap_or("");
-                                    start_turn(rpc,&mut saved.workers[index],saved.revision,&format!("Continue the concrete unfinished requirement you identified: {summary}. Read relevant peer progress and finish the whole request."),&[]).await?;
+                                    start_turn(rpc,&mut saved.workers[index],saved.revision,&format!("Advance the shared result by addressing this unfinished requirement: {summary}. Read current ownership, take ready work, and reuse peer contributions. Integrate only if no peer owns assembly."),&[]).await?;
                                 }
                                 Some("waiting") => saved.workers[index].waiting = true,
                                 Some("blocked") => {
@@ -834,6 +1134,7 @@ async fn drive(
                                 _ => saved.workers[index].blocked = true,
                             }
                         }
+                        announce_ready(pending_candidate.as_ref(), saved.revision, &questions, &approvals, output);
                         if pending_candidate.is_none() && saved.workers.iter().all(|w|w.turn.is_none()) {
                             let repair_wait = saved.workers.iter().any(|w|w.waiting && !w.wait_repaired);
                             if repair_wait {
@@ -858,16 +1159,26 @@ async fn drive(
                             }
                         }
                     }
-                    "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
-                        // Native acceptance can bypass the sandbox. Never grant it
-                        // during a run whose original repository must be immutable.
+                    "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/permissions/requestApproval" | "mcpServer/elicitation/request" => {
                         let id = message.get("id").context("Approval identity missing")?.clone();
-                        rpc.respond(id,json!({"decision":"decline"})).await?;
-                        let _=output.send(Event::new("notice","A worker requested access outside its private permissions. The request was declined; the worker can continue within its project."));
+                        if params["turnId"].as_str().is_some_and(|turn| saved.workers[index].turn.as_deref() != Some(turn)) {
+                            rpc.reject(id,"Approval belongs to a retired turn").await?;
+                            continue;
+                        }
+                        match approvals.insert(id.clone(),index,params["turnId"].as_str().map(str::to_owned),method,params.clone()) {
+                            Ok(event) => {let _=output.send(event);},
+                            Err(error) => rpc.reject(id,&error.to_string()).await?,
+                        }
                     }
                     _ => { if let Some(id) = message.get("id") { rpc.reject(id.clone(),"This native capability is unavailable during DeLM").await?; } }
                 }
             },
+            call = gateway.calls.recv() => {
+                let call = call.context("Worker tool transport closed")?;
+                tool_calls.enqueue(call);
+                persist = false;
+            },
+            _ = tokio::time::sleep(Duration::from_millis(100)), if tool_calls.has_pending() => { persist = false; },
             _ = tokio::time::sleep(Duration::from_secs(remaining)) => bail!(TIME_LIMIT_REACHED),
         }
         if persist {
@@ -876,9 +1187,108 @@ async fn drive(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_tool(
+    saved: &mut Saved,
+    rpc: &mut RpcClient,
+    board: &mut Board,
+    services: &mut crate::services::Services,
+    index: usize,
+    tool: &str,
+    args: Value,
+    output: &mpsc::UnboundedSender<Event>,
+) -> Result<(bool, Value)> {
+    let checked = if index >= 2 || saved.workers[index].turn.is_none() {
+        Err(anyhow::anyhow!("This worker has no active turn"))
+    } else if tool == "delm_complete" {
+        completion::validate_checks(&args, &saved.workers[index].checks, saved.revision).map(|_| ())
+    } else {
+        Ok(())
+    };
+    let result = checked.and_then(|()| match tool {
+        "delm_check_begin" => {
+            board.begin_check(index + 1, args.clone(), || rpc.received_sequence())
+        }
+        "delm_check_finish" => {
+            board.finish_check(index + 1, args.clone(), &saved.workers[index].checks)
+        }
+        "delm_service" => services.call(index + 1, args.clone(), rpc.pid, board),
+        _ => board.call(index + 1, tool, args.clone()),
+    });
+    let success = result.is_ok();
+    let mut body = match result {
+        Ok(value) => value,
+        Err(error) => json!({"error":error.to_string(),"board":board.view()?}),
+    };
+    if index >= 2 {
+        return Ok((false, body));
+    }
+    body["recent_commands"] = recent_commands(&saved.workers[index], saved.revision);
+    if success && tool == "delm_complete" {
+        saved.workers[index].outcome = Some(args.clone());
+    }
+    if success && let Some(event) = task_event(&mut saved.workers[index], index, tool, &body) {
+        let _ = output.send(event);
+    }
+    if success
+        && matches!(tool, "delm_publish" | "delm_status")
+        && let Some(summary) = args["summary"].as_str()
+    {
+        let _ = output.send(Event::new(
+            "status",
+            format!(
+                "Worker {}: {}",
+                index + 1,
+                summary.chars().take(240).collect::<String>()
+            ),
+        ));
+    }
+    if success
+        && matches!(
+            tool,
+            "delm_publish" | "delm_task_finish" | "delm_task_release" | "delm_task_split"
+        )
+    {
+        let other = 1 - index;
+        if saved.workers[other].waiting && saved.workers[other].turn.is_none() {
+            start_turn(rpc,&mut saved.workers[other],saved.revision,"New shared work is available. Read the board and claim useful ready work or continue your now-unblocked dependency.",&[]).await?;
+        }
+    }
+    Ok((success, body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_input_offsets_attachments_and_early_updates_survive_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let own = temp.path().join("delm-SKILL.md");
+        let other = temp.path().join("user-SKILL.md");
+        fs::write(&own, "DeLM").unwrap();
+        fs::write(&other, "User skill").unwrap();
+        let native = json!([
+            {"type":"text","text":"$delm:run Build from [Image #1]","text_elements":[{"byte_range":{"start":21,"end":31},"placeholder":"[Image #1]"}]},
+            {"type":"image","url":"data:image/png;base64,aGVsbG8="},
+            {"type":"skill","name":"run","path":own},
+            {"type":"skill","name":"run","path":other}
+        ]);
+        let request: StartRequest = serde_json::from_value(json!({
+            "project":temp.path(), "task":"Build from [Image #1]\n\nUser update:\nKeep keyboard support",
+            "context":"Previous discussion", "model":"fixture", "auth_home":temp.path(), "host_executable":"/fixture",
+            "policy":{}, "attachments":[{"type":"text","text":"An additional selected reference"}],
+            "auth_settings":{"invocation_inputs":native,"invocation_task":"Build from [Image #1]","delm_skill_path":own}
+        })).unwrap();
+        let (task, inputs) = initial_turn_input(&request, 2);
+        assert!(task.contains("Keep keyboard support"));
+        assert!(task.contains("Previous discussion"));
+        assert_eq!(inputs.len(), 4);
+        assert_eq!(inputs[0], request.attachments[0]);
+        assert_eq!(inputs[1], native[0]);
+        assert_eq!(inputs[2], native[1]);
+        assert_eq!(inputs[3], native[3]);
+    }
+
     #[test]
     fn command_finishing_after_steering_does_not_verify_the_new_request() {
         let mut worker = Worker {

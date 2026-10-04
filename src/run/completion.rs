@@ -14,18 +14,42 @@ pub(super) struct Completion {
     pub revision: u64,
     pub declaration: Value,
     pub checks: Vec<Value>,
+    #[serde(default)]
+    pub shared_checks: Vec<Value>,
     pub manifest: Manifest,
     #[serde(default)]
     pub result_policy: workspace::ResultPolicy,
 }
 
 impl Completion {
+    #[cfg(test)]
     pub fn capture(
         root: &Path,
         declaration: &Value,
         native_checks: &HashMap<String, Value>,
         revision: u64,
         result_policy: &workspace::ResultPolicy,
+    ) -> Result<Self> {
+        Self::capture_with_shared(
+            root,
+            declaration,
+            native_checks,
+            revision,
+            result_policy,
+            Vec::new(),
+        )
+    }
+
+    /// The board validates receipt provenance against the bound worker before
+    /// this call. Match the receipt's files to the captured candidate as well,
+    /// closing the interval between board validation and candidate capture.
+    pub fn capture_with_shared(
+        root: &Path,
+        declaration: &Value,
+        native_checks: &HashMap<String, Value>,
+        revision: u64,
+        result_policy: &workspace::ResultPolicy,
+        shared_checks: Vec<Value>,
     ) -> Result<Self> {
         ensure!(
             declaration["outcome"].as_str() == Some("complete"),
@@ -37,10 +61,49 @@ impl Completion {
         );
         let checks = validate_checks(declaration, native_checks, revision)?;
         let manifest = workspace::manifest_for_result(root, result_policy)?;
+        let declared = declaration
+            .get("shared_checks")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        ensure!(
+            declared.len() == shared_checks.len(),
+            "shared receipt validation is missing"
+        );
+        for (id, receipt) in declared.iter().zip(&shared_checks) {
+            ensure!(
+                id == &receipt["receipt_id"]
+                    && receipt["request_revision"].as_u64() == Some(revision)
+                    && receipt["reusable"] == true,
+                "invalid or obsolete shared check receipt"
+            );
+            for (path, version) in receipt["files"]
+                .as_object()
+                .context("receipt has no input scope")?
+            {
+                let entry = manifest.files.get(path);
+                if version.is_null() {
+                    ensure!(entry.is_none(), "shared check input changed at {path}");
+                } else {
+                    let entry = entry.with_context(|| {
+                        format!("shared check input is absent from candidate: {path}")
+                    })?;
+                    ensure!(
+                        entry.kind == workspace::FileKind::File
+                            && entry.sha256.as_deref() == version["sha256"].as_str()
+                            && Some(entry.size) == version["bytes"].as_u64()
+                            && Some(u64::from(entry.mode & 0o111))
+                                == version["executable"].as_u64(),
+                        "shared check input changed at {path}"
+                    );
+                }
+            }
+        }
         Ok(Self {
             revision,
             declaration: declaration.clone(),
             checks,
+            shared_checks,
             manifest,
             result_policy: result_policy.clone(),
         })
@@ -197,5 +260,50 @@ mod tests {
         candidate.verify(root.path()).unwrap();
         std::fs::write(root.path().join("result.txt"), "background change").unwrap();
         assert!(candidate.verify(root.path()).is_err());
+    }
+
+    #[test]
+    fn shared_receipts_match_the_captured_candidate_without_forging_local_commands() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("result.txt"), "ready").unwrap();
+        let manifest = workspace::manifest(root.path()).unwrap();
+        let file = &manifest.files["result.txt"];
+        let receipt = json!({"receipt_id":12,"worker":2,"request_revision":4,"reusable":true,
+            "files":{"result.txt":{"sha256":file.sha256,"bytes":file.size,"executable":file.mode & 0o111}},
+            "native":{"id":"peer-check"}});
+        let declaration = json!({"outcome":"complete","expected_revision":4,"summary":"Assembled contribution","checks":[],"shared_checks":[12]});
+        assert!(
+            Completion::capture(
+                root.path(),
+                &declaration,
+                &HashMap::new(),
+                4,
+                &workspace::ResultPolicy::default()
+            )
+            .is_err()
+        );
+        let candidate = Completion::capture_with_shared(
+            root.path(),
+            &declaration,
+            &HashMap::new(),
+            4,
+            &workspace::ResultPolicy::default(),
+            vec![receipt.clone()],
+        )
+        .unwrap();
+        assert!(candidate.checks.is_empty());
+        assert_eq!(candidate.shared_checks[0]["worker"], 2);
+        std::fs::write(root.path().join("result.txt"), "changed").unwrap();
+        assert!(
+            Completion::capture_with_shared(
+                root.path(),
+                &declaration,
+                &HashMap::new(),
+                4,
+                &workspace::ResultPolicy::default(),
+                vec![receipt]
+            )
+            .is_err()
+        );
     }
 }

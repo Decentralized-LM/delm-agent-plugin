@@ -4,6 +4,7 @@
 //! never select a workspace or a destination. Large bodies remain in immutable
 //! COW objects and are read only through explicit expansion or import.
 
+mod checks;
 mod files;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -84,7 +85,9 @@ impl Board {
                  CREATE TABLE IF NOT EXISTS workers (worker INTEGER PRIMARY KEY CHECK(worker IN (1,2)), state TEXT NOT NULL, summary TEXT NOT NULL, dependency TEXT, updated INTEGER NOT NULL);
                  INSERT OR IGNORE INTO workers VALUES (1,'working','',NULL,0),(2,'working','',NULL,0);
                  CREATE TABLE IF NOT EXISTS publications (id INTEGER PRIMARY KEY, worker INTEGER NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL);
-                 CREATE TABLE IF NOT EXISTS publication_files (publication INTEGER NOT NULL REFERENCES publications(id), path TEXT NOT NULL, version TEXT NOT NULL, PRIMARY KEY(publication,path));"
+                 CREATE TABLE IF NOT EXISTS publication_files (publication INTEGER NOT NULL REFERENCES publications(id), path TEXT NOT NULL, version TEXT NOT NULL, PRIMARY KEY(publication,path));
+                 CREATE TABLE IF NOT EXISTS check_snapshots (id INTEGER PRIMARY KEY, worker INTEGER NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL);
+                 CREATE TABLE IF NOT EXISTS check_receipts (id INTEGER PRIMARY KEY, worker INTEGER NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL);"
             )?;
             let object_dir = state.join("objects");
             create_owned_dir(&object_dir)?;
@@ -127,6 +130,57 @@ impl Board {
 
     pub fn dependency_owner(&self, dependency: &str) -> Result<Option<usize>> {
         dependency_owner(&self.db, dependency)
+    }
+
+    /// Native lifecycle recovery only, after the owner's turn has stopped.
+    /// This never claims that unpublished partial files were transferred.
+    pub fn release_worker_claims(&mut self, worker: usize, reason: &str) -> Result<Vec<i64>> {
+        ensure!((1..=2).contains(&worker), "unbound worker identity");
+        ensure!(
+            !reason.is_empty() && reason.len() <= 2048,
+            "invalid release reason"
+        );
+        self.lock.lock_exclusive()?;
+        let result = (|| {
+            let tx = self
+                .db
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let owned = {
+                let mut query = tx.prepare(
+                    "SELECT id,body FROM tasks WHERE owner=? AND state='claimed' ORDER BY id",
+                )?;
+                query
+                    .query_map([worker], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            let mut released = Vec::new();
+            for (id, encoded) in owned {
+                let mut body: Value = serde_json::from_str(&encoded)?;
+                body["handoff"] = json!(format!(
+                    "Owner stopped: {reason}. Reuse published contributions; unpublished files have not been imported."
+                ));
+                let seq = event(
+                    &tx,
+                    worker,
+                    "task_owner_stopped",
+                    &json!({"task_id":id,"reason":reason}),
+                )?;
+                tx.execute(
+                    "UPDATE tasks SET owner=NULL,state='available',body=?,updated=? WHERE id=?",
+                    params![serde_json::to_string(&body)?, seq, id],
+                )?;
+                released.push(id);
+            }
+            tx.commit()?;
+            Ok(released)
+        })();
+        let unlock = FileExt::unlock(&self.lock);
+        if result.is_ok() {
+            unlock?;
+        }
+        result
     }
 
     /// Bind the native worker's filesystem profile to privileged board I/O.
@@ -302,6 +356,12 @@ impl Board {
         if name == "delm_apply" {
             return self.apply(worker, key, &digest, args);
         }
+        if name == "delm_complete" {
+            let revision =
+                self.db
+                    .query_row("SELECT revision FROM context WHERE id=1", [], |r| r.get(0))?;
+            self.shared_checks(worker, args, revision)?;
+        }
         // File freezing precedes the database transaction. An interrupted freeze
         // can leave an unreferenced owned object, but never a visible partial publication.
         let frozen = if name == "delm_publish" {
@@ -316,6 +376,9 @@ impl Board {
             "delm_status" => status(&tx, worker, args)?,
             "delm_task_create" => task_create(&tx, worker, args)?,
             "delm_task_claim" => task_claim(&tx, worker, args)?,
+            "delm_task_update" => task_update(&tx, worker, args)?,
+            "delm_task_release" => task_release(&tx, worker, args)?,
+            "delm_task_split" => task_split(&tx, worker, args)?,
             "delm_task_finish" => task_finish(&tx, worker, args)?,
             "delm_publish" => publish(&tx, worker, frozen.context("missing frozen publication")?)?,
             "delm_complete" => complete(&tx, worker, args)?,
@@ -391,27 +454,41 @@ impl Board {
     }
 
     fn expand(&self, worker: usize, args: &Value) -> Result<Value> {
-        let targets = ["publication_id", "task_id", "finding_id"]
+        let targets = ["publication_id", "task_id", "finding_id", "check_id"]
             .iter()
             .filter(|key| args.get(**key).is_some())
             .count();
         ensure!(
             targets == 1,
-            "expand exactly one publication_id, task_id, or finding_id"
+            "expand exactly one publication_id, task_id, finding_id, or check_id"
         );
+        if args.get("check_id").is_some() {
+            let id = positive_id(args, "check_id")?;
+            let encoded: String = self
+                .db
+                .query_row("SELECT body FROM check_receipts WHERE id=?", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?
+                .context("unknown check receipt")?;
+            return Ok(serde_json::from_str(&encoded)?);
+        }
         if args.get("task_id").is_some() {
             let id = positive_id(args, "task_id")?;
-            let (body, owner, state): (String, Option<usize>, String) = self
+            let (body, owner, state, version): (String, Option<usize>, String, i64) = self
                 .db
-                .query_row("SELECT body,owner,state FROM tasks WHERE id=?", [id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                })
+                .query_row(
+                    "SELECT body,owner,state,updated FROM tasks WHERE id=?",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
                 .optional()?
                 .context("unknown task")?;
             let mut body: Value = serde_json::from_str(&body)?;
             body["task_id"] = json!(id);
             body["owner"] = json!(owner);
             body["state"] = json!(state);
+            body["version"] = json!(version);
             return Ok(body);
         }
         if args.get("finding_id").is_some() {
@@ -632,56 +709,211 @@ fn status(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> {
     Ok(body)
 }
 
-fn task_create(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> {
-    let body = json!({"title": string(args, "title", 256)?, "description": string(args, "description", 2048)?,
-        "interface": optional_string(args, "interface", 2048)?, "dependencies": dependencies(tx, args)?,
+fn task_body(db: &Connection, args: &Value) -> Result<Value> {
+    let kind = args
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("implementation");
+    ensure!(
+        ["implementation", "verification", "integration"].contains(&kind),
+        "invalid task kind"
+    );
+    Ok(
+        json!({"title": string(args, "title", 256)?, "description": string(args, "description", 2048)?,
+        "kind": kind, "interface": optional_string(args, "interface", 2048)?, "dependencies": dependencies(db, args)?,
         "earliest_contribution": optional_string(args, "earliest_contribution", 1024)?,
-        "done_when": optional_string(args, "done_when", 1024)?});
+        "done_when": optional_string(args, "done_when", 1024)?}),
+    )
+}
+
+fn task_create(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> {
+    let body = task_body(tx, args)?;
     let id = event(tx, worker, "task_create", &body)?;
     tx.execute(
         "INSERT INTO tasks VALUES (?,?,NULL,'available',?,?)",
         params![id, worker, serde_json::to_string(&body)?, id],
     )?;
-    Ok(json!({"task_id": id, "state": "available"}))
+    Ok(json!({"task_id": id, "state": "available", "version": id}))
 }
 
 fn task_claim(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> {
     let id = positive_id(args, "task_id")?;
-    let task: Option<(Option<usize>, String)> = tx
-        .query_row("SELECT owner,state FROM tasks WHERE id=?", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-        .optional()?;
-    let (owner, state) = task.context("unknown task")?;
+    let (owner, state, version, body): (Option<usize>, String, i64, String) = tx
+        .query_row(
+            "SELECT owner,state,updated,body FROM tasks WHERE id=?",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?
+        .context("unknown task")?;
     ensure!(
         state == "available" || (state == "claimed" && owner == Some(worker)),
         "task is already owned by another worker or finished"
     );
-    let result = json!({"task_id": id, "owner": worker, "state": "claimed"});
+    if state == "claimed" {
+        return Ok(json!({"task_id":id,"owner":worker,"state":"claimed","version":version}));
+    }
+    let body: Value = serde_json::from_str(&body)?;
+    if body["kind"] == "integration" {
+        let integration: Option<i64> = tx.query_row(
+            "SELECT id FROM tasks WHERE state='claimed' AND json_extract(body,'$.kind')='integration' LIMIT 1",
+            [], |r| r.get(0)).optional()?;
+        ensure!(
+            integration.is_none(),
+            "integration is already claimed as task {}; contribute other useful work",
+            integration.unwrap_or_default()
+        );
+    }
+    let mut result = json!({"task_id": id, "owner": worker, "state": "claimed"});
     let seq = event(tx, worker, "task_claim", &result)?;
-    tx.execute("UPDATE tasks SET owner=?,state='claimed',updated=? WHERE id=? AND (owner IS NULL OR owner=?)",
-        params![worker, seq, id, worker])?;
+    tx.execute(
+        "UPDATE tasks SET owner=?,state='claimed',updated=? WHERE id=?",
+        params![worker, seq, id],
+    )?;
+    result["version"] = json!(seq);
     Ok(result)
 }
 
-fn task_finish(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> {
+/// Version fencing prevents a delayed request from mutating a released/reclaimed task,
+/// including when the same worker claims it again later.
+fn owned_task(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<(i64, Value)> {
     let id = positive_id(args, "task_id")?;
-    let (owner, state): (Option<usize>, String) = tx
-        .query_row("SELECT owner,state FROM tasks WHERE id=?", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+    let expected = positive_id(args, "expected_version")?;
+    let (owner, state, version, body): (Option<usize>, String, i64, String) = tx
+        .query_row(
+            "SELECT owner,state,updated,body FROM tasks WHERE id=?",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
         .optional()?
         .context("unknown task")?;
     ensure!(
         owner == Some(worker) && state == "claimed",
-        "only the owner may finish a claimed task"
+        "only the current owner may change a claimed task"
     );
-    let result = json!({"task_id": id, "state": "done", "summary": string(args, "summary", 2048)?, "whole_task_complete": false});
+    ensure!(
+        version == expected,
+        "stale task version; read the current board before changing this task"
+    );
+    Ok((id, serde_json::from_str(&body)?))
+}
+
+fn task_update(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> {
+    let (id, mut body) = owned_task(tx, worker, args)?;
+    let mut changed = false;
+    for (field, max) in [
+        ("title", 256),
+        ("description", 2048),
+        ("interface", 2048),
+        ("earliest_contribution", 1024),
+        ("done_when", 1024),
+    ] {
+        if args.get(field).is_some() {
+            body[field] = json!(if ["title", "description"].contains(&field) {
+                string(args, field, max)?.to_owned()
+            } else {
+                optional_string(args, field, max)?
+            });
+            changed = true;
+        }
+    }
+    if args.get("dependencies").is_some() {
+        body["dependencies"] = json!(dependencies(tx, args)?);
+        changed = true;
+    }
+    ensure!(changed, "task update must change at least one task field");
+    let seq = event(
+        tx,
+        worker,
+        "task_update",
+        &json!({"task_id":id,"task":body}),
+    )?;
+    tx.execute(
+        "UPDATE tasks SET body=?,updated=? WHERE id=?",
+        params![serde_json::to_string(&body)?, seq, id],
+    )?;
+    Ok(json!({"task_id":id,"owner":worker,"state":"claimed","version":seq}))
+}
+
+fn task_release(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> {
+    let (id, mut body) = owned_task(tx, worker, args)?;
+    body["handoff"] = json!(string(args, "summary", 2048)?);
+    if let Some(value) = args.get("publication_id") {
+        let publication = positive_id(&json!({"publication_id":value}), "publication_id")?;
+        let author: usize = tx
+            .query_row(
+                "SELECT worker FROM publications WHERE id=?",
+                [publication],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("unknown checkpoint publication")?;
+        ensure!(
+            author == worker,
+            "release checkpoint must be published by the releasing worker"
+        );
+        body["checkpoint"] = json!(publication);
+    }
+    let seq = event(
+        tx,
+        worker,
+        "task_release",
+        &json!({"task_id":id,"handoff":body["handoff"],"checkpoint":body["checkpoint"]}),
+    )?;
+    tx.execute(
+        "UPDATE tasks SET owner=NULL,state='available',body=?,updated=? WHERE id=?",
+        params![serde_json::to_string(&body)?, seq, id],
+    )?;
+    Ok(json!({"task_id":id,"state":"available","version":seq}))
+}
+
+fn task_split(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> {
+    let (id, mut body) = owned_task(tx, worker, args)?;
+    let children = args
+        .get("tasks")
+        .and_then(Value::as_array)
+        .context("tasks must be an array")?;
+    ensure!(
+        (1..=16).contains(&children.len()),
+        "split must expose one to sixteen independent remaining tasks"
+    );
+    let remaining = args
+        .get("remaining")
+        .context("remaining describes the work you still own")?;
+    let remaining_body = task_body(tx, remaining)?;
+    ensure!(
+        remaining_body["kind"] == body["kind"],
+        "split cannot change the current task kind"
+    );
+    body = remaining_body;
+    let mut created = Vec::new();
+    for child in children {
+        ensure!(child.is_object(), "each split task must be an object");
+        let task = task_create(tx, worker, child)?;
+        created.push(task);
+    }
+    let seq = event(
+        tx,
+        worker,
+        "task_split",
+        &json!({"task_id":id,"task":body,"created":created}),
+    )?;
+    tx.execute(
+        "UPDATE tasks SET body=?,updated=? WHERE id=?",
+        params![serde_json::to_string(&body)?, seq, id],
+    )?;
+    Ok(json!({"task_id":id,"owner":worker,"state":"claimed","version":seq,"created":created}))
+}
+
+fn task_finish(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> {
+    let (id, _) = owned_task(tx, worker, args)?;
+    let mut result = json!({"task_id": id, "state": "done", "summary": string(args, "summary", 2048)?, "whole_task_complete": false});
     let seq = event(tx, worker, "task_finish", &result)?;
     tx.execute(
         "UPDATE tasks SET state='done',updated=? WHERE id=?",
         params![seq, id],
     )?;
+    result["version"] = json!(seq);
     Ok(result)
 }
 
@@ -753,7 +985,7 @@ fn complete(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> 
             );
         }
     }
-    let body = json!({"outcome": outcome, "summary": string(args, "summary", 4096)?, "checks": checks(args)?, "dependency": dependency,
+    let body = json!({"outcome": outcome, "summary": string(args, "summary", 4096)?, "checks": checks(args)?, "shared_checks": args.get("shared_checks").cloned().unwrap_or_else(||json!([])), "dependency": dependency,
         "declaration_only": true,"expected_revision":revision});
     let seq = event(tx, worker, "declaration", &body)?;
     let state = match outcome {
@@ -809,10 +1041,10 @@ fn view(db: &Connection) -> Result<Value> {
     let sequence: i64 =
         db.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))?;
     let mut tasks_query = db.prepare(
-        "SELECT id,author,owner,state,body FROM tasks ORDER BY (state='done'),updated DESC LIMIT ?",
+        "SELECT id,author,owner,state,body,updated FROM tasks ORDER BY (state='done'),updated DESC LIMIT ?",
     )?;
-    let tasks = tasks_query.query_map([VIEW_LIMIT], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, usize>(1)?,r.get::<_, Option<usize>>(2)?,r.get::<_, String>(3)?,r.get::<_, String>(4)?)))?
-        .map(|row| -> Result<Value> { let (id,author,owner,state,body) = row?; let body: Value=serde_json::from_str(&body)?; Ok(json!({"task_id":id,"author":author,"owner":owner,"state":state,"title":body["title"],"description":compact(&body["description"],256),"interface":compact(&body["interface"],256),"dependencies":body["dependencies"]})) }).collect::<Result<Vec<_>>>()?;
+    let tasks = tasks_query.query_map([VIEW_LIMIT], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, usize>(1)?,r.get::<_, Option<usize>>(2)?,r.get::<_, String>(3)?,r.get::<_, String>(4)?,r.get::<_, i64>(5)?)))?
+        .map(|row| -> Result<Value> { let (id,author,owner,state,body,version) = row?; let body: Value=serde_json::from_str(&body)?; Ok(json!({"task_id":id,"author":author,"owner":owner,"state":state,"version":version,"kind":body.get("kind").and_then(Value::as_str).unwrap_or("implementation"),"handoff":body["handoff"],"checkpoint":body["checkpoint"],"title":body["title"],"description":compact(&body["description"],256),"interface":compact(&body["interface"],256),"dependencies":body["dependencies"]})) }).collect::<Result<Vec<_>>>()?;
     let mut workers_query =
         db.prepare("SELECT worker,state,summary,dependency,updated FROM workers ORDER BY worker")?;
     let workers=workers_query.query_map([], |r| Ok(json!({"worker":r.get::<_,usize>(0)?,"state":r.get::<_,String>(1)?,"summary":r.get::<_,String>(2)?,"dependency":r.get::<_,Option<String>>(3)?,"sequence":r.get::<_,i64>(4)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
@@ -837,8 +1069,14 @@ fn view(db: &Connection) -> Result<Value> {
             Ok(json!({"sequence":seq,"worker":worker,"text":compact(&body["text"],1024)}))
         })
         .collect::<Result<Vec<_>>>()?;
+    let mut checks_query =
+        db.prepare("SELECT id,worker,revision,body FROM check_receipts ORDER BY id DESC LIMIT ?")?;
+    let check_receipts = checks_query.query_map([VIEW_LIMIT], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,usize>(1)?,r.get::<_,u64>(2)?,r.get::<_,String>(3)?)))?
+        .map(|row| -> Result<Value> { let(id,worker,revision,body)=row?; let body:Value=serde_json::from_str(&body)?;
+            Ok(json!({"receipt_id":id,"worker":worker,"request_revision":revision,"summary":body["summary"],"passed":body["passed"],"inputs_unchanged":body["inputs_unchanged"],"reusable":body["reusable"],"command":body["native"]["command"]})) })
+        .collect::<Result<Vec<_>>>()?;
     Ok(
-        json!({"sequence":sequence,"request_revision":revision,"workers":workers,"tasks":tasks,"publications":publications,"findings":findings,"view_limit":VIEW_LIMIT}),
+        json!({"sequence":sequence,"request_revision":revision,"workers":workers,"tasks":tasks,"publications":publications,"findings":findings,"check_receipts":check_receipts,"view_limit":VIEW_LIMIT}),
     )
 }
 
@@ -976,21 +1214,58 @@ pub fn tool_definitions() -> Vec<Value> {
     );
     define(
         "delm_task_create",
-        "Publish a brief complementary implementation contribution. Both workers remain responsible for the whole request.",
-        json!({"idempotency_key":text,"title":text,"description":text,"interface":text,"dependencies":ids,"earliest_contribution":text,"done_when":text}),
+        "Expose a useful independent contribution. Use integration for temporary ownership of assembling the one shared result, or verification for a scoped check; only one integration task can be claimed at a time.",
+        json!({"idempotency_key":text,"title":text,"description":text,"kind":{"enum":["implementation","verification","integration"]},"interface":text,"dependencies":ids,"earliest_contribution":text,"done_when":text}),
         &["idempotency_key", "title", "description"],
     );
     define(
         "delm_task_claim",
-        "Exclusively claim an available implementation contribution as the authenticated worker.",
+        "Atomically claim ready work. The returned version fences updates, release, split and finish against stale ownership.",
         json!({"idempotency_key":text,"task_id":{"type":"integer","minimum":1}}),
         &["idempotency_key", "task_id"],
     );
     define(
         "delm_task_finish",
-        "Finish your claimed contribution. This does not finish the whole request; continue useful integration or implementation.",
-        json!({"idempotency_key":text,"task_id":{"type":"integer","minimum":1},"summary":text}),
-        &["idempotency_key", "task_id", "summary"],
+        "Finish your claimed contribution using its current version. Take useful remaining work; only the current integrator assembles the shared result.",
+        json!({"idempotency_key":text,"task_id":{"type":"integer","minimum":1},"expected_version":{"type":"integer","minimum":1},"summary":text}),
+        &["idempotency_key", "task_id", "expected_version", "summary"],
+    );
+    define(
+        "delm_task_update",
+        "Update the boundary, interface or remaining work of your claimed task. Use its current board version.",
+        json!({"idempotency_key":text,"task_id":{"type":"integer","minimum":1},"expected_version":{"type":"integer","minimum":1},"title":text,"description":text,"interface":text,"dependencies":ids,"earliest_contribution":text,"done_when":text}),
+        &["idempotency_key", "task_id", "expected_version"],
+    );
+    define(
+        "delm_task_release",
+        "Release your claim with a concise handoff. Publish partially implemented files first and name their publication_id; the peer may then claim and continue.",
+        json!({"idempotency_key":text,"task_id":{"type":"integer","minimum":1},"expected_version":{"type":"integer","minimum":1},"summary":text,"publication_id":{"type":"integer","minimum":1}}),
+        &["idempotency_key", "task_id", "expected_version", "summary"],
+    );
+    let task_schema = json!({"type":"object","properties":{"title":text,"description":text,"kind":{"enum":["implementation","verification","integration"]},"interface":text,"dependencies":ids,"earliest_contribution":text,"done_when":text},"required":["title","description"],"additionalProperties":false});
+    define(
+        "delm_task_split",
+        "Keep a smaller remaining portion and atomically expose independent work to your peer. remaining and tasks use the task-create fields; remaining keeps the current task kind.",
+        json!({"idempotency_key":text,"task_id":{"type":"integer","minimum":1},"expected_version":{"type":"integer","minimum":1},"remaining":task_schema,"tasks":{"type":"array","minItems":1,"maxItems":16,"items":task_schema}}),
+        &[
+            "idempotency_key",
+            "task_id",
+            "expected_version",
+            "remaining",
+            "tasks",
+        ],
+    );
+    define(
+        "delm_check_begin",
+        "Capture scoped input file versions BEFORE running a native check you intend to share. Include source, test, configuration and lockfiles relevant to that command. Explicit files only; no directories. This scope does not attest external state or undeclared inputs.",
+        json!({"idempotency_key":text,"summary":text,"paths":strings}),
+        &["idempotency_key", "summary", "paths"],
+    );
+    define(
+        "delm_check_finish",
+        "Bind a begun snapshot to your observed completed native command. Returns a reusable receipt only when the command passed and scoped inputs stayed unchanged. Failed checks remain visible.",
+        json!({"idempotency_key":text,"snapshot_id":{"type":"integer","minimum":1},"command_id":text}),
+        &["idempotency_key", "snapshot_id", "command_id"],
     );
     define(
         "delm_publish",
@@ -1000,8 +1275,8 @@ pub fn tool_definitions() -> Vec<Value> {
     );
     define(
         "delm_expand",
-        "Inspect exactly one publication_id, task_id, or finding_id. Select publication paths and use offset/max_bytes for large text. Binary assets are imported losslessly with delm_apply.",
-        json!({"publication_id":{"type":"integer","minimum":1},"task_id":{"type":"integer","minimum":1},"finding_id":{"type":"integer","minimum":1},"paths":strings,"offset":{"type":"integer","minimum":0},"max_bytes":{"type":"integer","minimum":1,"maximum":32768}}),
+        "Inspect exactly one publication_id, task_id, finding_id, or check_id. Select publication paths and use offset/max_bytes for large text. Binary assets are imported losslessly with delm_apply.",
+        json!({"publication_id":{"type":"integer","minimum":1},"task_id":{"type":"integer","minimum":1},"finding_id":{"type":"integer","minimum":1},"check_id":{"type":"integer","minimum":1},"paths":strings,"offset":{"type":"integer","minimum":0},"max_bytes":{"type":"integer","minimum":1,"maximum":32768}}),
         &[],
     );
     define(
@@ -1012,8 +1287,8 @@ pub fn tool_definitions() -> Vec<Value> {
     );
     define(
         "delm_complete",
-        "Declare the whole request outcome with current board request_revision as expected_revision and native command IDs for performed checks, then end your turn. Complete means the full result is ready. Waiting requires dependency task:<id> or worker:<other worker>; it cannot name your own work.",
-        json!({"idempotency_key":text,"expected_revision":{"type":"integer","minimum":1},"outcome":{"enum":["complete","partial","blocked","waiting"]},"summary":text,"checks":{"type":"array","items":{}},"dependency":{"type":"string","description":"For waiting, task:<positive task ID> or worker:<1|2>; use the other worker, not yourself."}}),
+        "Declare the one assembled result outcome with current board request_revision as expected_revision. checks are your native command IDs; shared_checks are validated receipt IDs from either peer whose scoped inputs still match. Then end your turn. Complete means the full result is ready. Waiting requires dependency task:<id> or worker:<other worker>; it cannot name your own work.",
+        json!({"idempotency_key":text,"expected_revision":{"type":"integer","minimum":1},"outcome":{"enum":["complete","partial","blocked","waiting"]},"summary":text,"checks":{"type":"array","items":{}},"shared_checks":ids,"dependency":{"type":"string","description":"For waiting, task:<positive task ID> or worker:<1|2>; use the other worker, not yourself."}}),
         &["idempotency_key", "expected_revision", "outcome", "summary"],
     );
     definitions

@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -29,6 +29,18 @@ const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Subcommand)]
 pub enum Command {
+    #[command(hide = true)]
+    CapturedRun {
+        #[arg(long)]
+        capture: PathBuf,
+        #[arg(long)]
+        project: PathBuf,
+    },
+    /// Follow an invocation's event stream without repeated status commands.
+    Follow {
+        #[arg(long)]
+        capture: PathBuf,
+    },
     /// Run two workers in private copies of one Git repository.
     Run {
         #[arg(long, hide = true)]
@@ -78,6 +90,15 @@ pub enum Command {
         #[arg(long)]
         answers_file: PathBuf,
     },
+    /// Relay the user's response to one pending native Codex request.
+    Respond {
+        #[arg(long)]
+        run_id: String,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        response_file: PathBuf,
+    },
     /// Stop this run and preserve its private projects.
     Stop {
         #[arg(long)]
@@ -90,6 +111,11 @@ pub enum Command {
     },
     #[command(hide = true)]
     LifecycleHook,
+    #[command(hide = true)]
+    WorkerMcp {
+        #[arg(long)]
+        socket: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -110,6 +136,8 @@ pub struct Snapshot {
     pub control_executable: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub questions: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub approvals: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
 }
@@ -162,14 +190,18 @@ impl Monitor {
         let accepting = event.kind == "ready"
             && event.request_revision == Some(self.expected_revision)
             && self.pending_answers.is_empty()
+            && self.snapshot.questions.is_empty()
+            && self.snapshot.approvals.is_empty()
             && self.snapshot.status != "stopping"
             && !terminal(&self.snapshot.status);
         self.snapshot.status = match event.kind.as_str() {
             "result" => "complete",
+            "delivered" => "delivered",
             "error" => "error",
             "stopped" => "stopped",
             "awaiting_control" if self.admission.is_some() => "awaiting_control",
             "ready" if accepting => "finishing",
+            "question" | "approval" if self.snapshot.status == "finishing" => "running",
             "started" if self.snapshot.status != "stopping" && !terminal(&self.snapshot.status) => {
                 "running"
             }
@@ -196,11 +228,22 @@ impl Monitor {
         {
             self.snapshot.questions.remove(id);
         }
+        if event.kind == "approval"
+            && let (Some(id), Some(details)) = (&event.id, &event.details)
+        {
+            self.snapshot.approvals.insert(id.clone(), details.clone());
+        }
+        if event.kind == "approval_resolved"
+            && let Some(id) = &event.id
+        {
+            self.snapshot.approvals.remove(id);
+        }
         if terminal(&self.snapshot.status) {
             self.snapshot.questions.clear();
+            self.snapshot.approvals.clear();
             self.pending_answers.clear();
         }
-        if event.kind == "result" {
+        if matches!(event.kind.as_str(), "result" | "delivered" | "stopped") {
             self.snapshot.result.clone_from(&event.details);
         }
         if !event.partial_paths.is_empty() {
@@ -216,6 +259,10 @@ impl Monitor {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Control {
+    Respond {
+        id: String,
+        response: Value,
+    },
     Lifecycle {
         signal: crate::lifecycle::Signal,
     },
@@ -248,7 +295,72 @@ struct AuthenticatedControl {
 
 pub async fn execute(command: Command) -> Result<()> {
     match command {
+        Command::Respond {
+            run_id,
+            request_id,
+            response_file,
+        } => {
+            let response: Value = serde_json::from_str(&read_text(&response_file)?)?;
+            let snapshot = control(
+                &run_id,
+                Control::Respond {
+                    id: request_id,
+                    response,
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string(&snapshot)?);
+            Ok(())
+        }
+        Command::CapturedRun { capture, project } => {
+            crate::lifecycle::ensure_not_worker()?;
+            let captured = crate::lifecycle::read_capture(&capture)?;
+            ensure!(
+                captured.project == project.canonicalize()?,
+                "Captured project changed"
+            );
+            let result = async {
+                let binding = crate::lifecycle::consume_capture(&captured)?;
+                print_event(&Event::new(
+                    "status",
+                    "Starting DeLM with your Codex setup.",
+                ))?;
+                let mut request = crate::workers::stock_request_with_parent_turn(
+                    project,
+                    captured.task.clone(),
+                    String::new(),
+                    None,
+                    None,
+                    crate::config::DEFAULT_RUN_SECONDS,
+                    Some(captured.turn_id.clone()),
+                )
+                .await?;
+                if captured.captured_at_ms > 0 {
+                    request.auth_settings["invocation_received_at_ms"] =
+                        json!(captured.captured_at_ms);
+                }
+                crate::workers::verify_lifecycle_hooks(&request, &binding).await?;
+                request
+                    .auth_settings
+                    .as_object_mut()
+                    .context("Missing native settings")?
+                    .remove("startup_hook_listing");
+                record_own_skill(&mut request, &binding)?;
+                print_configuration(&request)?;
+                run(request, Some(binding)).await
+            }
+            .await;
+            if let Err(error) = &result {
+                print_event(&Event::new(
+                    "error",
+                    format!("DeLM could not complete: {error:#}"),
+                ))?;
+            }
+            result
+        }
+        Command::Follow { capture } => follow_capture(&capture).await,
         Command::LifecycleHook => native_hook().await,
+        Command::WorkerMcp { socket } => crate::worker_tools::serve_stdio(&socket).await,
         Command::Watchdog { spec } => crate::supervisor::watchdog(&spec),
         Command::Run {
             launch_token,
@@ -260,6 +372,7 @@ pub async fn execute(command: Command) -> Result<()> {
             effort,
             seconds,
         } => {
+            crate::lifecycle::ensure_not_worker()?;
             let binding = launch_token.as_deref().map(crate::lifecycle::consume_launch).transpose().context("Native launch was not confirmed. Trust DeLM in /hooks and restart Codex before invoking the skill again")?;
             ensure!(
                 binding.is_some() || std::env::var_os("CODEX_THREAD_ID").is_none(),
@@ -281,9 +394,16 @@ pub async fn execute(command: Command) -> Result<()> {
                 "status",
                 "Checking your Codex account, configuration, and private workspace permissions.",
             ))?;
-            let mut request =
-                crate::workers::stock_request(project, task, context, model, effort, seconds)
-                    .await?;
+            let mut request = crate::workers::stock_request_with_parent_turn(
+                project,
+                task,
+                context,
+                model,
+                effort,
+                seconds,
+                binding.as_ref().map(|b| b.turn_id.clone()),
+            )
+            .await?;
             request.attachments = read_inputs(inputs_file.as_deref())?;
             if let Some(binding) = &binding {
                 print_event(&Event::new(
@@ -291,15 +411,14 @@ pub async fn execute(command: Command) -> Result<()> {
                     "Checking native DeLM lifecycle hooks.",
                 ))?;
                 crate::workers::verify_lifecycle_hooks(&request, binding).await?;
+                request
+                    .auth_settings
+                    .as_object_mut()
+                    .context("Missing native settings")?
+                    .remove("startup_hook_listing");
+                record_own_skill(&mut request, binding)?;
             }
-            println!(
-                "{}",
-                json!({"type":"settings", "model":request.model,
-                "reasoning_effort":request.reasoning_effort,
-                "model_selection_source":request.auth_settings["model_selection_source"],
-                "control_executable":std::env::current_exe()?,
-                "message":"DeLM will use your installed Codex and native account. Both workers have network access and private development environments."})
-            );
+            print_configuration(&request)?;
             run(request, binding).await
         }
         Command::Status {
@@ -385,6 +504,9 @@ async fn native_hook() -> Result<()> {
     );
     let input = serde_json::from_slice(&bytes).context("Invalid native hook input")?;
     let action = crate::lifecycle::prepare_hook(input, &std::env::current_exe()?)?;
+    if let Some(capture) = &action.launch {
+        spawn_capture(&std::env::current_exe()?, capture)?;
+    }
     if let Some(delivery) = action.delivery {
         // Native Interrupt has a short deadline. The control request merely
         // queues cancellation; the retained runtime owns bounded shutdown.
@@ -403,6 +525,203 @@ async fn native_hook() -> Result<()> {
         println!("{}", serde_json::to_string(&output)?);
     }
     Ok(())
+}
+
+fn record_own_skill(
+    request: &mut crate::protocol::StartRequest,
+    binding: &crate::lifecycle::Binding,
+) -> Result<()> {
+    // Only the validated plugin's exact skill input is already consumed. Never
+    // filter a generic skill called `run` or rewrite text with byte offsets.
+    if let Some(plugin) = binding.executable.parent().and_then(Path::parent) {
+        let skill = plugin.join("skills/run/SKILL.md");
+        if skill.try_exists()? {
+            request.auth_settings["delm_skill_path"] = json!(skill.canonicalize()?);
+        }
+    }
+    Ok(())
+}
+
+fn print_configuration(request: &crate::protocol::StartRequest) -> Result<()> {
+    let report = &request.auth_settings["capability_report"];
+    let message = if request.auth_settings["parent_thread_id"].is_string() {
+        "Loading your saved Codex setup. Codex does not export all active-session overrides or live tool connections; exact session parity is not established."
+    } else {
+        "Using your installed Codex, saved project configuration, native permissions, and account."
+    };
+    println!(
+        "{}",
+        json!({"type":"settings", "model":request.model,
+        "reasoning_effort":request.reasoning_effort,
+        "model_selection_source":request.auth_settings["model_selection_source"],
+        "control_executable":std::env::current_exe()?,
+        "capability_report":{"source":report["source"],
+            "exact_live_session_parity":report["exact_live_session_parity"],
+            "unverified":report["unverified"]},
+        "message":message})
+    );
+    Ok(())
+}
+
+fn spawn_capture(executable: &Path, capture: &crate::lifecycle::CapturedInvocation) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let result = (|| -> Result<()> {
+        let log = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(capture.path.with_extension("events.jsonl"))?;
+        let errors = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(capture.path.with_extension("stderr.log"))?;
+        let mut child = std::process::Command::new(executable)
+            .args(["captured-run", "--capture"])
+            .arg(&capture.path)
+            .arg("--project")
+            .arg(&capture.project)
+            .env("CODEX_THREAD_ID", &capture.session_id)
+            .current_dir(&capture.project)
+            .stdin(std::process::Stdio::null())
+            .stdout(log)
+            .stderr(errors)
+            .process_group(0)
+            .spawn()
+            .context("Could not start the captured DeLM invocation")?;
+        register_capture_child(&mut child, capture)
+    })();
+    if let Err(error) = &result {
+        // A storage failure can also prevent this marker. Keep the original
+        // launch error and let the follower's bounded Pending deadline report it.
+        let _ = crate::lifecycle::record_capture_launch(
+            capture,
+            &crate::lifecycle::CaptureLaunch::Failed {
+                message: format!("{error:#}"),
+            },
+        );
+    }
+    result
+}
+
+fn register_capture_child(
+    child: &mut std::process::Child,
+    capture: &crate::lifecycle::CapturedInvocation,
+) -> Result<()> {
+    let registered = (|| -> Result<()> {
+        let process = crate::supervisor::ProcessIdentity::capture(child.id())?;
+        crate::lifecycle::record_capture_launch(
+            capture,
+            &crate::lifecycle::CaptureLaunch::Started { process },
+        )
+    })();
+    if registered.is_err() {
+        // Until wait(), this owned Child keeps its PID from being reused.
+        // Never abandon a runtime whose launch could not be recorded.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    registered
+}
+
+fn captured_terminal(snapshot: &Snapshot) -> Option<Event> {
+    if !terminal(&snapshot.status) {
+        return None;
+    }
+    let kind = if snapshot.status == "complete" {
+        "result"
+    } else {
+        &snapshot.status
+    };
+    let mut event = Event::new(kind, snapshot.message.clone());
+    event.run_id = Some(snapshot.run_id.clone());
+    event.path = snapshot.path.clone();
+    event.partial_paths = snapshot.partial_paths.clone();
+    event.request_revision = Some(snapshot.request_revision);
+    event.details = snapshot.result.clone();
+    Some(event)
+}
+
+async fn follow_capture(path: &Path) -> Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let capture = crate::lifecycle::read_capture(path)?;
+    let started = Instant::now();
+    let mut offset = 0;
+    let mut pending = Vec::new();
+    let mut stopped_once = false;
+    loop {
+        match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path.with_extension("events.jsonl"))
+        {
+            Ok(mut file) => {
+                ensure!(
+                    file.metadata()?.is_file(),
+                    "Captured output must be a regular file"
+                );
+                file.seek(SeekFrom::Start(offset))?;
+                let mut bytes = Vec::new();
+                Read::take(&mut file, 2 * 1024 * 1024).read_to_end(&mut bytes)?;
+                offset += bytes.len() as u64;
+                pending.extend_from_slice(&bytes);
+                ensure!(
+                    pending.len() <= 4 * 1024 * 1024,
+                    "Runtime event exceeded 4 MiB"
+                );
+                while let Some(end) = pending.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = pending.drain(..=end).collect();
+                    let event: Value = serde_json::from_slice(&line)?;
+                    std::io::stdout().write_all(&line)?;
+                    std::io::stdout().flush()?;
+                    if matches!(
+                        event["type"].as_str(),
+                        Some("result" | "delivered" | "stopped" | "error")
+                    ) {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("Read captured runtime output"),
+        }
+        if let Some(id) = crate::lifecycle::capture_run_id(&capture)? {
+            let status = state::run_path(&id)?.join("runtime-status.json");
+            if let Ok(text) = fs::read_to_string(status)
+                && let Ok(snapshot) = serde_json::from_str::<Snapshot>(&text)
+                && let Some(event) = captured_terminal(&snapshot)
+            {
+                // Snapshot publication precedes stdout delivery. Emit the
+                // authoritative result instead of returning silently here.
+                print_event(&event)?;
+                return Ok(());
+            }
+        }
+        let stopped = match crate::lifecycle::capture_launch(&capture)? {
+            Some(crate::lifecycle::CaptureLaunch::Failed { message }) => {
+                bail!("DeLM could not start: {message}");
+            }
+            Some(crate::lifecycle::CaptureLaunch::Started { process }) => !process.is_running()?,
+            Some(crate::lifecycle::CaptureLaunch::Pending) | None => {
+                ensure!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "DeLM launch was not acknowledged. No terminal result is available; invoke DeLM again in a new message"
+                );
+                false
+            }
+        };
+        // Drain once more after process exit so its final flushed event wins.
+        if stopped && stopped_once {
+            bail!(
+                "DeLM runtime exited before publishing a terminal result. Review {}",
+                path.with_extension("stderr.log").display()
+            );
+        }
+        stopped_once = stopped;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn read_inputs(path: Option<&Path>) -> Result<Vec<serde_json::Value>> {
@@ -519,7 +838,7 @@ async fn control(id: &str, request: Control) -> Result<Snapshot> {
 }
 
 fn terminal(status: &str) -> bool {
-    matches!(status, "complete" | "stopped" | "error")
+    matches!(status, "complete" | "delivered" | "stopped" | "error")
 }
 
 fn ensure_update_allowed(state: &Monitor) -> Result<()> {
@@ -529,7 +848,7 @@ fn ensure_update_allowed(state: &Monitor) -> Result<()> {
     );
     ensure!(
         !matches!(state.snapshot.status.as_str(), "finishing" | "stopping"),
-        "The run is finishing or stopping; this update was not applied. Continue from the retained project once it is ready"
+        "The run is finishing or stopping; this update was not applied. Continue in your project once delivery finishes"
     );
     Ok(())
 }
@@ -599,7 +918,8 @@ fn apply_lifecycle_signal(
         return Ok(());
     }
     let stopping = !terminal(&state.snapshot.status)
-        && (signal.event != "Stop" || state.snapshot.questions.is_empty());
+        && (signal.event != "Stop"
+            || (state.snapshot.questions.is_empty() && state.snapshot.approvals.is_empty()));
     if stopping {
         cancel.send(true).ok();
         commands.try_send(HostCommand::Stop).ok();
@@ -661,12 +981,18 @@ async fn handle_control(
         ensure!(
             !matches!(state.snapshot.status.as_str(), "finishing" | "stopping")
                 || !matches!(command, Control::Update { .. } | Control::Answer { .. }),
-            "The run is finishing or stopping; this update was not applied. Continue from the retained project once it is ready"
+            "The run is finishing or stopping; this update was not applied. Continue in your project once delivery finishes"
         );
         // Subscribe under the same lock used to read the cursor. A publication
         // between releasing the lock and awaiting changed() cannot be missed.
         let mut updates = state.changed.subscribe();
         let wait = match command {
+            Control::Respond {id,response} => {
+                let pending=state.snapshot.approvals.get(&id).context("Native request is no longer pending")?;
+                crate::run::approvals::validate_response(pending["method"].as_str().context("Missing native method")?,&pending["request"],&response)?;
+                commands.try_send(HostCommand::Respond{id,response}).context("Runtime is busy; response not queued")?;
+                0
+            },
             Control::Lifecycle { signal } => {
                 apply_lifecycle_signal(&mut state, &signal, &commands, &cancel)?;
                 0
@@ -697,7 +1023,7 @@ async fn handle_control(
                 }
                 if terminal(&state.snapshot.status)
                     || after.is_some_and(|sequence| sequence < state.snapshot.update_sequence)
-                    || (after.is_none() && !state.snapshot.questions.is_empty()) {
+                    || (after.is_none() && (!state.snapshot.questions.is_empty() || !state.snapshot.approvals.is_empty())) {
                     0
                 } else {
                     wait_seconds
@@ -856,6 +1182,14 @@ async fn run(
                             saved_path = Some(path);
                             monitor.lock().await.snapshot.run_id.clone_from(id);
                             if let Some(binding) = &binding { binding.register(id)?; }
+                            // Native ownership and the control listener are established
+                            // in this operation. No model-driven status call is needed.
+                            if let Some(binding) = &binding {
+                                binding.ensure_admissible()?;
+                                if let Some(admission) = monitor.lock().await.admission.take() {
+                                    admission.send(()).ok();
+                                }
+                            }
                     }
                     let mut current = monitor.lock().await;
                     if event.kind == "ready" && !*cancel.borrow() {
@@ -1009,6 +1343,91 @@ impl Drop for NonblockingOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_snapshot_keeps_final_delivery_when_stdout_is_not_flushed() {
+        let mut snapshot = Snapshot {
+            status: "complete".into(),
+            run_id: "run".into(),
+            message: "Delivered".into(),
+            path: Some(PathBuf::from("/project")),
+            request_revision: 3,
+            result: Some(json!({"delivered":true})),
+            ..Default::default()
+        };
+        let event = captured_terminal(&snapshot).unwrap();
+        assert_eq!(event.kind, "result");
+        assert_eq!(event.path, snapshot.path);
+        assert_eq!(event.details, snapshot.result);
+        assert_eq!(event.request_revision, Some(3));
+        snapshot.status = "running".into();
+        assert!(captured_terminal(&snapshot).is_none());
+    }
+
+    #[tokio::test]
+    async fn captured_spawn_failure_is_durable_and_follow_does_not_hang() {
+        let fixture = crate::lifecycle::tests::CaptureFixture::new();
+        let capture = fixture.submit().launch.unwrap();
+        let error =
+            spawn_capture(&fixture.project.join("missing-executable"), &capture).unwrap_err();
+        assert!(error.to_string().contains("Could not start"));
+        assert!(matches!(
+            crate::lifecycle::capture_launch(&capture).unwrap(),
+            Some(crate::lifecycle::CaptureLaunch::Failed { .. })
+        ));
+        let followed = tokio::time::timeout(Duration::from_secs(2), follow_capture(&capture.path))
+            .await
+            .unwrap();
+        assert!(
+            followed
+                .unwrap_err()
+                .to_string()
+                .contains("DeLM could not start")
+        );
+    }
+
+    #[test]
+    fn failed_launch_bookkeeping_stops_and_reaps_its_owned_child() {
+        let fixture = crate::lifecycle::tests::CaptureFixture::new();
+        let capture = fixture.submit().launch.unwrap();
+        let marker = capture.path.with_extension("launch.json");
+        fs::remove_file(&marker).unwrap();
+        fs::create_dir(&marker).unwrap();
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        assert!(register_capture_child(&mut child, &capture).is_err());
+        assert!(child.try_wait().unwrap().is_some());
+        fs::remove_dir(marker).unwrap();
+    }
+
+    #[tokio::test]
+    async fn captured_dead_runtime_is_reported_without_a_terminal_event() {
+        let fixture = crate::lifecycle::tests::CaptureFixture::new();
+        let capture = fixture.submit().launch.unwrap();
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        let process = crate::supervisor::ProcessIdentity::capture(child.id()).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        crate::lifecycle::record_capture_launch(
+            &capture,
+            &crate::lifecycle::CaptureLaunch::Started { process },
+        )
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), follow_capture(&capture.path))
+            .await
+            .unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exited before publishing")
+        );
+    }
 
     fn running_monitor() -> Monitor {
         Monitor {
@@ -1281,6 +1700,35 @@ mod tests {
         ));
         assert!(input.try_recv().is_err());
         assert!(!*cancelled.borrow()); // Admission is blocked before the monitor handles cancellation.
+    }
+
+    #[test]
+    fn ready_waits_for_open_questions_and_reopens_control_for_late_requests() {
+        let mut monitor = running_monitor();
+        let mut ready = Event::new("ready", "Ready");
+        ready.request_revision = Some(1);
+        let mut question = Event::new("question", "Input needed");
+        question.id = Some("question".into());
+        question.details = Some(json!({"questions":[]}));
+        monitor.apply_event(&question);
+        assert!(monitor.apply_event(&ready).is_none());
+        assert_eq!(monitor.snapshot.status, "running");
+        let mut resolved = Event::new("question_resolved", "Answered");
+        resolved.id = question.id.clone();
+        monitor.apply_event(&resolved);
+        assert!(monitor.apply_event(&ready).is_some());
+        assert_eq!(monitor.snapshot.status, "finishing");
+        monitor.apply_event(&question);
+        assert_eq!(monitor.snapshot.status, "running");
+        assert!(monitor.apply_event(&ready).is_none());
+        monitor.apply_event(&resolved);
+        assert!(monitor.apply_event(&ready).is_some());
+        let mut approval = Event::new("approval", "Permission needed");
+        approval.id = Some("approval".into());
+        approval.details = Some(json!({"method":"item/fileChange/requestApproval"}));
+        monitor.apply_event(&approval);
+        assert_eq!(monitor.snapshot.status, "running");
+        assert!(monitor.apply_event(&ready).is_none());
     }
 
     #[test]

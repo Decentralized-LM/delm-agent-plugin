@@ -1,47 +1,63 @@
 # Architecture
 
-DeLM is an explicit-only skill and a local Rust runtime. Stock Codex loads the skill when the user invokes `$delm:run`. The parent supplies the task and relevant context, starts the runtime through its normal execution tool, and reports progress. It does not assign the workers' tasks.
+DeLM adds parallel execution to an explicitly requested Codex task. Two peers contribute to one result through a shared task queue, publications, and recorded checks.
 
 ```mermaid
 flowchart LR
-  User["$delm:run task"] --> Skill[Codex skill]
-  Skill --> Runtime[DeLM runtime]
-  Original[Original repository] -->|Read and COW snapshot| Runtime
-  Runtime --> W1[Worker 1 private project]
-  Runtime --> W2[Worker 2 private project]
-  W1 <--> Board[Shared tasks and publications]
+  User["$delm:run task"] --> Hook[Native invocation capture]
+  Hook --> Runtime[DeLM runtime]
+  Original[Current project] -->|Saved COW snapshot| Runtime
+  Runtime --> W1[Worker 1 native fork]
+  Runtime --> W2[Worker 2 native fork]
+  W1 <--> Board[Tasks, contributions, check receipts]
   W2 <--> Board
-  W1 --> Result[First complete result]
-  W2 --> Result
-  Result --> Review[Retained project and review]
+  Board --> Result[One assembled result]
+  Result --> Delivery[Guarded delivery to current project]
+  Delivery --> Cleanup[Remove both temporary workspaces]
 ```
 
-## Workspace and authority
+## Invocation and native inheritance
 
-The runtime measures the complete original folder before snapshotting it. Native copy-on-write cloning has no copying fallback. Explicitly selected inputs are captured in a runtime-private staging directory, verified, and atomically published read-only to both workers. Ordinary task text is passed verbatim; earlier context remains separate. Workers start from one captured baseline with private Git administration and admitted staged and unstaged state. Their filesystem permissions explicitly deny the original.
+The trusted UserPromptSubmit hook recognizes an explicit invocation, captures its exact text and native identity, and starts the runtime. Duplicate delivery reconnects to the same capture. The parent follows an event stream rather than regenerating the request or issuing a separate startup-admission command. Native-bound launches establish their control ownership during startup; the separate unbound CLI retains its explicit control admission.
 
-A stock Codex app-server hosts two native threads, each with its own project, environment, and temporary directory. Native account storage stays in place. Configuration reads verify that unrelated extensions, hooks, external services, delegation, and inherited shell variables were disabled. Each thread's returned model, environment, and permission profile must match the request before a model turn starts.
+The runtime forks the parent thread through Codex's native app-server interface. It supplies a private working directory and DeLM coordination instructions while retaining ordinary saved configuration, native permission settings, authentication, and process environment. Project-relative configuration is rebound to the copied project. DeLM's worker marker prevents recursive DeLM hooks without disabling other hooks or plugins.
 
-Both workers have live web search, image inspection, network access, and private package caches, installation paths, and configuration. Installed toolchains are read-only. Direct filesystem access to the original project, peer files, and control storage remains denied. Networking supports dependency downloads and local servers; it does not enforce peer separation over the network. Workers must use the board for peer exchange.
+The source and worker skill inventories include content hashes. MCP inventories and returned native settings are compared during admission. A missing or changed capability produces an error instead of silently reducing the worker's tools.
 
-Dynamic board tools bind the caller to its native thread. Model arguments cannot select another worker identity or destination root. SQLite transactions protect task claims, events, and retries. Publications freeze selected files; imports transfer complete files only when the receiving version matches the baseline or a known publication. Diverged edits require reconciliation. Board filesystem checks enforce containment independently of the model's native sandbox.
+Exact live-session parity is not met: a native fixture demonstrates a parent-process CLI override missing from a separate fork host. The current host also does not export every active tool connection or live instruction-provider state. The capability report records `exact_live_session_parity: false` and names those gaps. Native fork support and saved-configuration matching must not be advertised as a guarantee that every live integration has been cloned.
 
-## Completion and control
+## Workspaces and coordination
 
-The public CLI waits for its first authenticated `status --keep-alive` request before starting task workers. This proves that the parent can reach the control channel, including its private storage and socket. Preparation and permission delays consume no task model turns or execution allowance. Startup has a five-minute confirmation limit. Native-bound runs need no further heartbeat; the direct, unbound CLI retains an explicit monitoring lease. The internal fixture protocol already has a bidirectional control channel and does not need this handshake.
+Saved project files, including admitted staged, unstaged, and untracked changes, form a copy-on-write baseline. Each worker receives an independent tree and private Git administration. Ignored inputs and recognized credentials are recorded as exclusions. Existing account storage stays outside project copies.
 
-User updates increment a request revision and reach both existing sessions. A completion declaration must cover the whole task, reference the current revision, and be followed by normal native turn completion. Recorded command outcomes supply check evidence. A command is bound to the request revision observed when its start event arrived, so steering cannot relabel an older check. Arrival sequence boundaries also cover native events that were queued before the update but processed afterward. Native worker questions preserve their choices and request identities. Explicit answers resolve only the identified question and reach both peers as a new request revision. No separate reviewing model gates a ready result.
+Private working directories separate edits; they do not replace the user's native permission policy. Board transfers enforce their own contained-path and permission checks. This is trusted local development, not a hostile-code or network-isolation boundary.
 
-The skill reads progress and sends updates through a private control socket; completed status remains readable from durable storage. Native lifecycle events, explicit Stop, owner exit, and the overall deadline cancel work. A slow parent response does not cancel a native-bound run. A separate watchdog observes process identities and enforces termination if the runtime disappears.
+Both workers claim useful implementation work and expose follow-on tasks. Claims have ownership generations; updates, releases, and splits cannot let stale owners finish reassigned work. Either worker can temporarily own integration. The team owes one complete result, without a permanent manager or a requirement that both independently finish the whole task.
 
-Before retaining a winner, DeLM interrupts native turns, closes background terminals and threads, and stops the app-server and observed descendants. It then verifies that the candidate has not changed and captures a review. Result manifests retain every project entry, including generated outputs and dependencies. A narrow result-only policy permits qualified Python virtual-environment interpreter links and records their targets; source admission and board file containment stay strict. Cleanup occurs only after confirmed shutdown. Uncertain ownership preserves both projects. This is conservative process supervision for trusted development, not a container boundary against arbitrary daemonization.
+Per-worker MCP endpoints authenticate coordination requests to their bound worker identity. SQLite transactions protect queue mutations and retries. Publications freeze selected files. Imports reject incompatible local edits rather than overwriting them.
 
-## Installation and compatibility
+## Verification and previews
 
-Public releases package a prebuilt universal macOS runtime and use stock Codex's plugin manager. A marketplace catalog references an immutable package tag. Contributors can also build a local package. The skill's `allow_implicit_invocation: false` setting keeps its instructions out of ordinary model context. Native lifecycle hooks run only a short ownership handler; they never start workers. A manually invoked launch includes a fresh UUID. PreToolUse records its native session, turn, and exact host process identity. The runtime consumes that handshake, checks explicit native hook trust, and binds later cancellation to that invocation. Hooks record cancellation before attempting socket delivery, and the runtime polls the durable record before admission and result acceptance. Stale turn notifications are ignored. DeLM does not register SessionEnd; process identity checks detect owner exit. A consumed launch cannot be retried in the same native turn. There is no always-running MCP server. An active run must be stopped before disabling DeLM or revoking its hooks. Codex can remove a thread's hooks without terminating yielded processes; the plugin does not invent another polling service to emulate a native session connection.
+Component checks can run concurrently with implementation. Check receipts bind a native command outcome to its scope, snapshot, worker, and request revision. The integrating worker can reuse applicable evidence; changed scoped files invalidate it. Peer evidence retains its original provenance rather than becoming a fabricated local command ID. There is no mandatory second full-suite pass or verifier approval gate.
 
-The runtime uses Codex's app-server protocol, including experimental named permission profiles and dynamic tools. Before each public run, it checks the required methods and parameters, validates an ephemeral thread's effective configuration, and probes filesystem isolation using disposable files. These checks do not generate a model turn. Additive protocol changes are accepted; unsupported behavior is rejected. Native response validation continues to apply to the actual worker threads. No host patches or private login endpoints are used.
+A service claim coordinates preview ownership before a worker starts a server through its normal native execution tools. Readiness records the actual loopback URL and owned process identity. The runtime verifies that the process owns the reported listener. A repeated claim does not authorize a duplicate launch. Check ownership coordinates mutable preview scenarios; ordinary tool permissions still apply. A service declaration alone does not prove that all served source is immutable.
 
-A run first retains a hash-verified copy of its executable outside the replaceable plugin cache and re-executes it before starting the async runtime. The process identity, arguments, and streams stay the same. The skill receives that retained path for subsequent control commands. Native upgrades and removal therefore do not invalidate active task control. Worker coordination, permissions, and completion rules are unchanged.
+## Delivery, recovery, and shutdown
 
-Task revisions, model selections, native events, usage records, deadlines, and results remain in private local run storage. Builds, qualification artifacts, product research, and design drafts are excluded from the source distribution.
+The selected folder is the project boundary. If it has no Git administration, preparation initializes an independent repository there through an atomic no-replace publication; it never discovers an ancestor or replaces an existing `.git` entry. Partial capture failures clean only identity-checked directories recorded in the preparation journal.
+
+Updates and answers reach both existing worker sessions. Native interruption, explicit stop, owner exit, and the task deadline cancel work. Process supervision closes native turns, terminals, hosts, and observed descendants before workspace removal. Unresolved shutdown preserves work and reports the cleanup limitation.
+
+After confirming the selected result, delivery compares its source delta against the captured starting working tree. It preserves the original Git index and unrelated files, merges compatible concurrent text edits, and reports conflicting edits without overwriting them. Binary files, contained symlinks, executable modes, and deletions are represented explicitly. Incompatible file/directory type transitions require recovery.
+
+A durable per-path journal precedes writes. Guarded replacements retain displaced original inodes in durable recovery, including after successful delivery, so writes through already-open descriptors are not discarded. Changed displaced entries detected before completion produce a recovery outcome. This does not provide global transaction isolation from external editors. Interrupted application never rolls back later user edits automatically. Conflict and cancellation recovery saves changed file blobs, before/after manifests, and any delivery journal before removing both worker trees and the baseline.
+
+Source delivery excludes newly created dependency environments. Changed dependency manifests, omitted worker-local dependency environments, or files merged with concurrent user edits set `verification_required`. The report lists omitted environments in `environment_directories_omitted`; their presence in a worker does not prove readiness in the original project. The parent must perform the necessary native setup or focused check in the original project before presenting it as ready. Matching transferred bytes alone does not certify relocation.
+
+Runtime metadata, usage, board evidence, completion records, and needed recovery data remain in private run storage. Temporary preview processes stop with the run. A requested final preview must start from the original project.
+
+## Installation and qualification
+
+Codex's native plugin manager installs DeLM. The explicit-only skill and trusted hooks supply its user entry point; DeLM does not replace the Codex executable. A run retains a hash-verified copy of its runtime so later control commands survive a plugin update.
+
+Compatibility checks validate the native methods and response fields the implementation uses. Deterministic fixtures qualify ownership, cancellation, delivery, and cleanup without model calls. Native inheritance and real task behavior need separate qualification; fixture success does not close the live-session parity gaps above. See [development](development.md) and [release qualification](releases.md).

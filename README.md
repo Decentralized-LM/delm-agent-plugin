@@ -22,7 +22,7 @@
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-DeLM brings two collaborating agents to your existing Codex conversation. They claim work, share findings, and reuse each other's code through a shared context and task queue. Each agent develops a complete solution in a private workspace; the first to finish returns the result.
+DeLM brings two collaborating agents to your existing Codex conversation. They claim work, share findings, and reuse each other's code through a shared context and task queue. Both contribute to one result, which DeLM applies to your project before removing its temporary workspaces.
 
 Invoke **`$delm:run`** when you want them to work together. DeLM uses your Codex account and starts its workers only when you ask.
 
@@ -48,18 +48,20 @@ The planned npm command is `npx --yes delm-agent@latest install`. The `delm-agen
 
 ## Run a task
 
-Open Codex in the Git repository you want to work on and enter a request:
+Open Codex in the project you want to work on and enter a request:
 
 ```text
 $delm:run Build a task board with drag-and-drop columns, local persistence,
 and keyboard controls. Include a README and test the main interactions.
 ```
 
-Both agents can research, install dependencies, run tests, and check a private browser preview. You can clarify the request or ask Codex to stop from the same conversation.
+The trusted invocation hook starts the runtime directly. Both agents work in private project copies, share contributions, and take new tasks as work becomes available. Independent checks can run in parallel; applicable recorded checks can be reused instead of repeating a full acceptance pass. You can clarify the request or ask Codex to stop from the same conversation.
 
-**Your original repository stays unchanged.** DeLM returns a link to the completed project, launch instructions, a review of the changes, and the checks performed. Open that project to continue, or ask Codex to apply the changes after review. Interrupted work is also preserved.
+**Changes are delivered to your original project.** DeLM preserves the Git index, merges compatible concurrent edits, and saves conflicting changes for recovery. Both worker directories are removed after safe delivery or recovery. Dependency environments stay local to each project; when delivery changes dependency manifests, omits worker-local environments, or merges your edits, Codex performs the necessary setup or focused check in the original project before reporting it ready.
 
-Use a standalone Git repository smaller than 10 GB, including ignored files and Git history. Runs have a 30-minute default allowance. Stop an active run before disabling DeLM or revoking its hook trust.
+Workers use native Codex forks and preserve ordinary saved skills, plugins, hooks, MCP configuration, and permissions instead of disabling them. The current host API omits parent-process CLI overrides when creating a separate fork host, so this development build does not yet provide exact live-session parity. See [capability inheritance](docs/support.md#codex-setup-and-capability-inheritance) for the precise boundary.
+
+Select one project smaller than 10 GB, including ignored files and Git history. DeLM initializes Git in that exact folder if needed; it does not create a commit. Runs have a 30-minute default allowance. Stop an active run before disabling DeLM or revoking its hook trust.
 
 ## Learn more
 

@@ -208,11 +208,37 @@ impl Fixture {
     }
 
     fn assert_preserved_and_stopped(&self) {
+        self.assert_delivered_and_stopped(&[]);
+    }
+
+    fn assert_delivered_and_stopped(&self, additions: &[&str]) {
+        let mut actual = snapshot(&self.project);
+        for path in additions {
+            assert!(
+                actual.remove(Path::new(path)).is_some(),
+                "missing delivered file {path}"
+            );
+        }
         assert_eq!(
-            snapshot(&self.project),
-            self.before,
-            "original repository changed"
+            actual, self.before,
+            "delivery changed pre-existing project files or Git state"
         );
+        let runs = self.home.join("Library/Application Support/DeLM/runs");
+        if runs.exists() {
+            for run in fs::read_dir(runs).unwrap() {
+                let saved = run.unwrap().path().join("run.json");
+                if saved.exists() {
+                    let saved: Value = serde_json::from_slice(&fs::read(saved).unwrap()).unwrap();
+                    for worker in saved["workspace"]["workers"].as_array().unwrap() {
+                        assert!(
+                            !Path::new(worker.as_str().unwrap()).exists(),
+                            "worker workspace survived cleanup"
+                        );
+                    }
+                    assert!(!Path::new(saved["workspace"]["baseline"].as_str().unwrap()).exists());
+                }
+            }
+        }
         let pids = self
             .wire()
             .iter()
@@ -343,9 +369,9 @@ fn raw_control(id: &str, request: Value) -> Value {
 }
 
 #[test]
-fn missing_capability_or_failed_isolation_stops_before_task_workers() {
-    for mode in ["missing_compatibility_method", "failed_compatibility_probe"] {
-        let fixture = Fixture::new(mode);
+fn missing_capability_stops_before_task_workers() {
+    {
+        let fixture = Fixture::new("missing_compatibility_method");
         let mut session = fixture.start();
         assert!(!session.wait(SHORT_LIMIT).success());
         let error = fs::read_to_string(&session.stderr).unwrap();
@@ -406,7 +432,7 @@ fn control_access_must_be_confirmed_before_task_workers_start() {
             .iter()
             .all(|request| request.to_string().contains("PRESTART-UPDATE"))
     );
-    fixture.assert_preserved_and_stopped();
+    fixture.assert_delivered_and_stopped(&["result.txt", "revised.txt"]);
 }
 
 #[test]
@@ -424,7 +450,7 @@ fn stop_before_control_confirmation_never_starts_task_workers() {
 }
 
 #[test]
-fn public_run_automatically_accepts_and_exits_with_a_retained_result() {
+fn public_run_delivers_to_original_project_and_cleans_worker_trees() {
     let fixture = Fixture::new("complete");
     let mut session = fixture.start();
     let id = session.run_id();
@@ -458,20 +484,12 @@ fn public_run_automatically_accepts_and_exits_with_a_retained_result() {
     assert!(session.wait(SHORT_LIMIT).success());
     let path = PathBuf::from(result["path"].as_str().unwrap());
     assert!(path.join("result.txt").is_file());
-    assert_ne!(path, fixture.project);
+    assert_eq!(path, fixture.project);
     assert_eq!(fixture.requests("thread/start").len(), 2);
     assert_eq!(fixture.requests("turn/start").len(), 2);
-    assert_eq!(fixture.requests("command/exec").len(), 1);
-    let wire = fixture.wire();
-    let isolation_check = wire
-        .iter()
-        .position(|entry| entry["message"]["method"] == "command/exec")
-        .unwrap();
-    let first_turn = wire
-        .iter()
-        .position(|entry| entry["message"]["method"] == "turn/start")
-        .unwrap();
-    assert!(isolation_check < first_turn);
+    assert!(fixture.requests("command/exec").is_empty());
+    assert_eq!(result["details"]["delivery"]["delivered"], true);
+    assert_eq!(result["details"]["delivery"]["cleanup_complete"], true);
     let status = fixture.control(&["status", "--run-id", &id]);
     assert_eq!(status["status"], "complete");
     assert_eq!(status["run_id"], id);
@@ -495,7 +513,7 @@ fn public_run_automatically_accepts_and_exits_with_a_retained_result() {
             .iter()
             .all(|request| request.to_string().contains("CLI-CONTEXT"))
     );
-    fixture.assert_preserved_and_stopped();
+    fixture.assert_delivered_and_stopped(&["result.txt"]);
 }
 
 #[test]
@@ -514,11 +532,11 @@ fn execution_time_limit_preserves_clean_partial_work() {
             .contains("execution time limit"),
         "{stopped}"
     );
-    assert_eq!(stopped["partial_paths"].as_array().unwrap().len(), 2);
+    assert_eq!(stopped["partial_paths"].as_array().unwrap().len(), 1);
     let run_dir = fixture.run_dir(&id);
     let saved: Value =
         serde_json::from_slice(&fs::read(run_dir.join("run.json")).unwrap()).unwrap();
-    assert_eq!(saved["status"], "paused");
+    assert_eq!(saved["status"], "stopped");
     let launches = fs::read_dir(run_dir.join("launches"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -618,7 +636,7 @@ fn authenticated_update_and_stop_work_while_untrusted_controls_have_no_effect() 
     );
     fixture.control(&["stop", "--run-id", &id]);
     let stopped = session.until(|event| event["type"] == "stopped", SHORT_LIMIT);
-    assert_eq!(stopped["partial_paths"].as_array().unwrap().len(), 2);
+    assert_eq!(stopped["partial_paths"].as_array().unwrap().len(), 1);
     assert!(session.wait(SHORT_LIMIT).success());
     let status = fixture.control(&["status", "--run-id", &id]);
     assert_eq!(status["status"], "stopped");
@@ -688,7 +706,7 @@ fn monitoring_expires_after_sixty_seconds_despite_untrusted_renewals() {
     assert!(fixture.requests("turn/steer").is_empty());
     let final_status = fixture.control(&["status", "--run-id", &id]);
     assert_eq!(final_status["status"], "stopped");
-    assert_eq!(final_status["partial_paths"].as_array().unwrap().len(), 2);
+    assert_eq!(final_status["partial_paths"].as_array().unwrap().len(), 1);
     fixture.assert_preserved_and_stopped();
 }
 

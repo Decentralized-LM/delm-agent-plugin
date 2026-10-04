@@ -54,6 +54,10 @@ pub enum HostCommand {
         id: String,
         decision: String,
     },
+    Respond {
+        id: String,
+        response: Value,
+    },
     Resume {
         run_id: String,
         authorization: StartRequest,

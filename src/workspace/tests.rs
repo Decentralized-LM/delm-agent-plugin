@@ -448,16 +448,6 @@ fn result_interpreter_allowance_does_not_admit_source_or_fake_environment_links(
 #[cfg(target_os = "macos")]
 fn exact_root_selection_unsupported_state_and_size_failure_create_no_workers() {
     let (temp, root) = fixture();
-    fs::create_dir(root.join("subdirectory")).unwrap();
-    assert!(
-        prepare(
-            &root.join("subdirectory"),
-            &temp.path().join("run-child"),
-            1_000_000
-        )
-        .is_err()
-    );
-    assert!(!temp.path().join("run-child").exists());
     let before = scan(&root);
     assert!(prepare(&root, &root.join("forbidden-run"), 1_000_000).is_err());
     assert!(!root.join("forbidden-run").exists());

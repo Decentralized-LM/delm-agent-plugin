@@ -1,6 +1,7 @@
 """Qualify exact macOS release bytes with disposable, no-model fixtures."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,41 @@ import time
 from build import SOURCE
 from install_support import fingerprint, package_files
 from package_release import ARCHITECTURES, LIFECYCLE_CASES, source_state, source_version, verify, write_json
+
+
+INHERITANCE_INPUTS = ["tests/native_inheritance.rs", "src/workers.rs", "src/worker_tools.rs", "src/compatibility.rs"]
+
+
+def inheritance_source_digest(source):
+    digest = hashlib.sha256()
+    for name in INHERITANCE_INPUTS:
+        digest.update((source / name).read_bytes())
+    return digest.hexdigest()
+
+
+def expected_smoke_cases():
+    return [{"case": case, "passed": True, "workerCount": 2,
+             "originalPreserved": True, "resultDelivered": case == "complete",
+             "workspacesRemoved": True} for case in ["complete", "stop"]]
+
+
+def validate_inheritance(evidence, source, runtime_hash, architecture, host_version):
+    if (evidence.get("kind") != "native-inheritance" or evidence.get("model_turns") != 0
+            or not all(evidence.get(key) is True for key in ["saved_skill_contents_match",
+                "saved_mcp_tools_match", "native_permission_profile_match", "mcp_tool_called",
+                "delm_gateway_tool_called", "parent_cli_overrides_not_exported"])
+            or evidence.get("exact_live_session_parity") is not False
+            or evidence.get("runtime_sha256") != runtime_hash
+            or evidence.get("host_version") != host_version
+            or {"aarch64": "arm64"}.get(evidence.get("architecture"), evidence.get("architecture")) != architecture
+            or evidence.get("native_test_sha256") != fingerprint(source / "tests/native_inheritance.rs")["sha256"]
+            or evidence.get("source_digest") != inheritance_source_digest(source)):
+        raise RuntimeError("Native inheritance evidence is missing, mismatched, or overstates live parity.")
+    # Keep private temporary paths and tool contents out of release metadata.
+    return {"runtimeSha256": runtime_hash, "hostVersion": host_version, "architecture": architecture,
+            "nativeTestSha256": evidence["native_test_sha256"], "sourceDigest": evidence["source_digest"],
+            "gatewayToolCalled": True, "parentCliOverridesNotExported": True,
+            "exactLiveSessionParity": False}
 
 
 def native_architecture(expected):
@@ -35,6 +71,7 @@ def smoke_case(runtime, root, mode):
     home, project, bin_dir = root / "home", root / "original", root / "bin"
     for directory in [home / ".codex", project, bin_dir]:
         directory.mkdir(parents=True)
+    project = project.resolve()
     host = bin_dir / "codex"
     shutil.copy2(SOURCE / "tests/fixtures/worker_host.py", host)
     host.chmod(0o755)
@@ -93,12 +130,23 @@ def smoke_case(runtime, root, mode):
             expected = "stopped" if mode == "wait" else "result"
             if child.returncode or terminal["type"] != expected:
                 raise RuntimeError(f"Release runtime smoke failed: {terminal}")
-            if expected == "result" and not (Path(terminal["path"]) / "result.txt").is_file():
-                raise RuntimeError("Release runtime did not retain its completed output.")
-            if expected == "stopped" and len(terminal.get("partial_paths", [])) != 2:
-                raise RuntimeError("Stopping the release runtime did not preserve both workspaces.")
-            if package_files(project) != before:
-                raise RuntimeError("Release runtime changed the original repository.")
+            after = package_files(project)
+            if expected == "result":
+                if Path(terminal["path"]) != project or not (project / "result.txt").is_file():
+                    raise RuntimeError("Release runtime did not deliver its output to the original project.")
+                after.pop("result.txt")
+                if terminal.get("details", {}).get("delivery", {}).get("delivered") is not True:
+                    raise RuntimeError("Release runtime did not confirm guarded delivery.")
+            else:
+                recovery = terminal.get("partial_paths", [])
+                if len(recovery) != 1 or not (Path(recovery[0]) / "complete.json").is_file():
+                    raise RuntimeError("Stopping the release runtime did not save a recovery package.")
+            if after != before:
+                raise RuntimeError("Release runtime changed existing project files or Git state.")
+            run_dir = home / "Library/Application Support/DeLM/runs" / run_id
+            saved = json.loads((run_dir / "run.json").read_text())
+            if any(Path(path).exists() for path in [saved["workspace"]["baseline"], *saved["workspace"]["workers"]]):
+                raise RuntimeError("Release runtime left temporary workspaces behind.")
             wire = [json.loads(line) for line in host.with_suffix(".jsonl").read_text().splitlines()]
             workers = [event for event in wire if event.get("direction") == "in"
                        and event["message"].get("method") == "thread/start"
@@ -112,7 +160,8 @@ def smoke_case(runtime, root, mode):
                     continue
                 raise RuntimeError("Release runtime left a fixture worker host running.")
             return {"case": "stop" if mode == "wait" else "complete", "passed": True,
-                    "workerCount": 2, "originalUnchanged": True}
+                    "workerCount": 2, "originalPreserved": True,
+                    "resultDelivered": expected == "result", "workspacesRemoved": True}
         finally:
             write_json(root / "events.json", events)
             if child.poll() is None:
@@ -149,7 +198,7 @@ def smoke(runtime, output, architecture, signed=False):
     return evidence
 
 
-def record(runtime, output, target, smoke_path, sandbox_path, lifecycle_root):
+def record(runtime, output, target, smoke_path, inheritance_path, lifecycle_root):
     architecture = next((arch for arch, triple in ARCHITECTURES.items() if triple == target), None)
     if architecture is None:
         raise RuntimeError("Unsupported macOS release target.")
@@ -157,15 +206,15 @@ def record(runtime, output, target, smoke_path, sandbox_path, lifecycle_root):
     runtime_hash = fingerprint(runtime)["sha256"]
     provenance = source_state(SOURCE)
     smoke_result = json.loads(smoke_path.read_text())
-    if (smoke_result.get("passed") is not True or smoke_result.get("runtimeSha256") != runtime_hash
+    if (smoke_result.get("schema") != 1 or smoke_result.get("kind") != "release-runtime-smoke"
+            or smoke_result.get("cases") != expected_smoke_cases()
+            or smoke_result.get("passed") is not True or smoke_result.get("runtimeSha256") != runtime_hash
             or smoke_result.get("architecture") != architecture or smoke_result.get("modelCalls") != 0
             or any(smoke_result.get(key) != value for key, value in provenance.items())):
         raise RuntimeError("Exact-runtime smoke evidence does not match this native build.")
-    sandbox = json.loads(sandbox_path.read_text())
-    if sandbox.get("model_turns") != 0 or len(sandbox.get("network_enabled", [])) != 2:
-        raise RuntimeError("Native sandbox qualification evidence is incomplete.")
+    inheritance = json.loads(inheritance_path.read_text())
     evidence_hashes = {"smoke": fingerprint(smoke_path)["sha256"],
-                       "sandbox": fingerprint(sandbox_path)["sha256"]}
+                       "inheritance": fingerprint(inheritance_path)["sha256"]}
     versions = set()
     fixture_hashes = set()
     for case in LIFECYCLE_CASES:
@@ -180,11 +229,15 @@ def record(runtime, output, target, smoke_path, sandbox_path, lifecycle_root):
         evidence_hashes[case] = fingerprint(path)["sha256"]
     if len(versions) != 1 or len(fixture_hashes) != 1:
         raise RuntimeError("Lifecycle qualification mixed native hosts or fixture binaries.")
+    host_version = versions.pop()
+    native_inheritance = validate_inheritance(inheritance, SOURCE, runtime_hash, architecture, host_version)
     revision = command(["git", "rev-parse", "HEAD"], cwd=SOURCE).stdout.strip()
     evidence = {"schema": 1, "kind": "native-release-build", "architecture": architecture,
                 "target": target, "macOS": platform.mac_ver()[0], "runtimeSha256": runtime_hash,
                 "sourceRevision": revision, **provenance, "passed": True, "modelCalls": 0,
-                "codexVersion": versions.pop(), "lifecycleCases": LIFECYCLE_CASES,
+                "codexVersion": host_version, "lifecycleCases": LIFECYCLE_CASES,
+                "nativeInheritance": native_inheritance,
+                "exactLiveSessionParity": False,
                 "lifecycleFixtureSha256": fixture_hashes.pop(), "evidenceSha256": evidence_hashes}
     write_json(output, evidence)
     return evidence
@@ -202,8 +255,7 @@ def verify_signed(package, reports):
                 or report.get("signedAndNotarized") is not True or report.get("modelCalls") != 0
                 or report.get("sourceDirty") is not False
                 or report.get("runtimeSourcesSha256") != metadata["runtimeSourcesSha256"]
-                or report.get("cases") != [{"case": case, "passed": True, "workerCount": 2,
-                                            "originalUnchanged": True} for case in ["complete", "stop"]]):
+                or report.get("cases") != expected_smoke_cases()):
             raise RuntimeError(f"Signed runtime qualification does not match the package: {arch}")
     command(["codesign", "--verify", "--strict", "--check-notarization", "-R=notarized",
              str(package / "plugins/delm/bin/delm")])
@@ -224,7 +276,7 @@ def main():
     record_parser.add_argument("--out", type=Path, required=True)
     record_parser.add_argument("--target", choices=ARCHITECTURES.values(), required=True)
     record_parser.add_argument("--smoke", type=Path, required=True)
-    record_parser.add_argument("--sandbox", type=Path, required=True)
+    record_parser.add_argument("--inheritance", type=Path, required=True)
     record_parser.add_argument("--lifecycle-root", type=Path, required=True)
     verify_parser = subparsers.add_parser("verify-signed")
     verify_parser.add_argument("--package", type=Path, required=True)
@@ -233,7 +285,7 @@ def main():
     if args.operation == "smoke":
         evidence = smoke(args.runtime, args.out.resolve(), args.architecture, args.signed)
     elif args.operation == "record":
-        evidence = record(args.runtime, args.out, args.target, args.smoke, args.sandbox, args.lifecycle_root)
+        evidence = record(args.runtime, args.out, args.target, args.smoke, args.inheritance, args.lifecycle_root)
     else:
         evidence = verify_signed(args.package, args.reports)
     print(json.dumps({key: evidence[key] for key in ["kind", "architecture", "runtimeSha256", "sourceDirty", "passed"]}))

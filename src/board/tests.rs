@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::sync::{Arc, Barrier};
 
@@ -129,7 +130,7 @@ fn identity_is_native_and_components_do_not_complete_the_request() {
         .unwrap()["result"]["task_id"]
         .as_i64()
         .unwrap();
-    board
+    let claim = board
         .call(
             1,
             "delm_task_claim",
@@ -140,7 +141,7 @@ fn identity_is_native_and_components_do_not_complete_the_request() {
         .call(
             1,
             "delm_task_finish",
-            json!({"idempotency_key":"finish","task_id":id,"summary":"Filter available"}),
+            json!({"idempotency_key":"finish","task_id":id,"expected_version":claim["result"]["version"],"summary":"Filter available"}),
         )
         .unwrap();
     assert_eq!(finished["result"]["whole_task_complete"], false);
@@ -623,5 +624,254 @@ fn oversized_sparse_file_is_refused_before_reading_its_body() {
             .as_array()
             .unwrap()
             .is_empty()
+    );
+}
+
+fn create_task(board: &mut Board, worker: usize, key: &str, kind: &str) -> i64 {
+    board.call(worker, "delm_task_create", json!({"idempotency_key":key,"title":key,"description":"A useful bounded contribution","kind":kind})).unwrap()["result"]["task_id"].as_i64().unwrap()
+}
+
+fn claim_task(board: &mut Board, worker: usize, key: &str, task: i64) -> i64 {
+    board
+        .call(
+            worker,
+            "delm_task_claim",
+            json!({"idempotency_key":key,"task_id":task}),
+        )
+        .unwrap()["result"]["version"]
+        .as_i64()
+        .unwrap()
+}
+
+#[test]
+fn released_claims_fence_old_owners_and_same_owner_reclaims() {
+    let fixture = Fixture::new();
+    let mut board = fixture.board();
+    let task = create_task(&mut board, 1, "task", "implementation");
+    let old = claim_task(&mut board, 1, "claim", task);
+    let release = json!({"idempotency_key":"release","task_id":task,"expected_version":old,"summary":"No code yet; the interface is ready"});
+    let released = board.call(1, "delm_task_release", release.clone()).unwrap();
+    assert_eq!(
+        board.call(1, "delm_task_release", release).unwrap(),
+        released
+    );
+    assert!(board.call(1,"delm_task_finish",json!({"idempotency_key":"late","task_id":task,"expected_version":old,"summary":"Stale completion"})).is_err());
+    let new = claim_task(&mut board, 1, "reclaim", task);
+    assert_ne!(old, new);
+    assert!(board.call(1,"delm_task_finish",json!({"idempotency_key":"late2","task_id":task,"expected_version":old,"summary":"Still stale"})).is_err());
+    board.call(1,"delm_task_release",json!({"idempotency_key":"release2","task_id":task,"expected_version":new,"summary":"Ready for peer"})).unwrap();
+    let peer = claim_task(&mut board, 2, "peer", task);
+    assert!(board.call(1,"delm_task_update",json!({"idempotency_key":"intrude","task_id":task,"expected_version":peer,"description":"Other owner"})).is_err());
+    board.call(2,"delm_task_finish",json!({"idempotency_key":"done","task_id":task,"expected_version":peer,"summary":"Complete"})).unwrap();
+}
+
+#[test]
+fn updated_interfaces_have_a_new_version_and_reject_stale_finishes() {
+    let fixture = Fixture::new();
+    let mut board = fixture.board();
+    let task = create_task(&mut board, 1, "task", "implementation");
+    let before = claim_task(&mut board, 1, "claim", task);
+    let update = board.call(1,"delm_task_update",json!({"idempotency_key":"update","task_id":task,"expected_version":before,"interface":"parse(csv) returns Result<Contact[], ImportError[]>"})).unwrap();
+    assert!(board.call(1,"delm_task_finish",json!({"idempotency_key":"old-finish","task_id":task,"expected_version":before,"summary":"Old contract"})).is_err());
+    let expanded = board
+        .call(2, "delm_expand", json!({"task_id":task}))
+        .unwrap();
+    assert_eq!(
+        expanded["result"]["interface"],
+        "parse(csv) returns Result<Contact[], ImportError[]>"
+    );
+    board.call(1,"delm_task_finish",json!({"idempotency_key":"finish","task_id":task,"expected_version":update["result"]["version"],"summary":"Current contract"})).unwrap();
+}
+
+#[test]
+fn split_is_atomic_and_keeps_only_the_smaller_parent_claim() {
+    let fixture = Fixture::new();
+    let mut board = fixture.board();
+    let task = create_task(&mut board, 1, "task", "implementation");
+    let version = claim_task(&mut board, 1, "claim", task);
+    let args = json!({"idempotency_key":"split","task_id":task,"expected_version":version,
+        "remaining":{"title":"Parse input","description":"Keep the parser only"},
+        "tasks":[{"title":"Save records","description":"Persist validated records","interface":"Accept parser output"},
+        {"title":"Present errors","description":"Show field-level validation feedback"}]});
+    let split = board.call(1, "delm_task_split", args.clone()).unwrap();
+    assert_eq!(board.call(1, "delm_task_split", args).unwrap(), split);
+    let tasks = board.view().unwrap()["tasks"].as_array().unwrap().clone();
+    assert_eq!(tasks.len(), 3);
+    assert_eq!(
+        tasks.iter().filter(|t| t["state"] == "available").count(),
+        2
+    );
+    assert_eq!(
+        tasks.iter().find(|t| t["task_id"] == task).unwrap()["title"],
+        "Parse input"
+    );
+    let child = split["result"]["created"][0]["task_id"].as_i64().unwrap();
+    claim_task(&mut board, 2, "peer", child);
+    let current = split["result"]["version"].as_i64().unwrap();
+    let invalid = json!({"idempotency_key":"bad-split","task_id":task,"expected_version":current,
+        "remaining":{"title":"Parse input","description":"Still own parser"},
+        "tasks":[{"title":"Should roll back","description":"Valid first child"},{"title":"Invalid child"}]});
+    assert!(board.call(1, "delm_task_split", invalid).is_err());
+    assert_eq!(board.view().unwrap()["tasks"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        board
+            .call(1, "delm_expand", json!({"task_id":task}))
+            .unwrap()["result"]["version"],
+        current
+    );
+}
+
+#[test]
+fn only_one_temporary_integration_claim_exists() {
+    let fixture = Fixture::new();
+    let mut board = fixture.board();
+    let first = create_task(&mut board, 1, "assembly1", "integration");
+    let second = create_task(&mut board, 2, "assembly2", "integration");
+    let version = claim_task(&mut board, 1, "claim1", first);
+    assert!(
+        board
+            .call(
+                2,
+                "delm_task_claim",
+                json!({"idempotency_key":"claim2","task_id":second})
+            )
+            .is_err()
+    );
+    board.call(1,"delm_task_release",json!({"idempotency_key":"handoff","task_id":first,"expected_version":version,"summary":"Peer can assemble from published pieces"})).unwrap();
+    claim_task(&mut board, 2, "claim3", second);
+}
+
+#[test]
+fn stopped_owner_releases_integration_without_losing_version_fence() {
+    let fixture = Fixture::new();
+    let mut board = fixture.board();
+    let integration = create_task(&mut board, 1, "assembly", "integration");
+    let prior = claim_task(&mut board, 1, "claim", integration);
+    let own = create_task(&mut board, 2, "independent", "implementation");
+    claim_task(&mut board, 2, "other", own);
+    assert_eq!(
+        board
+            .release_worker_claims(1, "native turn failed")
+            .unwrap(),
+        vec![integration]
+    );
+    assert!(
+        board
+            .release_worker_claims(1, "native turn failed")
+            .unwrap()
+            .is_empty()
+    );
+    let new = claim_task(&mut board, 2, "takeover", integration);
+    assert_ne!(prior, new);
+    assert!(board.call(1,"delm_task_finish",json!({"idempotency_key":"stale","task_id":integration,"expected_version":prior,"summary":"Late declaration"})).is_err());
+    assert_eq!(
+        board
+            .call(2, "delm_expand", json!({"task_id":own}))
+            .unwrap()["result"]["owner"],
+        2
+    );
+}
+
+fn native_check(root: &Path, started: u64, exit: i64) -> HashMap<String, Value> {
+    HashMap::from([(
+        "test-command".into(),
+        json!({"type":"commandExecution","id":"test-command","command":"node --test tests/parser.test.js","cwd":root,"status":if exit == 0 {"completed"} else {"failed"},"exitCode":exit,"_delm_revision":1,"_delm_started_sequence":started}),
+    )])
+}
+
+#[test]
+fn shared_evidence_requires_precommand_snapshot_and_matching_imported_inputs() {
+    let fixture = Fixture::new();
+    fixture.seed("parser.js", b"before");
+    fixture.seed("package.json", b"{}");
+    fs::write(fixture.workers[0].join("parser.js"), b"validated").unwrap();
+    let mut board = fixture.board();
+    let begun = board.begin_check(1,json!({"idempotency_key":"begin","summary":"Parser validation","paths":["parser.js","package.json"]}),||100).unwrap();
+    let snapshot = begun["result"]["snapshot_id"].as_i64().unwrap();
+    let finish = json!({"idempotency_key":"finish-check","snapshot_id":snapshot,"command_id":"test-command"});
+    assert!(
+        board
+            .finish_check(1, finish.clone(), &native_check(&fixture.workers[0], 99, 0))
+            .is_err()
+    );
+    assert!(
+        board
+            .finish_check(
+                2,
+                finish.clone(),
+                &native_check(&fixture.workers[1], 101, 0)
+            )
+            .is_err()
+    );
+    assert!(
+        board
+            .finish_check(1, finish.clone(), &native_check(&fixture.baseline, 101, 0))
+            .is_err()
+    );
+    let receipt = board
+        .finish_check(
+            1,
+            finish.clone(),
+            &native_check(&fixture.workers[0], 101, 0),
+        )
+        .unwrap();
+    assert_eq!(
+        board.finish_check(1, finish, &HashMap::new()).unwrap(),
+        receipt
+    );
+    let id = receipt["result"]["receipt_id"].as_i64().unwrap();
+    let declaration = json!({"shared_checks":[id]});
+    assert!(board.shared_checks(2, &declaration, 1).is_err());
+    fs::write(fixture.workers[1].join("parser.js"), b"validated").unwrap();
+    assert_eq!(
+        board.shared_checks(2, &declaration, 1).unwrap()[0]["worker"],
+        1
+    );
+    // An unrelated edit does not invalidate this explicitly scoped check.
+    fs::write(fixture.workers[1].join("unrelated.css"), b"body{}").unwrap();
+    assert!(board.shared_checks(2, &declaration, 1).is_ok());
+    fs::write(
+        fixture.workers[1].join("package.json"),
+        b"{\"type\":\"module\"}",
+    )
+    .unwrap();
+    assert!(board.shared_checks(2, &declaration, 1).is_err());
+    assert!(board.shared_checks(1, &declaration, 2).is_err());
+    assert_eq!(
+        board
+            .call(2, "delm_expand", json!({"check_id":id}))
+            .unwrap()["result"]["native"]["id"],
+        "test-command"
+    );
+}
+
+#[test]
+fn failed_checks_and_changed_inputs_are_visible_but_not_reusable() {
+    let fixture = Fixture::new();
+    fixture.seed("input.js", b"before");
+    let mut board = fixture.board();
+    for (case, exit, changed) in [("failed", 1, false), ("changed", 0, true)] {
+        let begun = board.begin_check(1,json!({"idempotency_key":format!("begin-{case}"),"summary":case,"paths":["input.js"]}),||100).unwrap();
+        if changed {
+            fs::write(fixture.workers[0].join("input.js"), b"after").unwrap();
+        }
+        let receipt = board.finish_check(1,json!({"idempotency_key":format!("finish-{case}"),"snapshot_id":begun["result"]["snapshot_id"],"command_id":"test-command"}),&native_check(&fixture.workers[0],101,exit)).unwrap();
+        assert_eq!(receipt["result"]["reusable"], false);
+        assert!(
+            board
+                .shared_checks(
+                    1,
+                    &json!({"shared_checks":[receipt["result"]["receipt_id"]]}),
+                    1
+                )
+                .is_err()
+        );
+    }
+    assert_eq!(
+        board.view().unwrap()["check_receipts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
     );
 }

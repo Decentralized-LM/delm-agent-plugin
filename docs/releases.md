@@ -33,16 +33,18 @@ The workflow requires these gates:
 
 | Gate | Required evidence |
 | --- | --- |
-| Native ARM and Intel builds | Locked dependencies, regular verification, release-profile tests, native sandbox test, and all five native lifecycle cases: interrupt, preflight, stop, owner death, plugin removal. |
-| Exact release runtimes | Deterministic completion and cancellation with two workers, retained output, unchanged original project, and no surviving fixture hosts. No model calls. |
+| Native ARM and Intel builds | Locked dependencies, regular verification, release-profile tests, native saved-configuration inheritance, and all five native lifecycle cases: interrupt, preflight, stop, owner death, plugin removal. |
+| Exact release runtimes | Deterministic completion and cancellation with two workers, delivery to the original project, preserved original Git state, durable partial recovery on stop, removal of both temporary workspaces, and no surviving fixture hosts. No model calls. |
 | Universal assembly | Each extracted architecture slice must match the hash of its tested native binary. Both qualification records identify the same clean source revision and runtime sources. |
 | Signing | Developer ID, hardened runtime, timestamp, an accepted Apple notarization submission, and verification of the online notarization record. Plugin resources must match the qualified unsigned package. |
 | Signed ARM and Intel execution | The final universal binary runs the same completion/cancellation smoke under quarantine on both native architectures. Reports identify the final signed bytes. |
 | Publication | The publisher itself rechecks the expected repository and source revision, clean tagged source, package integrity, both native qualifications, signed smoke reports, and notarization before writing any remote refs. |
 
+Native inheritance evidence includes an actual DeLM gateway call and binds the tested adapter sources, native fixture, host version, architecture, and runtime binary. Release validation rejects missing or mismatched inheritance records. These checks qualify saved configuration and the gateway, while retaining the explicit `exactLiveSessionParity: false` limitation described in [support](support.md#codex-setup-and-capability-inheritance).
+
 When ready to publish:
 
-1. Create the matching source tag, such as `v0.3.0`. Protect source tags and `delm-plugin-*` tags against replacement, and protect the `marketplace` branch.
+1. Create the source tag matching the package version. Protect source tags and `delm-plugin-*` tags against replacement, and protect the `marketplace` branch.
 2. Configure the GitHub `release` environment with a required reviewer and these environment secrets: `APPLE_CERTIFICATE_BASE64` (Developer ID Application certificate as a base64-encoded P12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD`.
 3. Dispatch **Prepare macOS release** with that tag as `source_ref` and `publish` enabled. The signing job uses the protected environment. After approval, successful signing and both signed native qualification jobs gate the publisher automatically; the publisher receives repository write permission but no Apple credentials.
 
@@ -60,7 +62,7 @@ The generated release README supplies the exact one-paste command using the real
 codex plugin marketplace add OWNER/REPOSITORY --ref marketplace && codex plugin add delm@delm
 ```
 
-`OWNER/REPOSITORY` above describes the command format, not a published destination. Copy the fully resolved command from the published package README. Restart Codex after installation, open `/hooks`, and review and trust the DeLM hooks. Restart Codex once more, then invoke `$delm:run <task>` in a Git repository. Installation does not start workers or grant hook trust.
+`OWNER/REPOSITORY` above describes the command format, not a published destination. Copy the fully resolved command from the published package README. Restart Codex after installation, open `/hooks`, and review and trust the DeLM hooks. Restart Codex once more, then invoke `$delm:run <task>` in the intended project. Installation does not start workers or grant hook trust.
 
 Updates use `codex plugin marketplace upgrade delm`; review changed hooks in `/hooks` when Codex requests it, then restart before running DeLM. Removal uses `codex plugin remove delm@delm`. Neither requires the source checkout. Native plugin management handles downloading and activation; DeLM adds no updater or background service. Existing `delm-local` users should follow [migration](support.md#updating-and-removing-the-plugin).
 

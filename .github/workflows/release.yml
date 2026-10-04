@@ -77,7 +77,7 @@ jobs:
       - name: Install build and qualification tools
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
-          npm install --global @openai/codex@0.159.3
+          npm install --global @openai/codex@0.160.0
       - name: Verify source, native installation, and release packaging
         run: |
           ./scripts/verify.sh
@@ -85,10 +85,10 @@ jobs:
         run: |
           cargo build --locked --release --target "$BUILD_TARGET" --bin delm --example native-lifecycle-fixture
           cargo test --locked --release --target "$BUILD_TARGET"
-      - name: Qualify the native sandbox and every lifecycle scenario without model calls
+      - name: Qualify native inheritance and every lifecycle scenario without model calls
         run: |
           mkdir -p "$RUNNER_TEMP/qualification"
-          DELM_TEST_HOST="$(command -v codex)" DELM_TEST_EVIDENCE="$RUNNER_TEMP/qualification/sandbox.json" cargo test --locked --release --target "$BUILD_TARGET" --test native_sandbox -- --ignored
+          DELM_TEST_HOST="$(command -v codex)" DELM_TEST_EVIDENCE="$RUNNER_TEMP/qualification/inheritance.json" cargo test --locked --release --target "$BUILD_TARGET" --test native_inheritance -- --ignored
           for scenario in interrupt preflight stop owner-death plugin-remove; do
             python3 scripts/verify_native_lifecycle.py --fixture "target/$BUILD_TARGET/release/examples/native-lifecycle-fixture" --case "$scenario" --out "$RUNNER_TEMP/qualification/$scenario"
           done
@@ -97,7 +97,7 @@ jobs:
           python3 scripts/qualify_release.py smoke --runtime "target/$BUILD_TARGET/release/delm" --architecture "$BUILD_ARCHITECTURE" --out "$RUNNER_TEMP/qualification/smoke"
           mkdir runtime-artifact
           cp "target/$BUILD_TARGET/release/delm" runtime-artifact/delm
-          python3 scripts/qualify_release.py record --runtime runtime-artifact/delm --target "$BUILD_TARGET" --smoke "$RUNNER_TEMP/qualification/smoke/result.json" --sandbox "$RUNNER_TEMP/qualification/sandbox.json" --lifecycle-root "$RUNNER_TEMP/qualification" --out runtime-artifact/qualification.json
+          python3 scripts/qualify_release.py record --runtime runtime-artifact/delm --target "$BUILD_TARGET" --smoke "$RUNNER_TEMP/qualification/smoke/result.json" --inheritance "$RUNNER_TEMP/qualification/inheritance.json" --lifecycle-root "$RUNNER_TEMP/qualification" --out runtime-artifact/qualification.json
           tar -cf runtime.tar -C runtime-artifact .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

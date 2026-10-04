@@ -24,7 +24,18 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    if let Some(delm::cli::Command::Run { project, .. }) = &args.command {
+    if args.stdio
+        || matches!(
+            &args.command,
+            Some(delm::cli::Command::Run { .. } | delm::cli::Command::CapturedRun { .. })
+        )
+    {
+        delm::lifecycle::ensure_not_worker()?;
+    }
+    if let Some(
+        delm::cli::Command::Run { project, .. } | delm::cli::Command::CapturedRun { project, .. },
+    ) = &args.command
+    {
         delm::package::preserve_for_run(project)?;
     }
     tokio::runtime::Builder::new_multi_thread()

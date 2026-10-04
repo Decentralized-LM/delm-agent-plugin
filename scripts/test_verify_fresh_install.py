@@ -8,10 +8,34 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from verify_fresh_install import inspect_run, read_task, remove_auth_reference, snapshot, task_handoff
+from verify_fresh_install import git_state, inspect_run, read_task, remove_auth_reference, snapshot, task_handoff
 
 
 class QualificationTests(unittest.TestCase):
+    def test_source_delivery_may_change_code_but_not_git_state(self):
+        before = {".git/index": {"sha256": "original"}, "src/app.py": {"sha256": "old"}}
+        after = {".git/index": {"sha256": "original"}, "src/app.py": {"sha256": "new"}}
+        self.assertEqual(git_state(before), git_state(after))
+        after[".git/index"] = {"sha256": "modified"}
+        self.assertNotEqual(git_state(before), git_state(after))
+
+    def test_inspection_reports_original_delivery_and_removed_workspaces(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / "run"
+            (run / "workspace/delivery").mkdir(parents=True)
+            original = root / "project"
+            original.mkdir()
+            (run / "run.json").write_text(json.dumps({"status": "delivered", "request": {
+                "task": "Fixture", "model": "fixture", "reasoning_effort": "high"},
+                "workspace": {"workers": [str(run / "workspace/worker-1"), str(run / "workspace/worker-2")],
+                              "baseline": str(run / "workspace/baseline")}, "workers": []}))
+            (run / "workspace/delivery/result.json").write_text(json.dumps({
+                "delivered": True, "project": str(original), "verification_required": True}))
+            evidence = inspect_run(run, root)
+            self.assertTrue(evidence["temporary_workspaces_removed"])
+            self.assertTrue(evidence["delivery"]["verification_required"])
+            self.assertEqual(evidence["delivery"]["project"], str(original))
     def test_task_file_preserves_crlf_and_snapshot_records_empty_directories(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

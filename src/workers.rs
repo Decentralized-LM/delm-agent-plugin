@@ -21,80 +21,32 @@ use tokio::{
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>;
 
-const DISABLED_FEATURES: &[&str] = &[
-    "hooks",
-    "plugins",
-    "multi_agent",
-    "multi_agent_v2",
-    "memories",
-    "external_agent_memory_import",
-    "recommended_plugins",
-    "tool_suggest",
-    "apps",
-    "shell_snapshot",
-    "network_proxy",
-    "in_app_browser",
-    "browser_use",
-    "browser_use_external",
-    "computer_use",
-    "remote_plugin",
-];
-
-// These optional integrations also require a parent capability that remains
-// explicitly disabled. A removed optional flag must not break a newer host.
-const OPTIONAL_FEATURE_GUARDS: &[(&str, &str)] = &[
-    ("multi_agent_v2", "multi_agent"),
-    ("external_agent_memory_import", "memories"),
-    ("recommended_plugins", "plugins"),
-    ("tool_suggest", "plugins"),
-    ("remote_plugin", "plugins"),
-];
-
-/// Session overrides only: never edit the user's native configuration or credentials.
-pub fn stock_overrides(settings: &Value, run_dir: &Path) -> Result<Value> {
-    let mut config = json!({
-        "features": {}, "agents":{"enabled":false},
-        "skills":{"include_instructions":false}, "cloud":{"skills":{"enabled":false}},
-        "orchestrator":{"mcp":{"enabled":false}}, "include_apps_instructions":false,
-        "memories":{"generate_memories":false,"use_memories":false},
-        "notify":[], "allow_login_shell":false, "web_search":"live",
-        "shell_environment_policy":{"inherit":"none","set":{}},
-        "projects":{}, "mcp_servers":{}
-    });
-    for feature in DISABLED_FEATURES {
-        config["features"][*feature] = json!(false);
-    }
-    config["features"]["view_image"] = json!(true);
-    config["features"]["default_mode_request_user_input"] = json!(true);
-    for path in [
-        run_dir.to_path_buf(),
-        run_dir.join("workspace"),
-        run_dir.join("workspace/worker-1"),
-        run_dir.join("workspace/worker-2"),
-    ] {
-        config["projects"][path.to_string_lossy().as_ref()] = json!({"trust_level":"untrusted"});
-    }
-    for name in setting_names(settings, "stock_mcp_servers")? {
-        config["mcp_servers"][name] = json!({"enabled":false});
-    }
-    // Tables merge in Codex. Empty tables do not clear the user's configured
-    // variables; blank each previously observed key and verify again at launch.
-    for name in setting_names(settings, "stock_environment_keys")? {
-        config["shell_environment_policy"]["set"][name] = json!("");
-    }
-    Ok(config)
+/// Only project/session overrides captured through the native host are reapplied.
+/// Ordinary capabilities, credentials and shell configuration remain native.
+pub fn stock_overrides(settings: &Value, _run_dir: &Path) -> Result<Value> {
+    let overrides = settings
+        .get("native_config_overrides")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    ensure!(
+        overrides.is_object(),
+        "Native configuration overrides must be an object"
+    );
+    Ok(overrides)
 }
 
-fn setting_names<'a>(settings: &'a Value, key: &str) -> Result<Vec<&'a str>> {
-    let Some(value) = settings.get(key) else {
-        return Ok(Vec::new());
-    };
-    value
-        .as_array()
-        .context("Invalid stock configuration inventory")?
-        .iter()
-        .map(|name| name.as_str().context("Invalid stock configuration name"))
-        .collect()
+/// Config/read on a separate app-server describes that server, not the live
+/// parent. Never turn this structural check into an assertion of full parity.
+pub fn verify_stock_configuration(response: &Value, requirements: &Value) -> Result<()> {
+    ensure!(
+        response.get("config").is_some_and(Value::is_object),
+        "Codex omitted effective configuration"
+    );
+    ensure!(
+        requirements.get("requirements").is_some(),
+        "Codex omitted managed-policy evidence"
+    );
+    Ok(())
 }
 
 fn toml_literal(value: &Value) -> Result<String> {
@@ -144,130 +96,6 @@ fn account_identity(current: &Value) -> Result<Value> {
     }
 }
 
-/// Validate supported config/read and configRequirements/read responses before
-/// starting threads. Managed settings win over CLI flags, so flags alone are not proof.
-pub fn verify_stock_configuration(response: &Value, requirements: &Value) -> Result<()> {
-    let config = response
-        .get("config")
-        .context("Codex omitted effective configuration")?;
-    let required = requirements
-        .get("requirements")
-        .context("Codex omitted managed-policy evidence")?;
-    for feature in DISABLED_FEATURES {
-        let value = &config["features"][*feature];
-        let disabled = |value: &Value| {
-            value.as_bool() == Some(false)
-                || value.get("enabled").and_then(Value::as_bool) == Some(false)
-        };
-        let guarded_absence = value.is_null()
-            && OPTIONAL_FEATURE_GUARDS.iter().any(|(optional, guard)| {
-                optional == feature && disabled(&config["features"][*guard])
-            });
-        ensure!(
-            disabled(value) || guarded_absence,
-            "Codex did not disable worker capability {feature}"
-        );
-        ensure!(
-            required["featureRequirements"][*feature].as_bool() != Some(true),
-            "Managed policy requires worker capability {feature}"
-        );
-    }
-    ensure!(
-        required.get("hooks").is_none_or(Value::is_null),
-        "Managed hooks are unavailable in isolated DeLM workers"
-    );
-    ensure!(
-        required.get("network").is_none_or(Value::is_null),
-        "DeLM cannot preserve this managed network policy in private workers; no task was started"
-    );
-    for profile in ["delm_worker_1", "delm_worker_2"] {
-        ensure!(
-            config["permissions"].get(profile).is_none(),
-            "The native configuration already defines reserved permission profile {profile}; DeLM will not merge unrelated grants into worker authority"
-        );
-    }
-    for pointer in [
-        "/agents/enabled",
-        "/skills/include_instructions",
-        "/cloud/skills/enabled",
-        "/orchestrator/mcp/enabled",
-        "/include_apps_instructions",
-        "/memories/generate_memories",
-        "/memories/use_memories",
-        "/allow_login_shell",
-    ] {
-        ensure!(
-            config.pointer(pointer).and_then(Value::as_bool) == Some(false),
-            "Codex did not isolate worker setting {pointer}"
-        );
-    }
-    ensure!(
-        config["notify"].as_array().is_some_and(Vec::is_empty),
-        "Codex retained external notifications"
-    );
-    ensure!(
-        config["web_search"].as_str() == Some("live"),
-        "The selected Codex policy does not allow live web search for DeLM workers"
-    );
-    ensure!(
-        required["allowedWebSearchModes"].is_null()
-            || required["allowedWebSearchModes"]
-                .as_array()
-                .is_some_and(|modes| modes.iter().any(|mode| mode.as_str() == Some("live"))),
-        "Managed policy does not allow live web search for DeLM workers"
-    );
-    ensure!(
-        config["features"]["view_image"].as_bool() == Some(true)
-            || config["features"]["view_image"]["enabled"].as_bool() == Some(true),
-        "Codex did not enable private image inspection for DeLM workers"
-    );
-    ensure!(
-        config["features"]["default_mode_request_user_input"].as_bool() == Some(true)
-            || config["features"]["default_mode_request_user_input"]["enabled"].as_bool()
-                == Some(true),
-        "Codex does not support worker clarification in Default mode; update Codex before starting DeLM"
-    );
-    if let Some(servers) = config["mcp_servers"].as_object() {
-        ensure!(
-            servers
-                .values()
-                .all(|server| server["enabled"].as_bool() == Some(false)),
-            "An external MCP server was added or could not be disabled; start DeLM again after reviewing the configuration"
-        );
-    }
-    ensure!(
-        config
-            .pointer("/shell_environment_policy/inherit")
-            .and_then(Value::as_str)
-            == Some("none"),
-        "Codex retained inherited tool environment"
-    );
-    if let Some(values) = config
-        .pointer("/shell_environment_policy/set")
-        .and_then(Value::as_object)
-    {
-        ensure!(
-            values.values().all(|value| value.as_str() == Some("")),
-            "An explicit tool environment variable changed or could not be isolated; start DeLM again"
-        );
-    }
-    let layers = response["layers"]
-        .as_array()
-        .context("Codex omitted configuration-layer evidence")?;
-    ensure!(
-        layers
-            .iter()
-            .all(
-                |layer| layer.pointer("/name/type").and_then(Value::as_str) != Some("project")
-                    || layer["disabledReason"]
-                        .as_str()
-                        .is_some_and(|reason| !reason.is_empty())
-            ),
-        "Codex retained trusted project configuration in a private worker"
-    );
-    Ok(())
-}
-
 struct ProbeDirectory(PathBuf);
 impl Drop for ProbeDirectory {
     fn drop(&mut self) {
@@ -283,14 +111,13 @@ pub async fn verify_lifecycle_hooks(
     request: &StartRequest,
     binding: &crate::lifecycle::Binding,
 ) -> Result<()> {
+    if let Some(listing) = request.auth_settings.get("startup_hook_listing") {
+        return crate::lifecycle::validate_hook_listing(listing, &binding.executable);
+    }
     let path = std::env::temp_dir().join(format!("delm-hook-metadata-{}", uuid::Uuid::new_v4()));
     fs::DirBuilder::new().mode(0o700).create(&path)?;
     let probe = ProbeDirectory(path.canonicalize()?);
-    let mut config = stock_overrides(&request.auth_settings, &probe.0)?;
-    // Hook discovery needs these parent capabilities. No thread or tool executes
-    // here, and inherited MCP servers and tool environment remain disabled.
-    config["features"]["hooks"] = json!(true);
-    config["features"]["plugins"] = json!(true);
+    let config = stock_overrides(&request.auth_settings, &probe.0)?;
     let mut rpc = RpcClient::spawn_with_config(request, &probe.0, config).await?;
     let verified = async {
         rpc.initialize().await?;
@@ -314,6 +141,18 @@ pub async fn stock_request(
     model: Option<String>,
     effort: Option<String>,
     seconds: u64,
+) -> Result<StartRequest> {
+    stock_request_with_parent_turn(project, task, context, model, effort, seconds, None).await
+}
+
+pub async fn stock_request_with_parent_turn(
+    project: PathBuf,
+    task: String,
+    context: String,
+    model: Option<String>,
+    effort: Option<String>,
+    seconds: u64,
+    parent_turn: Option<String>,
 ) -> Result<StartRequest> {
     let project = project
         .canonicalize()
@@ -345,6 +184,9 @@ pub async fn stock_request(
     fs::create_dir(&probe_path)?;
     fs::set_permissions(&probe_path, fs::Permissions::from_mode(0o700))?;
     let probe = ProbeDirectory(probe_path.canonicalize()?);
+    let parent = std::env::var("CODEX_THREAD_ID")
+        .ok()
+        .filter(|id| !id.is_empty());
     let mut request = StartRequest {
         project: project.clone(),
         task,
@@ -355,114 +197,570 @@ pub async fn stock_request(
         reasoning_effort: None,
         service_tier: None,
         auth_home,
-        auth_settings: json!({}),
+        auth_settings: json!({"parent_thread_id":parent,"host_version":version}),
         host_executable,
         seconds,
-        policy: json!({"approval_policy":"never", "sandbox":{"type":"workspace-write","network_access":true},
-            "file_system":{"kind":"restricted","entries":[
-                {"path":{"type":"special","value":{"kind":"root"}},"access":"read"},
-                {"path":{"type":"path","path":project},"access":"write"}]},
-            "network":"enabled","network_proxy_active":false}),
+        policy: json!({}),
     };
     let mut rpc = RpcClient::spawn(&request, &probe.0).await?;
     rpc.initialize().await?;
-    let account = rpc
-        .request("account/read", json!({"refreshToken":false}))
-        .await?;
-    request.auth_settings["account_identity"] = account_identity(&account)?;
-    request.auth_settings["host_version"] = json!(version);
-    let base = rpc
-        .request("config/read", json!({"includeLayers":true,"cwd":probe.0}))
-        .await?;
-    let cfg = &base["config"];
-    request.auth_settings["stock_mcp_servers"] = json!(
+    let (account, project_config, requirements, hooks) = tokio::try_join!(
+        rpc.request("account/read", json!({"refreshToken":false})),
+        rpc.request("config/read", json!({"includeLayers":true,"cwd":project})),
+        rpc.request("configRequirements/read", Value::Null),
+        rpc.request("hooks/list", json!({"cwds":[project]}))
+    )?;
+    // Validate trust from this already-running metadata host, avoiding a second
+    // host and another round of native integration initialization at launch.
+    request.auth_settings["startup_hook_listing"] = hooks;
+    verify_stock_configuration(&project_config, &requirements)?;
+    if !account["account"].is_null() {
+        request.auth_settings["account_identity"] = account_identity(&account)?;
+    }
+    if let Some(turn) = parent_turn {
+        let parent = parent
+            .as_deref()
+            .context("A captured invocation must identify its parent Codex thread")?;
+        let inputs = read_invocation_inputs(&rpc, parent, &turn).await?;
+        request.auth_settings["parent_turn_id"] = json!(turn);
+        request.auth_settings["invocation_inputs"] = json!(inputs);
+    }
+    let cfg = &project_config["config"];
+    let mut project_overrides = json!({});
+    if let Some(layers) = project_config["layers"].as_array() {
+        for layer in layers {
+            if layer["name"]["type"] == "project" && layer["disabledReason"].is_null() {
+                for key in layer["config"]
+                    .as_object()
+                    .context("Invalid native project config layer")?
+                    .keys()
+                {
+                    if let Some(value) = cfg.get(key).filter(|value| !value.is_null()) {
+                        project_overrides[key] = without_nulls(value);
+                    }
+                }
+            }
+        }
+    }
+    request.auth_settings["native_config_overrides"] = project_overrides.clone();
+    request.auth_settings["configured_mcp_server_names"] = json!(
         cfg["mcp_servers"]
             .as_object()
-            .map(|map| map.keys().collect::<Vec<_>>())
+            .map(|servers| servers.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default()
     );
-    request.auth_settings["stock_environment_keys"] = json!(
-        cfg.pointer("/shell_environment_policy/set")
-            .and_then(Value::as_object)
-            .map(|map| map.keys().collect::<Vec<_>>())
-            .unwrap_or_default()
-    );
-    let project_config = rpc
-        .request("config/read", json!({"includeLayers":false,"cwd":project}))
-        .await?;
-    let cfg = &project_config["config"];
-    let parent = if let Ok(id) = std::env::var("CODEX_THREAD_ID") {
-        rpc.request("thread/read", json!({"threadId":id,"includeTurns":false}))
-            .await
-            .ok()
-    } else {
-        None
-    };
-    let parent_thread = parent.as_ref().map(|value| &value["thread"]);
-    let parent_model = parent_thread
-        .and_then(|thread| thread["model"].as_str())
-        .map(str::to_owned);
-    let source = if model.is_some() {
-        "explicit"
-    } else if parent_model.is_some() {
-        "persisted-parent-thread"
-    } else {
-        "saved-project-config"
-    };
-    request.model = if let Some(model) = model
-        .or(parent_model)
-        .or_else(|| cfg["model"].as_str().map(str::to_owned))
-    {
-        model
-    } else {
-        let models = rpc.request("model/list", json!({})).await?;
-        request.auth_settings["model_selection_source"] = json!("native-model-default");
-        models["data"]
-            .as_array()
-            .and_then(|models| {
-                models
-                    .iter()
-                    .find(|model| model["isDefault"].as_bool() == Some(true))
-            })
-            .and_then(|model| model["model"].as_str())
-            .context("Codex did not identify a default model; choose --model explicitly")?
-            .to_owned()
-    };
-    if request
-        .auth_settings
-        .get("model_selection_source")
-        .is_none()
-    {
-        request.auth_settings["model_selection_source"] = json!(source);
+    if let Some(developer) = cfg["developer_instructions"].as_str() {
+        request.auth_settings["saved_developer_instructions"] = json!(developer);
     }
-    request.reasoning_effort = effort
-        .or_else(|| {
-            parent_thread
-                .and_then(|thread| thread["reasoningEffort"].as_str())
-                .map(str::to_owned)
-        })
-        .or_else(|| cfg["model_reasoning_effort"].as_str().map(str::to_owned));
-    request.service_tier = cfg["service_tier"].as_str().map(str::to_owned);
-    request.model_provider = parent_thread
-        .and_then(|thread| thread["modelProvider"].as_str())
-        .or_else(|| cfg["model_provider"].as_str())
-        .unwrap_or("openai")
-        .to_owned();
-    ensure!(
-        request.model_provider == "openai",
-        "DeLM currently supports the native OpenAI provider only"
-    );
+    request.auth_settings["model_selection_source"] = json!(if model.is_some() {
+        "explicit"
+    } else if parent.is_some() {
+        "native-parent-fork"
+    } else {
+        "native-saved-project-config"
+    });
+    request.auth_settings["effort_selection_source"] = json!(if effort.is_some() {
+        "explicit"
+    } else if parent.is_some() {
+        "native-parent-fork"
+    } else {
+        "native-saved-project-config"
+    });
+    let mut fork_params = json!({"cwd":project,"config":project_overrides,"ephemeral":true});
+    let method = if let Some(parent) = &parent {
+        fork_params["threadId"] = json!(parent);
+        fork_params["excludeTurns"] = json!(true);
+        fork_params["deferGoalContinuation"] = json!(true);
+        "thread/fork"
+    } else {
+        "thread/start"
+    };
+    if let Some(model) = model {
+        fork_params["model"] = json!(model);
+    }
+    if let Some(effort) = effort {
+        fork_params["config"]["model_reasoning_effort"] = json!(effort);
+    }
+    let inherited = rpc
+        .request(method, fork_params)
+        .await
+        .context("Codex could not resolve native session settings without starting a model turn")?;
+    request.model = inherited["model"]
+        .as_str()
+        .context("Codex omitted inherited model")?
+        .into();
+    request.model_provider = inherited["modelProvider"]
+        .as_str()
+        .context("Codex omitted inherited provider")?
+        .into();
+    request.reasoning_effort = inherited["reasoningEffort"].as_str().map(str::to_owned);
+    request.service_tier = inherited["serviceTier"].as_str().map(str::to_owned);
+    request.policy = native_policy(&inherited, cfg, &project)?;
+    let mut native_settings = json!({});
+    for field in [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "activePermissionProfile",
+        "sandbox",
+        "disabledPluginIds",
+        "instructionSources",
+    ] {
+        if let Some(value) = inherited.get(field) {
+            native_settings[field] = value.clone();
+        }
+    }
+    request.auth_settings["native_thread_settings"] = native_settings;
+    let skills = rpc
+        .request("skills/list", json!({"cwds":[project],"forceReload":true}))
+        .await?;
+    request.auth_settings["skills_manifest"] = skill_manifest(&skills)?;
+    let mut roots = std::collections::BTreeSet::new();
+    for skill in request.auth_settings["skills_manifest"].as_array().unwrap() {
+        if skill["scope"] == "repo" {
+            let path = Path::new(skill["path"].as_str().context("Missing skill path")?);
+            if let Some(root) = path.parent().and_then(Path::parent) {
+                roots.insert(root.to_path_buf());
+            }
+        }
+    }
+    request.auth_settings["project_skill_roots"] = json!(roots);
+    let fork_id = inherited
+        .pointer("/thread/id")
+        .and_then(Value::as_str)
+        .context("Codex omitted fork identity")?;
+    request.auth_settings["mcp_manifest"] = mcp_manifest(&rpc, fork_id).await?;
+    request.auth_settings["capability_report"] = json!({
+        "source":if parent.is_some() { "native-parent-fork-and-saved-project-config" } else { "standalone-native-saved-project-config" },
+        "exact_live_session_parity":false,
+        "preserved":["saved_model_settings","native_permission_profile","native_auth_home","inherited_process_environment","saved_skills_plugins_hooks_and_mcp_configuration"],
+        "unverified":if parent.is_some() { json!(["parent_process_cli_configuration_overrides","live_parent_tool_connections","live_parent_instruction_provider"]) } else { json!([]) },
+        "saved_configuration_sha256":digest_json(cfg)?,
+        "skills":request.auth_settings["skills_manifest"],
+        "mcp_servers":request.auth_settings["mcp_manifest"],
+        "note":if parent.is_some() { "This host does not export the active parent process configuration. Saved native configuration is preserved; exact live-session parity is not established." } else { "Standalone invocation uses the native saved project configuration; there is no live parent session to compare." }
+    });
+    // The metadata fork never receives turn/start and cannot spend model tokens.
+    rpc.request("thread/unsubscribe", json!({"threadId":fork_id}))
+        .await?;
     rpc.shutdown(&[]).await?;
-    // Reopen with the observed MCP/environment names disabled, then check the
-    // actual effective values. Discovery alone is not an isolation guarantee.
-    let mut verified = RpcClient::spawn(&request, &probe.0).await?;
-    verified.initialize().await?;
-    verified.verify_account(&request).await?;
-    verified.shutdown(&[]).await?;
     crate::compatibility::qualify(&request).await.with_context(|| {
         format!("Installed {version} did not pass DeLM compatibility checks. No model turn was started. Update Codex or DeLM and retry; your Codex installation was not changed")
     })?;
     Ok(request)
+}
+
+/// Wait only for the host to persist the submitted turn. Hooks can run before
+/// this write; native history is the source of truth for images and mentions.
+pub async fn read_invocation_inputs(
+    rpc: &RpcClient,
+    parent: &str,
+    turn_id: &str,
+) -> Result<Vec<Value>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let history = rpc
+            .request(
+                "thread/read",
+                json!({"threadId":parent,"includeTurns":true}),
+            )
+            .await?;
+        if let Some(inputs) = invocation_inputs(&history, turn_id)? {
+            return Ok(inputs);
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "Codex has not made this invocation's complete native inputs available. No worker was started; retry DeLM after the submitted turn appears in the session"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+pub fn invocation_inputs(history: &Value, turn_id: &str) -> Result<Option<Vec<Value>>> {
+    let turns = history
+        .pointer("/thread/turns")
+        .and_then(Value::as_array)
+        .context("Codex omitted native turn history")?;
+    let Some(turn) = turns
+        .iter()
+        .find(|turn| turn["id"].as_str() == Some(turn_id))
+    else {
+        return Ok(None);
+    };
+    ensure!(
+        turn["itemsView"].is_null() || turn["itemsView"] == "full",
+        "Codex returned summarized invocation inputs; full native user content is required"
+    );
+    let items = turn["items"]
+        .as_array()
+        .context("Codex omitted native turn items")?;
+    let mut result = Vec::new();
+    for item in items.iter().filter(|item| item["type"] == "userMessage") {
+        result.extend(
+            item["content"]
+                .as_array()
+                .context("Codex omitted native user input content")?
+                .iter()
+                .cloned(),
+        );
+    }
+    Ok((!result.is_empty()).then_some(result))
+}
+
+fn without_nulls(value: &Value) -> Value {
+    match value {
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(key, value)| (key.clone(), without_nulls(value)))
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.iter().map(without_nulls).collect()),
+        _ => value.clone(),
+    }
+}
+
+fn digest_json(value: &Value) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
+}
+
+/// Public, non-secret evidence. Contents are hashed so matching names alone do
+/// not masquerade as matching skill instructions.
+pub fn skill_manifest(listing: &Value) -> Result<Value> {
+    use sha2::{Digest, Sha256};
+    let entries = listing["data"]
+        .as_array()
+        .context("Codex omitted the skill inventory")?;
+    let mut manifest = Vec::new();
+    for entry in entries {
+        for skill in entry["skills"]
+            .as_array()
+            .context("Codex omitted skill entries")?
+        {
+            let path = skill["path"]
+                .as_str()
+                .context("Codex omitted a skill path")?;
+            let enabled = skill["enabled"]
+                .as_bool()
+                .context("Codex omitted a skill enablement state")?;
+            let content_hash = match fs::read(path) {
+                Ok(bytes) => Some(format!("{:x}", Sha256::digest(bytes))),
+                Err(_) if !enabled => None,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Enabled skill {} is not readable at {path}", skill["name"])
+                    });
+                }
+            };
+            manifest.push(json!({"name":skill["name"],"path":path,"scope":skill["scope"],"enabled":enabled,
+                "plugin_id":skill["pluginId"],"instructions_sha256":content_hash,"dependencies_sha256":digest_json(&skill["dependencies"])?}));
+        }
+    }
+    manifest.sort_by_key(|skill| {
+        (
+            skill["name"].as_str().unwrap_or("").to_owned(),
+            skill["path"].as_str().unwrap_or("").to_owned(),
+        )
+    });
+    Ok(json!(manifest))
+}
+
+pub async fn mcp_manifest(rpc: &RpcClient, thread: &str) -> Result<Value> {
+    let mut cursor = Value::Null;
+    let mut result = Vec::new();
+    for _ in 0..64 {
+        let page = rpc
+            .request(
+                "mcpServerStatus/list",
+                json!({"threadId":thread,"detail":"toolsAndAuthOnly","limit":100,"cursor":cursor}),
+            )
+            .await?;
+        for server in page["data"]
+            .as_array()
+            .context("Codex omitted MCP inventory")?
+        {
+            let name = server["name"]
+                .as_str()
+                .context("Codex omitted MCP server name")?;
+            result.push(json!({"name":name,"plugin_id":server["pluginId"],"auth_status":server["authStatus"],
+                "tools_sha256":digest_json(&server["tools"])?,"tool_count":server["tools"].as_object().map_or(0, serde_json::Map::len),
+                "discovery_failed":!server["toolsError"].is_null()}));
+        }
+        let next = page
+            .get("nextCursor")
+            .context("Codex omitted MCP inventory pagination")?;
+        if next.is_null() {
+            result.sort_by_key(|entry| entry["name"].as_str().unwrap_or("").to_owned());
+            return Ok(json!(result));
+        }
+        ensure!(
+            next.is_string() && next != &cursor,
+            "Invalid MCP pagination"
+        );
+        cursor = next.clone();
+    }
+    bail!("MCP inventory exceeded pagination limit")
+}
+
+/// Make original project skills discoverable when an ignored local skill was
+/// deliberately absent from the code snapshot. Ordinary files remain accessed
+/// through native Codex permissions, not a manufactured private HOME.
+pub async fn prepare_worker_capabilities(rpc: &RpcClient, request: &StartRequest) -> Result<()> {
+    if let Some(roots) = request.auth_settings["project_skill_roots"]
+        .as_array()
+        .filter(|roots| !roots.is_empty())
+    {
+        rpc.request("skills/extraRoots/set", json!({"extraRoots":roots}))
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn verify_worker_capabilities(
+    rpc: &RpcClient,
+    request: &StartRequest,
+    project: &Path,
+    thread: &str,
+) -> Result<Value> {
+    let (skills, tools) = tokio::try_join!(
+        rpc.request("skills/list", json!({"cwds":[project],"forceReload":true})),
+        mcp_manifest(rpc, thread)
+    )?;
+    let skills = skill_manifest(&skills)?;
+    compare_capability_manifests(
+        &request.auth_settings["skills_manifest"],
+        &skills,
+        &request.auth_settings["mcp_manifest"],
+        &tools,
+    )?;
+    verify_skill_resources(&request.auth_settings["skills_manifest"], &skills)?;
+    let compared = request.auth_settings["skills_manifest"].is_array()
+        && request.auth_settings["mcp_manifest"].is_array();
+    Ok(
+        json!({"skills":skills,"mcp_servers":tools,"matches_saved_configuration":compared,"exact_live_session_parity":false}),
+    )
+}
+
+pub fn compare_capability_manifests(
+    expected_skills: &Value,
+    actual_skills: &Value,
+    expected_tools: &Value,
+    actual_tools: &Value,
+) -> Result<()> {
+    if let Some(expected) = expected_skills.as_array() {
+        let actual = actual_skills
+            .as_array()
+            .context("Worker omitted skill manifest")?;
+        for skill in expected.iter().filter(|skill| skill["enabled"] == true) {
+            ensure!(
+                actual.iter().any(|candidate| [
+                    "name",
+                    "enabled",
+                    "plugin_id",
+                    "instructions_sha256",
+                    "dependencies_sha256"
+                ]
+                .iter()
+                .all(|key| candidate[*key] == skill[*key])),
+                "Worker is missing or changed the enabled skill {}. Its instructions and dependencies must match before DeLM can start",
+                skill["name"]
+            );
+        }
+        for skill in actual.iter().filter(|skill| skill["enabled"] == true) {
+            ensure!(
+                expected.iter().any(|candidate| [
+                    "name",
+                    "enabled",
+                    "plugin_id",
+                    "instructions_sha256",
+                    "dependencies_sha256"
+                ]
+                .iter()
+                .all(|key| candidate[*key] == skill[*key])),
+                "Worker unexpectedly enabled a different skill {}. Its setup must match the source session",
+                skill["name"]
+            );
+        }
+    }
+    if let Some(expected) = expected_tools.as_array() {
+        let actual = actual_tools
+            .as_array()
+            .context("Worker omitted MCP manifest")?;
+        for server in expected {
+            ensure!(
+                actual.iter().any(|candidate| [
+                    "name",
+                    "plugin_id",
+                    "auth_status",
+                    "tools_sha256",
+                    "discovery_failed"
+                ]
+                .iter()
+                .all(|key| candidate[*key] == server[*key])),
+                "Worker MCP tools differ for {}. Restore that integration before starting DeLM; it was not disabled",
+                server["name"]
+            );
+        }
+        for server in actual.iter().filter(|server| {
+            !server["name"]
+                .as_str()
+                .is_some_and(|name| matches!(name, "delm_coordination_1" | "delm_coordination_2"))
+        }) {
+            ensure!(
+                expected.iter().any(|candidate| [
+                    "name",
+                    "plugin_id",
+                    "auth_status",
+                    "tools_sha256",
+                    "discovery_failed"
+                ]
+                .iter()
+                .all(|key| candidate[*key] == server[*key])),
+                "Worker unexpectedly changed its MCP integration {}",
+                server["name"]
+            );
+        }
+    }
+    Ok(())
+}
+
+fn verify_skill_resources(expected: &Value, actual: &Value) -> Result<()> {
+    let Some(expected) = expected.as_array() else {
+        return Ok(());
+    };
+    let actual = actual.as_array().context("Worker omitted skill evidence")?;
+    for skill in expected.iter().filter(|skill| skill["enabled"] == true) {
+        let source = Path::new(
+            skill["path"]
+                .as_str()
+                .context("Missing source skill path")?,
+        );
+        let candidates = actual
+            .iter()
+            .filter(|candidate| {
+                candidate["enabled"] == true
+                    && candidate["name"] == skill["name"]
+                    && candidate["instructions_sha256"] == skill["instructions_sha256"]
+            })
+            .collect::<Vec<_>>();
+        let mut matched = false;
+        for candidate in candidates {
+            let selected = Path::new(
+                candidate["path"]
+                    .as_str()
+                    .context("Missing worker skill path")?,
+            );
+            // Global/plugin skills retain the same original resources. Compare
+            // complete bundles only when workspace rebinding changed the path.
+            if source.canonicalize()? == selected.canonicalize()? {
+                matched = true;
+                break;
+            }
+            if skill_bundle(source.parent().context("Invalid source skill path")?)?
+                == skill_bundle(selected.parent().context("Invalid worker skill path")?)?
+            {
+                matched = true;
+                break;
+            }
+        }
+        ensure!(
+            matched,
+            "Worker skill {} is missing supporting files from its original bundle",
+            skill["name"]
+        );
+    }
+    Ok(())
+}
+
+fn skill_bundle(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, String>> {
+    use sha2::{Digest, Sha256};
+    fn visit(
+        root: &Path,
+        path: &Path,
+        files: &mut std::collections::BTreeMap<PathBuf, String>,
+    ) -> Result<()> {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path)? {
+                visit(root, &entry?.path(), files)?;
+            }
+        } else if metadata.is_file() {
+            let mut file = fs::File::open(path)?;
+            let mut digest = Sha256::new();
+            std::io::copy(&mut file, &mut digest)?;
+            files.insert(
+                path.strip_prefix(root)?.to_path_buf(),
+                format!("{:x}", digest.finalize()),
+            );
+        } else if metadata.file_type().is_symlink() {
+            fs::metadata(path).with_context(|| {
+                format!("Skill resource link is unavailable: {}", path.display())
+            })?;
+            files.insert(
+                path.strip_prefix(root)?.to_path_buf(),
+                format!("link:{}", fs::read_link(path)?.to_string_lossy()),
+            );
+        } else {
+            bail!(
+                "Unsupported special file in skill bundle: {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+    let mut files = std::collections::BTreeMap::new();
+    visit(root, root, &mut files)?;
+    Ok(files)
+}
+
+fn native_policy(native: &Value, config: &Value, project: &Path) -> Result<Value> {
+    let sandbox = &native["sandbox"];
+    let kind = sandbox["type"]
+        .as_str()
+        .context("Codex omitted inherited sandbox")?;
+    let network = kind == "dangerFullAccess" || sandbox["networkAccess"].as_bool() == Some(true);
+    let mut entries =
+        vec![json!({"path":{"type":"special","value":{"kind":"root"}},"access":"read"})];
+    if kind == "workspaceWrite" {
+        entries.push(json!({"path":{"type":"path","path":project},"access":"write"}));
+        if let Some(roots) = sandbox["writableRoots"].as_array() {
+            entries.extend(
+                roots
+                    .iter()
+                    .map(|path| json!({"path":{"type":"path","path":path},"access":"write"})),
+            );
+        }
+    }
+    if let Some(id) = native
+        .pointer("/activePermissionProfile/id")
+        .and_then(Value::as_str)
+        && let Some(filesystem) = config["permissions"][id]["filesystem"].as_object()
+    {
+        entries.clear();
+        for (path, access) in filesystem {
+            let source = match path.as_str() {
+                ":root" | "/" => json!({"type":"special","value":{"kind":"root"}}),
+                ":project_roots" => json!({"type":"special","value":{"kind":"project_roots"}}),
+                ":minimal" => json!({"type":"special","value":{"kind":"minimal"}}),
+                ":tmpdir" => json!({"type":"special","value":{"kind":"tmpdir"}}),
+                ":slash_tmp" => json!({"type":"special","value":{"kind":"slash_tmp"}}),
+                path if path.contains(['*', '?', '[', ']', '{', '}']) => {
+                    json!({"type":"glob_pattern","pattern":path})
+                }
+                path if path.starts_with('/') => json!({"type":"path","path":path}),
+                _ => bail!(
+                    "Native permission rule {path} needs a board-transfer authorization adapter"
+                ),
+            };
+            entries.push(json!({"path":source,"access":access}));
+        }
+    }
+    Ok(
+        json!({"approval_policy":native["approvalPolicy"],"sandbox":sandbox,
+        "file_system":if kind == "dangerFullAccess" { json!({"kind":"unrestricted"}) } else { json!({"kind":"restricted","entries":entries}) },
+        "network":if network { "enabled" } else { "restricted" },"network_proxy_active":false}),
+    )
 }
 
 pub struct RpcClient {
@@ -475,7 +773,6 @@ pub struct RpcClient {
     pub pid: u32,
     pub launch_dir: PathBuf,
     reader: tokio::task::JoinHandle<()>,
-    run_dir: PathBuf,
 }
 
 impl RpcClient {
@@ -502,10 +799,7 @@ impl RpcClient {
             request.auth_settings.is_object(),
             "Native account settings must be an object"
         );
-        ensure!(
-            request.model_provider == "openai",
-            "This release supports the native OpenAI provider; no provider was changed."
-        );
+
         let run_dir = run_dir.canonicalize()?;
         let launches = run_dir.join("launches");
         fs::create_dir_all(&launches)?;
@@ -525,12 +819,8 @@ impl RpcClient {
         }
         command
             .current_dir(&run_dir)
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("HOME", std::env::var_os("HOME").context("HOME is unset")?)
             .env("CODEX_HOME", &request.auth_home)
-            .env("TERM", "dumb")
-            .env("LANG", "en_US.UTF-8")
+            .env("DELM_WORKER_SESSION", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(stderr)
@@ -619,7 +909,6 @@ impl RpcClient {
             pid,
             launch_dir,
             reader,
-            run_dir,
         };
         Ok(client)
     }
@@ -639,19 +928,14 @@ impl RpcClient {
                 "The native account changed before the workers started. No model turn was started; reopen DeLM with the current account."
             );
         }
-        let requirements = self.request("configRequirements/read", json!({})).await?;
-        for cwd in [
-            &self.run_dir,
-            &self.run_dir.join("workspace/worker-1"),
-            &self.run_dir.join("workspace/worker-2"),
-        ] {
-            if cwd.is_dir() {
-                let config = self
-                    .request("config/read", json!({"includeLayers":true,"cwd":cwd}))
-                    .await?;
-                verify_stock_configuration(&config, &requirements)?;
-            }
-        }
+        let requirements = self.request("configRequirements/read", Value::Null).await?;
+        let config = self
+            .request(
+                "config/read",
+                json!({"includeLayers":true,"cwd":request.project}),
+            )
+            .await?;
+        verify_stock_configuration(&config, &requirements)?;
         Ok(())
     }
 
@@ -665,18 +949,11 @@ impl RpcClient {
     }
 
     pub async fn request(&self, method: &str, mut params: Value) -> Result<Value> {
-        if matches!(method, "thread/start" | "thread/resume") {
+        if method == "thread/start" {
             let cwd = params["cwd"]
                 .as_str()
-                .context("Worker thread needs a private working directory")?
+                .context("Worker thread needs a working directory")?
                 .to_owned();
-            let config = self
-                .request_raw("config/read", json!({"includeLayers":true,"cwd":cwd}))
-                .await?;
-            let requirements = self
-                .request_raw("configRequirements/read", json!({}))
-                .await?;
-            verify_stock_configuration(&config, &requirements)?;
             params["environments"] =
                 json!([{"environmentId":"local","cwd":cwd,"runtimeWorkspaceRoots":[cwd]}]);
             params["runtimeWorkspaceRoots"] = json!([cwd]);
@@ -798,6 +1075,9 @@ pub fn text_input(text: &str) -> Value {
     json!({"type":"text","text":text,"text_elements":[]})
 }
 
+/// Board-transfer policy and the small set of DeLM session additions. The
+/// profile is for privileged board I/O only; native forks inherit their own
+/// permissions. Do not select this profile as the worker's Codex sandbox.
 pub fn worker_config(
     request: &StartRequest,
     run_dir: &Path,
@@ -818,269 +1098,225 @@ pub fn worker_config(
         .policy
         .get("file_system")
         .context("Host did not supply its effective filesystem policy")?;
-    let kind = native
-        .get("kind")
-        .and_then(Value::as_str)
-        .context("Host supplied an invalid filesystem policy")?;
+    let unrestricted = native["kind"].as_str() == Some("unrestricted");
     ensure!(
-        ["restricted", "unrestricted"].contains(&kind),
-        "External filesystem sandboxes cannot be safely translated into private worker permissions"
+        unrestricted || native["kind"].as_str() == Some("restricted"),
+        "The host's external filesystem policy needs a native transfer authorization adapter"
     );
-    let unrestricted = kind == "unrestricted";
-    let entries = native
-        .get("entries")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    // Convert the authorized request's policy representation. We copy no broad
-    // write grants: source scopes are mapped into this worker's private tree.
-    let mut literals = Vec::<(PathBuf, String)>::new();
-    let mut root_access = if unrestricted { "write" } else { "deny" }.to_owned();
-    let mut explicit_root = false;
-    let mut minimal = unrestricted;
-    for entry in &entries {
-        let access = entry
-            .get("access")
-            .and_then(Value::as_str)
-            .context("Invalid inherited filesystem access")?;
-        ensure!(
-            ["read", "write", "deny"].contains(&access),
-            "Unknown inherited filesystem access"
-        );
-        let path = entry
-            .get("path")
-            .context("Missing inherited filesystem path")?;
-        match path.get("type").and_then(Value::as_str) {
-            Some("path") => {
-                let path = PathBuf::from(
-                    path.get("path")
-                        .and_then(Value::as_str)
-                        .context("Invalid inherited filesystem path")?,
-                );
-                ensure!(
-                    path.is_absolute()
-                        && !path
-                            .components()
-                            .any(|p| matches!(p, std::path::Component::ParentDir)),
-                    "Nonlocal inherited permission paths are unsupported"
-                );
-                let path = canonical_permission_path(&path)?;
-                literals.push((path, access.to_owned()));
-            }
-            Some("glob_pattern") => {
-                bail!(
-                    "Inherited filesystem globs require exact native and board transfer enforcement; this release refuses that policy without widening it"
-                );
-            }
-            Some("special") => {
-                let value = &path["value"];
-                match value.get("kind").and_then(Value::as_str) {
-                    Some("root") => {
-                        let priority = |value: &str| match value {
-                            "deny" => 3,
-                            "write" => 2,
-                            _ => 1,
-                        };
-                        if !explicit_root || priority(access) > priority(&root_access) {
-                            root_access = access.to_owned();
-                        }
-                        explicit_root = true;
-                    }
-                    Some("minimal") => {
-                        ensure!(
-                            access != "deny",
-                            "A denied platform runtime cannot support private worker tools"
-                        );
-                        minimal = true;
-                    }
-                    Some("project_roots") => {
-                        let subpath = value.get("subpath").and_then(Value::as_str).unwrap_or(".");
-                        ensure!(
-                            !Path::new(subpath).is_absolute()
-                                && !Path::new(subpath)
-                                    .components()
-                                    .any(|p| matches!(p, std::path::Component::ParentDir)),
-                            "Invalid inherited project permission subpath"
-                        );
-                        literals.push((original.join(subpath), access.to_owned()));
-                    }
-                    Some("tmpdir" | "slash_tmp") => {
-                        ensure!(
-                            access != "deny",
-                            "Explicit temporary-directory denials require a qualified private environment mapping"
-                        );
-                    }
-                    _ => bail!(
-                        "Unknown inherited filesystem special path cannot be preserved safely"
-                    ),
-                }
-            }
-            _ => bail!("Unknown inherited filesystem policy shape"),
-        }
-    }
-    minimal |= root_access != "deny";
-    ensure!(
-        minimal,
-        "The selected permission policy does not grant the platform reads needed by private worker tools"
-    );
-    let access_at = |path: &Path| -> Result<&str> {
-        let priority = |access: &str| match access {
-            "deny" => 3,
-            "write" => 2,
-            _ => 1,
-        };
-        let mut matching = Vec::new();
-        for (scope, access) in &literals {
-            if permission_relative(path, scope)?.is_some() {
-                matching.push((scope, access));
-            }
-        }
-        Ok(matching
-            .into_iter()
-            .max_by_key(|(scope, access)| (scope.components().count(), priority(access)))
-            .map(|(_, access)| access.as_str())
-            .unwrap_or(&root_access))
-    };
-    let project_access = access_at(&original)?;
-    let mut scoped_write = false;
-    for (path, access) in &literals {
-        scoped_write |= access == "write"
-            && permission_relative(path, &original)?.is_some()
-            && access_at(path)? == "write";
-    }
-    ensure!(
-        project_access == "write" || scoped_write,
-        "The selected Codex permissions do not allow implementation in this project"
-    );
-    let env_root = run_dir.join("environment").join(format!("worker-{worker}"));
     let mut filesystem = serde_json::Map::new();
-    filesystem.insert(":minimal".into(), json!("read"));
-    filesystem.insert(run_dir.to_string_lossy().into_owned(), json!("deny"));
+    let mut project_access = if unrestricted { "write" } else { "deny" }.to_owned();
+    let mut rules = Vec::new();
+    if let Some(entries) = native["entries"].as_array() {
+        for entry in entries {
+            let access = entry["access"]
+                .as_str()
+                .context("Invalid inherited filesystem access")?;
+            ensure!(
+                ["read", "write", "deny"].contains(&access),
+                "Unknown inherited filesystem access"
+            );
+            let source = &entry["path"];
+            match source["type"].as_str() {
+                Some("path") => {
+                    let scope = canonical_permission_path(Path::new(
+                        source["path"].as_str().context("Invalid inherited path")?,
+                    ))?;
+                    ensure!(
+                        scope.is_absolute(),
+                        "Inherited permission paths must be absolute"
+                    );
+                    rules.push((scope, access.to_owned()));
+                }
+                Some("special") => match source["value"]["kind"].as_str() {
+                    Some("root") => project_access = access.to_owned(),
+                    Some("project_roots") => {
+                        let suffix = source["value"]["subpath"].as_str().unwrap_or("");
+                        ensure!(
+                            !Path::new(suffix).is_absolute()
+                                && !Path::new(suffix)
+                                    .components()
+                                    .any(|part| matches!(part, std::path::Component::ParentDir)),
+                            "Invalid inherited project subpath"
+                        );
+                        rules.push((original.join(suffix), access.to_owned()));
+                    }
+                    Some("minimal" | "tmpdir" | "slash_tmp") => {}
+                    _ => {
+                        bail!("Unknown inherited special path needs native transfer authorization")
+                    }
+                },
+                Some("glob_pattern") => bail!(
+                    "Inherited filesystem globs need native board-transfer authorization; their restrictions were not removed"
+                ),
+                _ => bail!("Unknown inherited filesystem policy shape"),
+            }
+        }
+    }
+    rules.sort_by_key(|(path, access)| {
+        (
+            path.components().count(),
+            match access.as_str() {
+                "deny" => 2,
+                "write" => 1,
+                _ => 0,
+            },
+        )
+    });
+    for (scope, access) in &rules {
+        if permission_relative(&original, scope)?.is_some() {
+            project_access = access.clone();
+        }
+    }
     filesystem.insert(
         project.to_string_lossy().into_owned(),
         json!(project_access),
     );
-    filesystem.insert(env_root.to_string_lossy().into_owned(), json!("write"));
-    let assets = run_dir.join("attachments");
-    if assets.is_dir() {
-        filesystem.insert(assets.to_string_lossy().into_owned(), json!("read"));
-    }
-    let mut readable_toolchains = Vec::new();
-    for path in toolchain_roots() {
-        let platform = ["/usr", "/bin", "/sbin", "/System"]
-            .iter()
-            .any(|base| path.starts_with(base));
-        let mut explicitly_denied = false;
-        for (scope, access) in &literals {
-            explicitly_denied |= access == "deny" && permission_relative(&path, scope)?.is_some();
-        }
-        if permission_relative(&path, &original)?.is_none()
-            && permission_relative(&path, &run_dir)?.is_none()
-            && (access_at(&path)? != "deny" || (platform && minimal && !explicitly_denied))
-        {
-            filesystem.insert(path.to_string_lossy().into_owned(), json!("read"));
-            readable_toolchains.push(path);
+    for (scope, access) in rules {
+        if let Some(relative) = permission_relative(&scope, &original)? {
+            filesystem.insert(
+                project.join(relative).to_string_lossy().into_owned(),
+                json!(access),
+            );
         }
     }
-    for (scope, access) in &literals {
-        if let Some(relative) = permission_relative(scope, &original)? {
-            let mapped: PathBuf = project.join(relative).components().collect();
-            let key = mapped.to_string_lossy().into_owned();
-            let prior = filesystem.get(&key).and_then(Value::as_str);
-            if prior != Some("deny") && !(prior == Some("write") && access == "read") {
-                filesystem.insert(key, json!(access));
+    ensure!(
+        filesystem
+            .values()
+            .any(|access| access.as_str() == Some("write")),
+        "The selected Codex permissions do not allow implementation in this project"
+    );
+    let profile = format!("delm_worker_{worker}");
+    Ok(
+        json!({"default_permissions":profile, "permissions":{profile.clone():{"filesystem":filesystem}}}),
+    )
+}
+
+/// Build a native fork without replacing the parent's permission profile or
+/// reducing its capabilities. Coordination is a native MCP extension supplied by
+/// the runtime; thread/fork has no dynamicTools parameter.
+pub fn worker_thread_request(
+    request: &StartRequest,
+    project: &Path,
+    worker: usize,
+    additions: Value,
+    instructions: &str,
+) -> Result<(&'static str, Value)> {
+    ensure!((1..=2).contains(&worker), "Worker identity must be 1 or 2");
+    let parent = request.auth_settings["parent_thread_id"].as_str();
+    let mut config = stock_overrides(&request.auth_settings, project)?;
+    rebase_project_paths(&mut config, &request.project, project);
+    let mut additions = additions
+        .as_object()
+        .context("Worker additions must be an object")?
+        .clone();
+    if let Some(servers) = additions.get("mcp_servers").and_then(Value::as_object) {
+        for name in servers.keys() {
+            let configured = config["mcp_servers"].get(name).is_some()
+                || request.auth_settings["configured_mcp_server_names"]
+                    .as_array()
+                    .is_some_and(|names| {
+                        names
+                            .iter()
+                            .any(|candidate| candidate.as_str() == Some(name))
+                    })
+                || request.auth_settings["mcp_manifest"]
+                    .as_array()
+                    .is_some_and(|manifest| {
+                        manifest
+                            .iter()
+                            .any(|server| server["name"].as_str() == Some(name))
+                    });
+            ensure!(
+                !configured,
+                "Your Codex setup already defines MCP server {name}. DeLM cannot replace an existing integration; choose a different name for that server before starting DeLM"
+            );
+        }
+    }
+    // These are board I/O scopes, not native permission replacements.
+    additions.remove("permissions");
+    additions.remove("default_permissions");
+    merge_config(&mut config, &Value::Object(additions));
+    let inherited_developer = request.auth_settings["saved_developer_instructions"]
+        .as_str()
+        .unwrap_or("");
+    let developer = if inherited_developer.is_empty() {
+        instructions.to_owned()
+    } else {
+        format!("{inherited_developer}\n\n{instructions}")
+    };
+    let Some(parent) = parent else {
+        // The explicit host protocol can supply an independent task and native
+        // policy. Public plugin invocations always use the bound parent fork.
+        let mut params = json!({"cwd":project,"config":config,"model":request.model,
+            "modelProvider":request.model_provider,"serviceTier":request.service_tier,
+            "approvalPolicy":request.policy["approval_policy"],"developerInstructions":developer,
+            "dynamicTools":crate::board::tool_definitions(),"ephemeral":false});
+        if let Some(effort) = &request.reasoning_effort {
+            params["config"]["model_reasoning_effort"] = json!(effort);
+        }
+        params["sandbox"] = json!(match request.policy["file_system"]["kind"].as_str() {
+            Some("unrestricted") => "danger-full-access",
+            _ => "workspace-write",
+        });
+        return Ok(("thread/start", params));
+    };
+    let mut params = json!({"threadId":parent,"cwd":project,"config":config,
+        "developerInstructions":developer,"runtimeWorkspaceRoots":[project],
+        "excludeTurns":true,"deferGoalContinuation":true,"ephemeral":false});
+    if let Some(turn) = request.auth_settings["parent_turn_id"].as_str() {
+        params["beforeTurnId"] = json!(turn);
+    }
+    // Explicit user choices are forwarded; otherwise native fork inheritance
+    // selects the source thread's saved values, including permission settings.
+    if request.auth_settings["model_selection_source"] == "explicit" {
+        params["model"] = json!(request.model);
+    }
+    if request.auth_settings["effort_selection_source"] == "explicit" {
+        params["config"]["model_reasoning_effort"] = json!(request.reasoning_effort);
+    }
+    Ok(("thread/fork", params))
+}
+
+fn merge_config(target: &mut Value, overlay: &Value) {
+    match (target, overlay) {
+        (Value::Object(target), Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                if let Some(existing) = target.get_mut(key) {
+                    merge_config(existing, value);
+                } else {
+                    target.insert(key.clone(), value.clone());
+                }
             }
         }
-        if access == "deny" {
-            ensure!(
-                permission_relative(&project, scope)?.is_none()
-                    && permission_relative(&env_root, scope)?.is_none(),
-                "Inherited deny rule covers private worker storage"
-            );
-            filesystem.insert(scope.to_string_lossy().into_owned(), json!("deny"));
+        (target, overlay) => *target = overlay.clone(),
+    }
+}
+
+fn rebase_project_paths(value: &mut Value, original: &Path, project: &Path) {
+    match value {
+        Value::String(text) => {
+            if let Ok(relative) = Path::new(text).strip_prefix(original) {
+                *text = project.join(relative).to_string_lossy().into_owned();
+            }
         }
-    }
-    for path in [&request.auth_home, &original] {
-        filesystem.insert(path.to_string_lossy().into_owned(), json!("deny"));
-    }
-    let controls = Path::new("/tmp")
-        .canonicalize()?
-        .join(format!("delm-{}", unsafe { libc::geteuid() }));
-    filesystem.insert(controls.to_string_lossy().into_owned(), json!("deny"));
-    let network_policy = request
-        .policy
-        .get("network")
-        .and_then(Value::as_str)
-        .context("Host did not supply its effective network policy")?;
-    ensure!(
-        ["restricted", "enabled"].contains(&network_policy),
-        "Unknown inherited network policy"
-    );
-    let network = network_policy == "enabled";
-    if network {
-        ensure!(
-            request
-                .policy
-                .get("network_proxy_active")
-                .and_then(Value::as_bool)
-                == Some(false),
-            "Managed or unqualified network restrictions cannot be widened into unrestricted worker network access"
-        );
-    }
-    let profile = format!("delm_worker_{worker}");
-    let path = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .filter(|path| path.is_absolute())
-        .filter_map(|path| path.canonicalize().ok())
-        .filter(|path| {
-            readable_toolchains
-                .iter()
-                .any(|root| path.starts_with(root))
-        })
-        .chain(
-            ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-                .into_iter()
-                .map(PathBuf::from),
-        )
-        .collect::<Vec<_>>();
-    let mut rustup_home = None;
-    if let Some(original_home) = std::env::var_os("HOME") {
-        let rustup = PathBuf::from(original_home).join(".rustup");
-        if rustup.is_dir()
-            && readable_toolchains
-                .iter()
-                .any(|root| rustup.starts_with(root))
-        {
-            rustup_home = Some(rustup);
+        Value::Array(values) => {
+            for value in values {
+                rebase_project_paths(value, original, project);
+            }
         }
+        Value::Object(values) => {
+            let prior = std::mem::take(values);
+            for (key, mut value) in prior {
+                let key = Path::new(&key)
+                    .strip_prefix(original)
+                    .map(|relative| project.join(relative).to_string_lossy().into_owned())
+                    .unwrap_or(key);
+                rebase_project_paths(&mut value, original, project);
+                values.insert(key, value);
+            }
+        }
+        _ => {}
     }
-    let environment = crate::development::prepare(&env_root, &path, rustup_home.as_deref())?;
-    let mut config = stock_overrides(&request.auth_settings, &run_dir)?;
-    if !network {
-        config["web_search"] = json!("disabled");
-    }
-    config["default_permissions"] = json!(profile);
-    config["permissions"] = json!({profile.clone():{"filesystem":filesystem,"network":{"enabled":network,"allow_local_binding":network}}});
-    config["projects"][project.to_string_lossy().as_ref()] = json!({"trust_level":"untrusted"});
-    config["shell_environment_policy"]["set"]
-        .as_object_mut()
-        .context("Invalid private environment")?
-        .extend(
-            environment
-                .as_object()
-                .context("Invalid private environment")?
-                .clone(),
-        );
-    config["model_reasoning_effort"] = json!(request.reasoning_effort);
-    config["model_provider"] = json!(request.model_provider);
-    config["model"] = json!(request.model);
-    config["approval_policy"] = json!("never");
-    if request.reasoning_effort.is_none() {
-        config
-            .as_object_mut()
-            .unwrap()
-            .remove("model_reasoning_effort");
-    }
-    Ok(config)
 }
 
 // Canonicalize existing ancestors even when a denied leaf does not exist yet.
@@ -1143,136 +1379,73 @@ fn permission_relative(path: &Path, root: &Path) -> Result<Option<PathBuf>> {
     }
 }
 
-/// Check the qualified stock response before dispatching a model turn. Its legacy
-/// projection exposes write/network bounds; granular denials also require the
-/// bound named profile and native sandbox qualification.
+/// Validate actual native fork settings without substituting a new approval or
+/// sandbox policy. Unknown live-parent fields remain explicit in the report.
 pub fn verify_thread_response(
     request: &StartRequest,
-    run_dir: &Path,
+    _run_dir: &Path,
     project: &Path,
     worker: usize,
     response: &Value,
 ) -> Result<()> {
-    ensure!((1..=2).contains(&worker), "unbound worker identity");
-    let project = project.canonicalize()?;
-    let environment = run_dir
+    ensure!((1..=2).contains(&worker), "Unbound worker identity");
+    ensure!(
+        Path::new(
+            response["cwd"]
+                .as_str()
+                .context("Codex omitted effective cwd")?
+        )
         .canonicalize()?
-        .join("environment")
-        .join(format!("worker-{worker}"));
-    let cwd = PathBuf::from(
-        response["cwd"]
-            .as_str()
-            .context("Codex omitted effective working directory")?,
-    )
-    .canonicalize()?;
-    ensure!(
-        cwd == project,
-        "Codex changed the private worker working directory"
+            == project.canonicalize()?,
+        "Codex changed the worker working directory"
     );
-    ensure!(
-        response["model"].as_str() == Some(request.model.as_str()),
-        "Codex changed the selected model"
-    );
-    ensure!(
-        response["modelProvider"].as_str() == Some(request.model_provider.as_str()),
-        "Codex changed the selected provider"
-    );
+    for (field, expected) in [
+        ("model", request.model.as_str()),
+        ("modelProvider", request.model_provider.as_str()),
+    ] {
+        ensure!(
+            response[field].as_str() == Some(expected),
+            "Codex changed inherited {field}"
+        );
+    }
     if let Some(effort) = &request.reasoning_effort {
         ensure!(
-            response["reasoningEffort"].as_str() == Some(effort.as_str()),
-            "Codex changed the selected reasoning effort"
+            response["reasoningEffort"].as_str() == Some(effort),
+            "Codex changed inherited reasoning effort"
         );
     }
     if let Some(tier) = &request.service_tier {
         ensure!(
-            response["serviceTier"].as_str() == Some(tier.as_str()),
-            "Codex changed the selected service tier"
+            response["serviceTier"].as_str() == Some(tier),
+            "Codex changed inherited service tier"
         );
     }
-    ensure!(
-        response["approvalPolicy"].as_str() == Some("never"),
-        "Codex did not enforce private worker approval restrictions"
-    );
-    ensure!(
-        response["activePermissionProfile"]["id"].as_str()
-            == Some(format!("delm_worker_{worker}").as_str()),
-        "Codex did not select the bound private permission profile"
-    );
-    let sandbox = &response["sandbox"];
-    ensure!(
-        sandbox["type"].as_str() == Some("workspaceWrite"),
-        "Codex did not return a restricted private workspace sandbox"
-    );
-    ensure!(
-        sandbox["excludeTmpdirEnvVar"].as_bool() == Some(true)
-            && sandbox["excludeSlashTmp"].as_bool() == Some(true),
-        "Codex retained shared temporary-directory write access"
-    );
-    let network = request.policy["network"].as_str() == Some("enabled");
-    ensure!(
-        sandbox["networkAccess"].as_bool() == Some(network),
-        "Codex changed the effective worker network policy"
-    );
-    let roots = sandbox["writableRoots"]
-        .as_array()
-        .context("Codex omitted private writable roots")?;
-    let mut environment_present = false;
-    for root in roots {
-        let root = PathBuf::from(root.as_str().context("Invalid effective writable root")?)
-            .canonicalize()?;
+    if let Some(approval) = request.policy.get("approval_policy") {
         ensure!(
-            root.starts_with(&project) || root.starts_with(&environment),
-            "Codex granted writable access outside this worker's project and environment"
+            &response["approvalPolicy"] == approval,
+            "Codex changed inherited approval policy"
         );
-        environment_present |= root == environment;
     }
-    ensure!(
-        environment_present,
-        "Codex omitted the worker's private environment write scope"
-    );
-    if let Some(roots) = response["runtimeWorkspaceRoots"].as_array() {
-        for root in roots {
-            let root = PathBuf::from(root.as_str().context("Invalid runtime workspace root")?)
-                .canonicalize()?;
+    if let Some(expected) = request.auth_settings.get("native_thread_settings") {
+        for field in [
+            "approvalsReviewer",
+            "activePermissionProfile",
+            "disabledPluginIds",
+        ] {
+            if let Some(value) = expected.get(field) {
+                ensure!(&response[field] == value, "Codex changed inherited {field}");
+            }
+        }
+        if let Some(sandbox) = expected.get("sandbox") {
             ensure!(
-                root.starts_with(&project) || root.starts_with(&environment),
-                "Codex attached an unrelated runtime workspace"
+                response["sandbox"]["type"] == sandbox["type"],
+                "Codex changed inherited sandbox mode"
+            );
+            ensure!(
+                response["sandbox"]["networkAccess"] == sandbox["networkAccess"],
+                "Codex changed inherited network permission"
             );
         }
-    }
-    let environments = response
-        .pointer("/thread/environments")
-        .and_then(Value::as_array)
-        .context("Codex omitted native worker execution-environment evidence")?;
-    ensure!(
-        environments.len() == 1 && environments[0]["environmentId"].as_str() == Some("local"),
-        "Codex selected an execution environment outside the local worker"
-    );
-    let selected = &environments[0];
-    ensure!(
-        PathBuf::from(
-            selected["cwd"]
-                .as_str()
-                .context("Codex omitted execution cwd")?
-        )
-        .canonicalize()?
-            == project,
-        "Codex changed the local execution working directory"
-    );
-    let roots = selected["runtimeWorkspaceRoots"]
-        .as_array()
-        .context("Codex omitted local execution workspace roots")?;
-    ensure!(
-        !roots.is_empty(),
-        "Codex omitted local execution workspace roots"
-    );
-    for root in roots {
-        let root =
-            PathBuf::from(root.as_str().context("Invalid local execution root")?).canonicalize()?;
-        ensure!(
-            root.starts_with(&project) || root.starts_with(&environment),
-            "Codex attached an unrelated execution workspace"
-        );
     }
     ensure!(
         response
@@ -1282,36 +1455,4 @@ pub fn verify_thread_response(
         "Codex omitted native thread identity"
     );
     Ok(())
-}
-
-fn toolchain_roots() -> Vec<PathBuf> {
-    let mut roots = vec![
-        PathBuf::from("/usr"),
-        PathBuf::from("/bin"),
-        PathBuf::from("/sbin"),
-        PathBuf::from("/System"),
-        PathBuf::from("/Library/Developer"),
-        PathBuf::from("/Library/Frameworks/Python.framework"),
-        PathBuf::from("/opt/homebrew"),
-    ];
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        for path in [
-            ".rustup",
-            ".cargo/bin",
-            ".nvm/versions/node",
-            ".bun/bin",
-            ".pyenv/versions",
-            ".local/share/fnm/node-versions",
-            ".local/share/mise/installs/node",
-            ".local/share/mise/installs/python",
-        ] {
-            roots.push(home.join(path));
-        }
-    }
-    roots
-        .into_iter()
-        .filter(|p| p.exists())
-        .filter_map(|p| p.canonicalize().ok())
-        .collect()
 }

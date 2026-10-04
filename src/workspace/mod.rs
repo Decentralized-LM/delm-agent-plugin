@@ -1,4 +1,4 @@
-//! Private saved-state capture. The original is opened read-only, never repaired.
+//! Private saved-state capture and guarded delivery to the selected project.
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -755,9 +755,11 @@ fn validate_links_except(
     Ok(())
 }
 
+mod delivery;
 mod git;
 mod prepare;
 mod result;
+pub use delivery::{DeliveryReport, RecoveryReport, deliver_result, preserve_partial_and_cleanup};
 pub use prepare::{prepare, retain_result, retain_result_with_policy};
 pub use result::{ResultPolicy, RuntimeLink, manifest_for_result};
 

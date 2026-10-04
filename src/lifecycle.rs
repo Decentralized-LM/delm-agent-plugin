@@ -1,4 +1,4 @@
-//! Native hook ownership. Hooks never read chat transcripts or start workers.
+//! Explicit invocation capture and native ownership. No chat transcript parsing.
 //!
 //! A launch is bound by a one-use PreToolUse handshake, not by a directory or a
 //! guessed active thread. Supported native-bound runs use events and exact owner
@@ -99,6 +99,27 @@ pub struct Delivery {
 pub struct HookAction {
     pub output: Option<Value>,
     pub delivery: Option<Delivery>,
+    pub launch: Option<CapturedInvocation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapturedInvocation {
+    pub session_id: String,
+    pub invocation_id: String,
+    pub turn_id: String,
+    pub project: PathBuf,
+    pub task: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub captured_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CaptureLaunch {
+    Pending,
+    Started { process: ProcessIdentity },
+    Failed { message: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +134,10 @@ pub struct HookInput {
     pub tool_name: Option<String>,
     #[serde(default)]
     pub tool_input: Value,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
 }
 
 fn validate_id(value: &str) -> Result<()> {
@@ -206,6 +231,19 @@ fn lock(root: &Path, session: &str) -> Result<File> {
 fn lock_for(root: &Path, session: &str, budget: Duration) -> Result<File> {
     validate_id(session)?;
     let path = root.join(format!("session-{session}.lock"));
+    lock_path(&path, budget)
+}
+
+fn capture_lock(root: &Path, session: &str, turn: &str) -> Result<File> {
+    validate_id(session)?;
+    validate_id(turn)?;
+    lock_path(
+        &root.join(format!("capture-{session}-{turn}.lock")),
+        Duration::from_millis(500),
+    )
+}
+
+fn lock_path(path: &Path, budget: Duration) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -426,8 +464,77 @@ pub fn launch_prefix(executable: &Path) -> String {
 /// Parse only the fields needed to route native events. Unknown event kinds and
 /// ordinary tool calls are silent; no directory is created until an explicit run.
 pub fn prepare_hook(input: HookInput, executable: &Path) -> Result<HookAction> {
+    if std::env::var_os("DELM_WORKER_SESSION").is_some() {
+        return Ok(HookAction::default());
+    }
     if input.agent_id.as_ref().is_some_and(|id| !id.is_empty()) {
         return Ok(HookAction::default());
+    }
+    if input.hook_event_name == "UserPromptSubmit"
+        && let Some(task) = input.prompt.as_deref().and_then(explicit_task)
+    {
+        let captured_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        let project = input
+            .cwd
+            .as_ref()
+            .context("Native invocation omitted the project")?
+            .canonicalize()?;
+        let turn_id = input
+            .turn_id
+            .as_ref()
+            .context("Native invocation omitted its turn")?;
+        validate_id(&input.session_id)?;
+        validate_id(turn_id)?;
+        let root = root(true)?.context("Missing lifecycle storage")?;
+        // This lock is distinct from the session lock acquired by PreToolUse
+        // below. Concurrent duplicate hooks must not create different launches.
+        let _capture_lock = capture_lock(&root, &input.session_id, turn_id)?;
+        // A repeated delivery reconnects to exactly the same captured invocation.
+        let capture_path = root.join(format!("input-{}-{turn_id}.json", input.session_id));
+        if capture_path.try_exists()? {
+            let capture: CapturedInvocation = read_private(&capture_path)?;
+            ensure!(
+                capture.task == task && capture.project == project,
+                "Repeated native invocation changed its input"
+            );
+            return Ok(HookAction {
+                output: Some(capture_context(&capture, executable)),
+                ..Default::default()
+            });
+        }
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let quoted = project.to_string_lossy().replace('\'', "'\\''");
+        let command = format!(
+            "{}--launch-token {nonce} --project '{quoted}'",
+            launch_prefix(&executable.canonicalize()?)
+        );
+        // Reuse the exact native owner binding; no tool approval is fabricated.
+        prepare_hook(
+            serde_json::from_value(
+                serde_json::json!({"hook_event_name":"PreToolUse","session_id":input.session_id,
+            "turn_id":turn_id,"tool_name":"Bash","tool_input":{"command":command}}),
+            )?,
+            executable,
+        )?;
+        let capture = CapturedInvocation {
+            session_id: input.session_id,
+            invocation_id: nonce,
+            turn_id: turn_id.clone(),
+            project,
+            task: task.into(),
+            path: capture_path,
+            captured_at_ms,
+        };
+        write_private(&capture.path, &capture)?;
+        record_capture_launch(&capture, &CaptureLaunch::Pending)?;
+        return Ok(HookAction {
+            output: Some(capture_context(&capture, executable)),
+            launch: Some(capture),
+            ..Default::default()
+        });
     }
     if input.hook_event_name == "PreToolUse" {
         if !matches!(
@@ -628,7 +735,72 @@ pub fn prepare_hook(input: HookInput, executable: &Path) -> Result<HookAction> {
             run_id,
             signal: registration.pending.unwrap(),
         }),
+        launch: None,
     })
+}
+
+fn explicit_task(prompt: &str) -> Option<&str> {
+    let tail = prompt.strip_prefix("$delm:run")?;
+    if !tail.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let task = tail.trim_start();
+    (!task.is_empty()).then_some(task)
+}
+
+fn capture_context(capture: &CapturedInvocation, executable: &Path) -> Value {
+    let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"));
+    serde_json::json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":format!(
+        "DeLM captured this explicit invocation and is starting its runtime. Do not reconstruct the task, start another run, or implement it in the parent. Monitor with: {} follow --capture {}. Read progress and relay actual worker questions/approval requests. The runtime forwards the native user input and inherited context. Follow the DeLM skill for updates and the final project handoff.",quote(executable),quote(&capture.path))}})
+}
+
+pub fn read_capture(path: &Path) -> Result<CapturedInvocation> {
+    let capture: CapturedInvocation = read_private(path)?;
+    ensure!(
+        capture.path == path && capture.path.parent() == root(false)?.as_deref(),
+        "Invalid captured invocation path"
+    );
+    Ok(capture)
+}
+
+pub fn record_capture_launch(capture: &CapturedInvocation, state: &CaptureLaunch) -> Result<()> {
+    write_private(&capture.path.with_extension("launch.json"), state)
+}
+
+pub fn capture_launch(capture: &CapturedInvocation) -> Result<Option<CaptureLaunch>> {
+    let path = capture.path.with_extension("launch.json");
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    read_private(&path).map(Some)
+}
+
+pub fn ensure_not_worker() -> Result<()> {
+    ensure!(
+        std::env::var_os("DELM_WORKER_SESSION").is_none(),
+        "This session is already a DeLM worker. Continue the current run instead of launching another DeLM runtime"
+    );
+    Ok(())
+}
+
+pub fn consume_capture(capture: &CapturedInvocation) -> Result<Binding> {
+    let root = root(false)?.context("Missing native invocation")?;
+    let registration: Registration = read_private(&session_path(&root, &capture.session_id))?;
+    consume_launch_for(
+        &capture.invocation_id,
+        Some(&capture.session_id),
+        registration.binding.owner,
+    )
+}
+
+pub fn capture_run_id(capture: &CapturedInvocation) -> Result<Option<String>> {
+    let root = root(false)?.context("Missing native invocation")?;
+    let record: Registration = read_private(&session_path(&root, &capture.session_id))?;
+    ensure!(
+        record.binding.invocation_id == capture.invocation_id,
+        "This capture belongs to an earlier invocation"
+    );
+    Ok(record.run_id)
 }
 
 /// Consume exactly one native launch, before any worker/model work. The runtime
@@ -899,6 +1071,97 @@ pub(crate) mod tests {
         if let Some(root) = root(false).unwrap() {
             let _ = fs::remove_file(session_path(&root, &binding.session_id));
         }
+    }
+
+    pub(crate) struct CaptureFixture {
+        _temp: tempfile::TempDir,
+        pub executable: PathBuf,
+        pub project: PathBuf,
+        pub session: String,
+        pub turn: String,
+    }
+
+    impl CaptureFixture {
+        pub fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let base = temp.path().canonicalize().unwrap();
+            let executable = base.join("bin/delm");
+            let project = base.join("project");
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            fs::create_dir_all(base.join("hooks")).unwrap();
+            fs::create_dir_all(&project).unwrap();
+            fs::write(&executable, "native capture fixture").unwrap();
+            fs::write(base.join("hooks/hooks.json"), "{}").unwrap();
+            Self {
+                _temp: temp,
+                executable,
+                project,
+                session: uuid::Uuid::new_v4().to_string(),
+                turn: uuid::Uuid::new_v4().to_string(),
+            }
+        }
+        pub fn submit(&self) -> HookAction {
+            let mut event = input("UserPromptSubmit", &self.session, &self.turn);
+            event.cwd = Some(self.project.clone());
+            event.prompt = Some("$delm:run Do a small task".into());
+            prepare_hook(event, &self.executable).unwrap()
+        }
+    }
+    impl Drop for CaptureFixture {
+        fn drop(&mut self) {
+            if let Some(root) = root(false).unwrap() {
+                // Remove only the UUID-namespaced records created by this test.
+                for entry in fs::read_dir(root).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .contains(&self.session)
+                    {
+                        let _ = fs::remove_file(path);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_native_invocation_has_one_launch_and_stable_capture() {
+        let fixture = CaptureFixture::new();
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let pending: Vec<_> = (0..8).map(|_| scope.spawn(|| fixture.submit())).collect();
+            pending
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect()
+        });
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.launch.is_some())
+                .count(),
+            1
+        );
+        assert!(
+            results
+                .iter()
+                .all(|result| result.output == results[0].output)
+        );
+        let capture = results
+            .into_iter()
+            .find_map(|result| result.launch)
+            .unwrap();
+        assert!(capture.captured_at_ms > 0);
+        assert_eq!(
+            read_capture(&capture.path).unwrap().captured_at_ms,
+            capture.captured_at_ms
+        );
+        assert!(matches!(
+            capture_launch(&capture).unwrap(),
+            Some(CaptureLaunch::Pending)
+        ));
+        assert!(capture_run_id(&capture).unwrap().is_none());
     }
 
     #[test]

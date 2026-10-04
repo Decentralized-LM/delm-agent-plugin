@@ -1,9 +1,6 @@
 //! Capability checks for the installed Codex, independent of its release number.
 //! The probe uses disposable files and never starts a model turn.
-use crate::{
-    protocol::StartRequest,
-    workers::{RpcClient, verify_thread_response, worker_config},
-};
+use crate::protocol::StartRequest;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -51,33 +48,22 @@ pub async fn host_version(host: &Path) -> Result<String> {
 // Extra methods, parameters and response fields are intentionally accepted.
 const CLIENT_METHODS: &[(&str, &[&str])] = &[
     (
-        "thread/start",
+        "thread/fork",
         &[
+            "threadId",
             "cwd",
-            "model",
-            "modelProvider",
-            "serviceTier",
-            "permissions",
             "config",
             "developerInstructions",
-            "dynamicTools",
+            "beforeTurnId",
+            "deferGoalContinuation",
+            "excludeTurns",
             "ephemeral",
-            "environments",
             "runtimeWorkspaceRoots",
         ],
     ),
     (
         "thread/resume",
-        &[
-            "threadId",
-            "cwd",
-            "model",
-            "modelProvider",
-            "serviceTier",
-            "permissions",
-            "config",
-            "runtimeWorkspaceRoots",
-        ],
+        &["threadId", "cwd", "config", "runtimeWorkspaceRoots"],
     ),
     ("thread/read", &["threadId", "includeTurns"]),
     ("turn/start", &["threadId", "input"]),
@@ -86,16 +72,59 @@ const CLIENT_METHODS: &[(&str, &[&str])] = &[
     ("thread/backgroundTerminals/clean", &["threadId"]),
     ("thread/archive", &["threadId"]),
     (
-        "command/exec",
+        "thread/start",
         &[
-            "command",
             "cwd",
-            "permissionProfile",
-            "timeoutMs",
-            "outputBytesCap",
+            "model",
+            "modelProvider",
+            "serviceTier",
+            "config",
+            "developerInstructions",
+            "dynamicTools",
+            "ephemeral",
+            "environments",
+            "runtimeWorkspaceRoots",
+            "approvalPolicy",
+            "sandbox",
         ],
     ),
-    ("experimentalFeature/list", &["cursor", "limit"]),
+    ("thread/unsubscribe", &["threadId"]),
+    ("config/read", &["cwd", "includeLayers"]),
+    ("configRequirements/read", &[]),
+    ("skills/list", &["cwds", "forceReload"]),
+    ("hooks/list", &["cwds"]),
+    ("skills/extraRoots/set", &["extraRoots"]),
+    (
+        "mcpServerStatus/list",
+        &["threadId", "detail", "limit", "cursor"],
+    ),
+];
+
+const SERVER_METHODS: &[(&str, &[&str])] = &[
+    (
+        "item/tool/call",
+        &["threadId", "turnId", "callId", "tool", "arguments"],
+    ),
+    (
+        "item/tool/requestUserInput",
+        &["threadId", "turnId", "itemId", "questions"],
+    ),
+    (
+        "item/commandExecution/requestApproval",
+        &["threadId", "turnId", "itemId", "availableDecisions"],
+    ),
+    (
+        "item/fileChange/requestApproval",
+        &["threadId", "turnId", "itemId"],
+    ),
+    (
+        "item/permissions/requestApproval",
+        &["threadId", "turnId", "itemId", "permissions"],
+    ),
+    (
+        "mcpServer/elicitation/request",
+        &["threadId", "turnId", "serverName"],
+    ),
 ];
 
 fn method_params<'a>(schema: &'a Value, method: &str) -> Result<&'a Value> {
@@ -130,6 +159,14 @@ fn method_params<'a>(schema: &'a Value, method: &str) -> Result<&'a Value> {
 
 fn check_method(schema: &Value, method: &str, fields: &[&str], client: bool) -> Result<()> {
     let params = method_params(schema, method)?;
+    if fields.is_empty() {
+        ensure!(
+            accepts_wire_value(schema, params, &Value::Null, 0)
+                || accepts_wire_value(schema, params, &json!({}), 0),
+            "Codex changed the zero-argument format of {method}"
+        );
+        return Ok(());
+    }
     let properties = params["properties"]
         .as_object()
         .with_context(|| format!("Codex omitted parameter evidence for {method}"))?;
@@ -163,18 +200,26 @@ fn check_method(schema: &Value, method: &str, fields: &[&str], client: bool) -> 
 // validator. Live thread/configuration and sandbox checks remain authoritative.
 fn wire_sample(field: &str) -> Value {
     match field {
-        "ephemeral" | "includeTurns" => json!(true),
+        "ephemeral"
+        | "includeTurns"
+        | "excludeTurns"
+        | "deferGoalContinuation"
+        | "includeLayers"
+        | "forceReload" => json!(true),
         "config" => json!({}),
         "dynamicTools" => json!(crate::board::tool_definitions()),
         "input" => json!([crate::workers::text_input("compatibility probe")]),
         "environments" => json!([{"environmentId":"local","cwd":"/private/tmp",
             "runtimeWorkspaceRoots":["/private/tmp"]}]),
-        "runtimeWorkspaceRoots" => json!(["/private/tmp"]),
+        "runtimeWorkspaceRoots" | "cwds" | "extraRoots" => json!(["/private/tmp"]),
         "command" => json!(["/bin/sh", "-c", "true"]),
         "timeoutMs" | "outputBytesCap" | "limit" => json!(100),
         "permissions" | "permissionProfile" => json!("delm_worker_1"),
         "modelProvider" => json!("openai"),
         "serviceTier" => json!("fast"),
+        "approvalPolicy" => json!("on-request"),
+        "sandbox" => json!("workspace-write"),
+        "detail" => json!("toolsAndAuthOnly"),
         "cwd" => json!("/private/tmp"),
         _ => json!("compatibility-probe"),
     }
@@ -266,32 +311,77 @@ fn accepts_wire_value(root: &Value, schema: &Value, value: &Value, depth: usize)
     true
 }
 
+fn check_mcp_item_notification(schema: &Value) -> Result<()> {
+    check_method(
+        schema,
+        "item/started",
+        &["threadId", "turnId", "item"],
+        false,
+    )?;
+    let params = method_params(schema, "item/started")?;
+    let item = &params["properties"]["item"];
+    let item = if let Some(reference) = item["$ref"].as_str() {
+        schema
+            .pointer(
+                reference
+                    .strip_prefix('#')
+                    .context("External item schema reference")?,
+            )
+            .context("Missing native item schema")?
+    } else {
+        item
+    };
+    let variant = item
+        .get("oneOf")
+        .or_else(|| item.get("anyOf"))
+        .and_then(Value::as_array)
+        .and_then(|variants| {
+            variants.iter().find(|item| {
+                let name = &item["properties"]["type"];
+                name["const"] == "mcpToolCall"
+                    || name["enum"]
+                        .as_array()
+                        .is_some_and(|names| names.iter().any(|name| name == "mcpToolCall"))
+            })
+        })
+        .context("Codex omitted native mcpToolCall item evidence")?;
+    for field in ["id", "server", "tool", "arguments"] {
+        let property = variant["properties"]
+            .get(field)
+            .with_context(|| format!("Codex omitted native mcpToolCall.{field}"))?;
+        ensure!(
+            field == "arguments"
+                || accepts_wire_value(schema, property, &json!("native-identity"), 0),
+            "Codex changed the native mcpToolCall.{field} identity format"
+        );
+    }
+    Ok(())
+}
+
 fn verify_protocol(client: &Value, server: &Value, notifications: &Value) -> Result<()> {
     for (method, fields) in CLIENT_METHODS {
         check_method(client, method, fields, true)?;
     }
-    check_method(
-        server,
-        "item/tool/call",
-        &["threadId", "turnId", "callId", "tool", "arguments"],
-        false,
-    )?;
-    check_method(
-        server,
-        "item/tool/requestUserInput",
-        &["threadId", "turnId", "itemId", "questions"],
-        false,
-    )?;
+    for (method, fields) in SERVER_METHODS {
+        check_method(server, method, fields, false)?;
+    }
     check_method(
         notifications,
         "item/completed",
         &["threadId", "turnId", "item"],
         false,
     )?;
+    check_mcp_item_notification(notifications)?;
     check_method(
         notifications,
         "turn/completed",
         &["threadId", "turn"],
+        false,
+    )?;
+    check_method(
+        notifications,
+        "serverRequest/resolved",
+        &["threadId", "requestId"],
         false,
     )
 }
@@ -333,170 +423,16 @@ async fn check_protocol(request: &StartRequest, root: &Path) -> Result<()> {
     )
 }
 
-async fn check_clarification_capability(rpc: &RpcClient) -> Result<()> {
-    let mut cursor = Value::Null;
-    for _ in 0..16 {
-        let page = rpc
-            .request(
-                "experimentalFeature/list",
-                json!({"limit":100,"cursor":cursor}),
-            )
-            .await?;
-        let features = page["data"]
-            .as_array()
-            .context("Codex omitted its feature inventory")?;
-        if let Some(feature) = features
-            .iter()
-            .find(|feature| feature["name"].as_str() == Some("default_mode_request_user_input"))
-        {
-            ensure!(
-                feature["enabled"].as_bool() == Some(true)
-                    && feature["stage"].as_str() != Some("removed"),
-                "Codex cannot enable clarification in Default mode; update Codex before starting DeLM"
-            );
-            return Ok(());
-        }
-        let next = page
-            .get("nextCursor")
-            .context("Codex omitted feature pagination")?;
-        if next.is_null() {
-            break;
-        }
-        ensure!(
-            next.is_string() && next != &cursor,
-            "Invalid Codex feature pagination"
-        );
-        cursor = next.clone();
-    }
-    anyhow::bail!(
-        "Codex does not support clarification in Default mode; update Codex before starting DeLM"
-    )
-}
-
-// Positional arguments keep even adversarial path characters out of shell code.
-// Read and append probes use shell builtins only, available on every supported Mac.
-const PROBE_SCRIPT: &str = r#"
-set -eu
-check_read() {
-  if ( IFS= read -r value < "$2" ) 2>/dev/null; then actual=allow; else actual=deny; fi
-  [ "$actual" = "$1" ] || { printf 'unexpected read permission: %s\n' "$2" >&2; exit 1; }
-}
-check_write() {
-  if ( printf 'probe write\n' >> "$2" ) 2>/dev/null; then actual=allow; else actual=deny; fi
-  [ "$actual" = "$1" ] || { printf 'unexpected write permission: %s\n' "$2" >&2; exit 1; }
-}
-check_read allow "$1/canary"
-check_write allow "$1/canary"
-check_read allow "$1/readonly/canary"
-check_write deny "$1/readonly/canary"
-check_read deny "$1/denied/canary"
-check_write deny "$1/denied/canary"
-shift
-for path do
-  check_read deny "$path"
-  check_write deny "$path"
-done
-check_write allow "$HOME/canary"
-check_write allow "$TMPDIR/canary"
-printf 'delm-isolation-ok\n'
-"#;
-
-/// Recheck on each public run: wrapper scripts can keep the same hash
-/// while their backing Codex binary changes. No persistent success cache is used.
+/// Qualify the concrete native protocol, without creating test workers or
+/// launching test commands during every user invocation. The metadata fork in
+/// stock_request separately verifies real inherited native settings.
 pub async fn qualify(request: &StartRequest) -> Result<()> {
     ensure!(
         cfg!(target_os = "macos"),
-        "DeLM compatibility qualification currently supports macOS only"
+        "DeLM currently supports macOS only"
     );
     let probe = Probe::new()?;
-    check_protocol(request, &probe.0).await?;
-    let original = probe.0.join("original");
-    let run = probe.0.join("run");
-    let project = run.join("workspace/worker-1");
-    let peer = run.join("workspace/worker-2");
-    let baseline = run.join("workspace/baseline");
-    let secret = probe.0.join("account-fixture");
-    for path in [
-        &original,
-        &project,
-        &peer,
-        &baseline,
-        &secret,
-        &original.join("readonly"),
-        &original.join("denied"),
-        &project.join("readonly"),
-        &project.join("denied"),
-    ] {
-        fs::create_dir_all(path)?;
-        fs::write(path.join("canary"), "private probe\n")?;
-    }
-    fs::write(run.join("control-token"), "private probe\n")?;
-    let mut fixture = request.clone();
-    fixture.project = original.clone();
-    // Exercise precisely the same translator and named profile as real workers.
-    fixture.policy["file_system"] = json!({"kind":"restricted","entries":[
-        {"path":{"type":"special","value":{"kind":"root"}},"access":"read"},
-        {"path":{"type":"path","path":original},"access":"write"},
-        {"path":{"type":"path","path":original.join("readonly")},"access":"read"},
-        {"path":{"type":"path","path":original.join("denied")},"access":"deny"},
-        {"path":{"type":"path","path":secret},"access":"deny"}]});
-    let config = worker_config(&fixture, &run, &project, 1)?;
-    let mut rpc = RpcClient::spawn(&fixture, &run).await?;
-    rpc.initialize().await?;
-    check_clarification_capability(&rpc).await?;
-    let response = rpc.request("thread/start", json!({"cwd":project,"model":fixture.model,"modelProvider":fixture.model_provider,"serviceTier":fixture.service_tier,
-        "permissions":"delm_worker_1","config":config,"dynamicTools":crate::board::tool_definitions(),"ephemeral":true})).await?;
-    verify_thread_response(&fixture, &run, &project, 1, &response)?;
-    rpc.shutdown(&[]).await?;
-    // command/exec selects a process profile. Supply the same generated config
-    // as CLI overrides, never by writing to the user's CODEX_HOME.
-    let mut rpc = RpcClient::spawn_with_config(&fixture, &run, config).await?;
-    rpc.initialize().await?;
-    let denied = [
-        original.join("canary"),
-        peer.join("canary"),
-        baseline.join("canary"),
-        secret.join("canary"),
-        run.join("control-token"),
-    ];
-    let mut command = vec![
-        json!("/bin/sh"),
-        json!("-c"),
-        json!(PROBE_SCRIPT),
-        json!("delm-compatibility"),
-        json!(project),
-    ];
-    command.extend(denied.iter().map(|path| json!(path)));
-    let result = rpc.request("command/exec", json!({"command":command,"cwd":project,"permissionProfile":"delm_worker_1","timeoutMs":10000,"outputBytesCap":4096})).await;
-    rpc.shutdown(&[]).await?;
-    let result = result?;
-    ensure!(
-        result["exitCode"].as_i64() == Some(0)
-            && result["stdout"]
-                .as_str()
-                .is_some_and(|output| output.trim() == "delm-isolation-ok"),
-        "Codex did not enforce private worker isolation: {}",
-        result["stderr"]
-    );
-    for path in denied.iter().chain([
-        &project.join("readonly/canary"),
-        &project.join("denied/canary"),
-    ]) {
-        ensure!(
-            fs::read(path)? == b"private probe\n",
-            "Codex changed a protected compatibility fixture"
-        );
-    }
-    for path in [
-        run.join("environment/worker-1/home/canary"),
-        run.join("environment/worker-1/tmp/canary"),
-    ] {
-        ensure!(
-            fs::read(path)? == b"probe write\n",
-            "Codex did not preserve the private worker environment"
-        );
-    }
-    Ok(())
+    check_protocol(request, &probe.0).await
 }
 
 #[cfg(test)]
@@ -508,25 +444,37 @@ mod tests {
     }
 
     fn notifications() -> Value {
-        schema(&[
+        let mut notification = schema(&[
             ("item/completed", &["threadId", "turnId", "item"]),
             ("turn/completed", &["threadId", "turn"]),
-        ])
+            ("serverRequest/resolved", &["threadId", "requestId"]),
+            ("item/started", &["threadId", "turnId", "item"]),
+        ]);
+        notification["oneOf"][3]["properties"]["params"]["properties"]["item"] = json!({
+            "oneOf":[{"properties":{"type":{"enum":["mcpToolCall"]},"id":{"type":"string"},
+                "server":{"type":"string"},"tool":{"type":"string"},"arguments":{}}}]
+        });
+        notification
+    }
+
+    #[test]
+    fn native_mcp_events_require_call_identity_and_arguments() {
+        let mut notification = notifications();
+        check_mcp_item_notification(&notification).unwrap();
+        notification["oneOf"][3]["properties"]["params"]["properties"]["item"]["oneOf"][0]["properties"]
+            .as_object_mut().unwrap().remove("arguments");
+        assert!(
+            check_mcp_item_notification(&notification)
+                .unwrap_err()
+                .to_string()
+                .contains("mcpToolCall.arguments")
+        );
     }
 
     #[test]
     fn protocol_checks_required_capabilities_and_accepts_additions() {
         let mut client = schema(CLIENT_METHODS);
-        let server = schema(&[
-            (
-                "item/tool/call",
-                &["threadId", "turnId", "callId", "tool", "arguments"],
-            ),
-            (
-                "item/tool/requestUserInput",
-                &["threadId", "turnId", "itemId", "questions"],
-            ),
-        ]);
+        let server = schema(SERVER_METHODS);
         verify_protocol(&client, &server, &notifications()).unwrap();
         client["oneOf"][0]["properties"]["params"]["properties"]["futureOptionalField"] =
             json!({"type":"string"});
@@ -534,12 +482,12 @@ mod tests {
         client["oneOf"][0]["properties"]["params"]["properties"]
             .as_object_mut()
             .unwrap()
-            .remove("permissions");
+            .remove("beforeTurnId");
         assert!(
             verify_protocol(&client, &server, &notifications())
                 .unwrap_err()
                 .to_string()
-                .contains("thread/start.permissions")
+                .contains("thread/fork.beforeTurnId")
         );
         let mut client = schema(CLIENT_METHODS);
         client["oneOf"][3]["properties"]["params"]["required"] =
@@ -556,16 +504,7 @@ mod tests {
     fn protocol_requires_tool_calls_and_cleanup_before_model_turns() {
         let client = schema(CLIENT_METHODS);
         assert!(verify_protocol(&client, &schema(&[]), &notifications()).is_err());
-        let server = schema(&[
-            (
-                "item/tool/call",
-                &["threadId", "turnId", "callId", "tool", "arguments"],
-            ),
-            (
-                "item/tool/requestUserInput",
-                &["threadId", "turnId", "itemId", "questions"],
-            ),
-        ]);
+        let server = schema(SERVER_METHODS);
         assert!(
             verify_protocol(&client, &server, &schema(&[]))
                 .unwrap_err()
@@ -580,6 +519,15 @@ mod tests {
                 .to_string()
                 .contains("thread/archive")
         );
+    }
+
+    #[test]
+    fn zero_argument_native_methods_accept_null_but_reject_new_required_inputs() {
+        let mut schema = schema(&[("configRequirements/read", &[])]);
+        schema["oneOf"][0]["properties"]["params"] = json!({"type":"null"});
+        check_method(&schema, "configRequirements/read", &[], true).unwrap();
+        schema["oneOf"][0]["properties"]["params"] = json!({"type":"object", "properties":{"newField":{"type":"string"}}, "required":["newField"]});
+        assert!(check_method(&schema, "configRequirements/read", &[], true).is_err());
     }
 
     #[test]

@@ -466,6 +466,15 @@ class BuildTests(unittest.TestCase):
                         "target": target, "sourceRevision": revision, **provenance,
                         "runtimeSha256": install_support.fingerprint(runtime)["sha256"],
                         "passed": True, "modelCalls": 0, "lifecycleCases": package_release.LIFECYCLE_CASES,
+                        "codexVersion": "fixture 1", "exactLiveSessionParity": False,
+                        "evidenceSha256": {name: "a" * 64 for name in ["smoke", "inheritance", *package_release.LIFECYCLE_CASES]},
+                        "nativeInheritance": {
+                            "runtimeSha256": install_support.fingerprint(runtime)["sha256"],
+                            "architecture": architecture, "hostVersion": "fixture 1",
+                            "gatewayToolCalled": True, "parentCliOverridesNotExported": True,
+                            "exactLiveSessionParity": False, "nativeTestSha256": "b" * 64,
+                            "sourceDigest": "c" * 64,
+                        },
                     })
                     qualifications.append(path)
                 unsigned = root / "unsigned"

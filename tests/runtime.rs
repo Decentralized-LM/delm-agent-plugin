@@ -211,6 +211,40 @@ impl Fixture {
         );
     }
 
+    fn run_path(&self, event: &Value) -> PathBuf {
+        self.home
+            .join("Library/Application Support/DeLM/runs")
+            .join(event["run_id"].as_str().unwrap())
+    }
+
+    fn assert_delivered(&self, revision: u64) {
+        let mut actual = snapshot(&self.project);
+        let result = actual
+            .remove(Path::new("result.txt"))
+            .expect("result was not delivered into the original project");
+        assert!([b"thread-1\n".to_vec(), b"thread-2\n".to_vec()].contains(&result.1));
+        if revision > 1 {
+            let revised = actual
+                .remove(Path::new("revised.txt"))
+                .expect("revised result was not delivered");
+            assert_eq!(revised.1, format!("revision {revision}\n").into_bytes());
+        }
+        assert_eq!(
+            actual, self.before,
+            "delivery changed pre-existing project or Git data"
+        );
+    }
+
+    fn assert_workspaces_removed(&self, event: &Value) {
+        let workspace = self.run_path(event).join("workspace");
+        for name in ["worker-1", "worker-2", "baseline"] {
+            assert!(
+                !workspace.join(name).exists(),
+                "temporary {name} remains after cleanup"
+            );
+        }
+    }
+
     fn assert_hosts_stopped(&self) {
         let pids = self
             .wire()
@@ -348,18 +382,26 @@ fn running(event: &Value) -> bool {
 fn assert_partial(event: &Value) {
     assert_eq!(event["type"], "stopped", "{event}");
     let paths = event["partial_paths"].as_array().unwrap();
-    assert_eq!(paths.len(), 2);
-    for path in paths {
+    assert_eq!(
+        paths.len(),
+        1,
+        "stopped runs expose one compact recovery bundle"
+    );
+    let recovery = Path::new(paths[0].as_str().unwrap());
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(recovery.join("complete.json")).unwrap()).unwrap();
+    assert_eq!(manifest["workers"].as_array().unwrap().len(), 2);
+    for name in ["worker-1", "worker-2", "baseline"] {
         assert!(
-            Path::new(path.as_str().unwrap())
-                .join("source.txt")
-                .is_file()
+            !recovery.parent().unwrap().join(name).exists(),
+            "temporary {name} remains"
         );
     }
+    assert_eq!(event["details"]["cleanup_complete"], true);
 }
 
 #[test]
-fn normal_completion_retains_one_project_without_changing_the_original() {
+fn normal_completion_delivers_into_original_and_removes_both_workspaces() {
     let fixture = Fixture::new("complete");
     let mut session = fixture.start(30);
     let ready = session.until(|event| event["type"] == "ready");
@@ -368,20 +410,20 @@ fn normal_completion_retains_one_project_without_changing_the_original() {
     assert_eq!(result["type"], "result", "{:?}", session.events);
     let path = Path::new(result["path"].as_str().unwrap());
     assert!(path.join("result.txt").is_file());
-    assert!(!path.parent().unwrap().join("baseline").exists());
-    assert!(
-        path.parent()
-            .unwrap()
-            .join("review/changed-paths.json")
-            .is_file()
+    assert_eq!(
+        fs::canonicalize(path).unwrap(),
+        fs::canonicalize(&fixture.project).unwrap()
     );
+    fixture.assert_workspaces_removed(&result);
+    assert_eq!(result["details"]["delivery"]["cleanup_complete"], true);
+    assert!(Path::new(result["details"]["completion"].as_str().unwrap()).is_file());
     assert_eq!(fixture.requests("thread/start").len(), 2);
     fixture.assert_hosts_stopped();
-    fixture.assert_original();
+    fixture.assert_delivered(1);
 }
 
 #[test]
-fn stop_preserves_both_private_projects_and_stops_the_native_host() {
+fn stop_preserves_compact_recovery_and_removes_both_private_projects() {
     let fixture = Fixture::new("wait");
     let mut session = fixture.start(30);
     session.until(running);
@@ -566,12 +608,15 @@ fn native_model_mismatch_is_rejected_before_starting_a_turn() {
 
 #[test]
 fn native_permission_profile_mismatch_is_rejected_before_starting_a_turn() {
-    assert_native_mismatch("mismatch_profile", "permission profile");
+    assert_native_mismatch("mismatch_profile", "activePermissionProfile");
 }
 
 fn assert_native_mismatch(mode: &str, reason: &str) {
     let fixture = Fixture::new(mode);
-    let mut session = fixture.start(30);
+    let mut request = fixture.request(30);
+    request["auth_settings"] =
+        json!({"native_thread_settings":{"activePermissionProfile":{"id":":workspace"}}});
+    let mut session = fixture.launch(request);
     let stopped = session.finish();
     assert_partial(&stopped);
     assert!(
@@ -615,7 +660,7 @@ fn matching_fresh_chatgpt_identity_allows_worker_turns() {
         "account identity must be checked before worker creation"
     );
     fixture.assert_hosts_stopped();
-    fixture.assert_original();
+    fixture.assert_delivered(1);
 }
 
 #[test]
@@ -674,7 +719,7 @@ fn stale_completion_is_refused_until_the_current_revision_is_declared() {
             .any(|event| event["message"]["params"]["arguments"]["expected_revision"] == 1)
     );
     fixture.assert_hosts_stopped();
-    fixture.assert_original();
+    fixture.assert_delivered(1);
 }
 
 #[test]
@@ -696,20 +741,14 @@ fn a_user_update_at_ready_requires_a_fresh_completion() {
         "revision 2\n"
     );
     let completion: Value = serde_json::from_slice(
-        &fs::read(
-            path.parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("completion.json"),
-        )
-        .unwrap(),
+        &fs::read(result["details"]["completion"].as_str().unwrap()).unwrap(),
     )
     .unwrap();
+    fixture.assert_workspaces_removed(&result);
     assert_eq!(completion["revision"], 2);
     assert_eq!(fixture.requests("thread/start").len(), 2);
     fixture.assert_hosts_stopped();
-    fixture.assert_original();
+    fixture.assert_delivered(2);
 }
 
 #[test]
@@ -740,50 +779,39 @@ fn an_update_during_preparation_advances_the_initial_worker_revision() {
     }
     assert!(fixture.requests("turn/steer").is_empty());
     fixture.assert_hosts_stopped();
-    fixture.assert_original();
+    fixture.assert_delivered(2);
 }
 
 #[test]
-fn resume_reuses_the_same_two_native_threads() {
+fn stopped_runs_cannot_resume_deleted_workspaces_or_create_a_second_team() {
     let fixture = Fixture::new("wait");
     let mut first = fixture.start(60);
     first.until(running);
     first.send(json!({"type":"stop"}));
-    let paused = first.finish();
-    assert_partial(&paused);
+    let stopped = first.finish();
+    assert_partial(&stopped);
     fixture.assert_hosts_stopped();
     fixture.assert_original();
-    let starts = fixture.requests("thread/start");
-    assert_eq!(starts.len(), 2);
-    fixture.mode("complete");
-    let mut resumed = fixture.launch(json!({"type":"resume", "run_id":paused["run_id"],
-        "authorization":fixture.request(60)}));
-    let ready = resumed.until(|event| event["type"] == "ready");
-    resumed.accept(&ready);
-    assert_eq!(resumed.finish()["type"], "result");
-    let resumes = fixture.requests("thread/resume");
-    assert_eq!(
-        fixture.requests("thread/start").len(),
-        2,
-        "resume created another team"
+    let before = fixture.wire();
+    let mut resumed = fixture.launch(
+        json!({"type":"resume", "run_id":stopped["run_id"], "authorization":fixture.request(60)}),
     );
-    assert_eq!(resumes.len(), 2);
-    assert_eq!(
-        resumes
-            .iter()
-            .map(|request| request["params"]["threadId"].as_str().unwrap())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["thread-1", "thread-2"])
+    let refused = resumed.until(terminal);
+    assert_eq!(refused["type"], "error");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("not available to resume")
     );
-    for (start, resume) in starts.iter().zip(&resumes) {
-        assert_eq!(start["params"]["cwd"], resume["params"]["cwd"]);
-        assert_eq!(
-            start["params"]["permissions"],
-            resume["params"]["permissions"]
-        );
-    }
-    fixture.assert_hosts_stopped();
-    fixture.assert_original();
+    assert!(!resumed.wait().success());
+    assert_eq!(
+        fixture.wire(),
+        before,
+        "a stopped run must not launch or resume workers"
+    );
+    fixture.assert_workspaces_removed(&stopped);
+    assert_partial(&stopped);
 }
 
 #[test]
@@ -806,6 +834,13 @@ fn assert_resume_setting_rejected(field: &str, changed: &str) {
     first.send(json!({"type":"stop"}));
     let paused = first.finish();
     assert_partial(&paused);
+    // Legacy paused runs still need authorization validation before any host
+    // connection. Simulate only their header; a rejected resume must never
+    // inspect or recreate the removed worker projects.
+    let saved_path = fixture.run_path(&paused).join("run.json");
+    let mut saved: Value = serde_json::from_slice(&fs::read(&saved_path).unwrap()).unwrap();
+    saved["status"] = json!("paused");
+    fs::write(&saved_path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let wire_before = fixture.wire();
     request[field] = json!(changed);
     let mut resumed = fixture
@@ -831,4 +866,106 @@ fn assert_resume_setting_rejected(field: &str, changed: &str) {
     assert_partial(&paused);
     fixture.assert_hosts_stopped();
     fixture.assert_original();
+}
+
+#[test]
+fn retired_native_approvals_are_rejected_without_blocking_completion() {
+    let fixture = Fixture::new("stale_approval");
+    let mut session = fixture.start(30);
+    let ready = session.until(|event| event["type"] == "ready");
+    assert!(
+        !session
+            .events
+            .iter()
+            .any(|event| event["type"] == "approval")
+    );
+    session.accept(&ready);
+    let result = session.finish();
+    assert_eq!(result["type"], "result");
+    let rejected = fixture
+        .wire()
+        .into_iter()
+        .filter(|event| {
+            event["direction"] == "in"
+                && event["message"]["error"]["message"] == "Approval belongs to a retired turn"
+        })
+        .count();
+    assert_eq!(rejected, 2);
+    fixture.assert_delivered(1);
+}
+
+#[test]
+fn acceptance_waits_for_a_late_native_request_without_losing_the_candidate() {
+    let fixture = Fixture::new("late_approval");
+    let mut session = fixture.start(30);
+    let ready = session.until(|event| event["type"] == "ready");
+    let approval = session.until(|event| event["type"] == "approval");
+    session.accept(&ready);
+    session.send(json!({"type":"respond","id":approval["id"],"response":{"decision":"decline"}}));
+    // The already accepted candidate resumes after the pending request clears;
+    // no extra accept_result command is needed and the peer need not finish.
+    let result = session.finish();
+    assert_eq!(result["type"], "result");
+    assert!(
+        session
+            .events
+            .iter()
+            .any(|event| event["type"] == "approval_resolved")
+    );
+    fixture.assert_delivered(1);
+    fixture.assert_workspaces_removed(&result);
+}
+
+#[test]
+fn native_approvals_wait_for_correlated_user_responses_without_changing_them() {
+    let fixture = Fixture::new("approvals");
+    let mut session = fixture.start(30);
+    let first = session.until(|event| event["type"] == "approval");
+    let second = session.until(|event| event["type"] == "approval");
+    assert_ne!(first["id"], second["id"]);
+    assert_ne!(first["details"]["worker"], second["details"]["worker"]);
+    session.send(
+        json!({"type":"respond","id":first["id"],"response":{"decision":"acceptForSession"}}),
+    );
+    let refusal = session.until(|event| event["type"] == "notice");
+    assert!(refusal["message"].as_str().unwrap().contains("not offered"));
+    let requests = fixture
+        .wire()
+        .into_iter()
+        .filter(|event| {
+            event["direction"] == "out"
+                && event["message"]["method"] == "item/commandExecution/requestApproval"
+        })
+        .map(|event| event["message"]["id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !fixture
+            .wire()
+            .iter()
+            .any(|event| event["direction"] == "in" && requests.contains(&event["message"]["id"])),
+        "an invalid or absent user decision must never be auto-approved"
+    );
+    for event in [&first, &second] {
+        session.send(json!({"type":"respond","id":event["id"],"response":{"decision":"accept"}}));
+    }
+    let ready = session.until(|event| event["type"] == "ready");
+    session.accept(&ready);
+    let result = session.finish();
+    assert_eq!(result["type"], "result");
+    for id in requests {
+        let replies = fixture
+            .wire()
+            .into_iter()
+            .filter(|event| event["direction"] == "in" && event["message"]["id"] == id)
+            .collect::<Vec<_>>();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            replies[0]["message"]["result"],
+            json!({"decision":"accept"})
+        );
+    }
+    fixture.assert_delivered(1);
+    fixture.assert_workspaces_removed(&result);
+    fixture.assert_hosts_stopped();
 }

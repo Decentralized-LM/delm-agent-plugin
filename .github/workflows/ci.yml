@@ -31,9 +31,9 @@ jobs:
       matrix:
         include:
           - runner: macos-15
-            codex: '0.159.2'
+            codex: '0.160.0'
           - runner: macos-15-intel
-            codex: '0.159.3'
+            codex: '0.160.0'
           - runner: macos-15
             codex: latest
     runs-on: ${{ matrix.runner }}
@@ -59,8 +59,8 @@ jobs:
         run: ./scripts/build.sh
       - name: Verify the packed npm installer with native Codex
         run: npm --prefix packages/installer run test:native
-      - name: Verify private development environments without model calls
-        run: DELM_TEST_HOST="$(command -v codex)" cargo test --locked --test native_sandbox -- --ignored
+      - name: Verify native configuration inheritance without model calls
+        run: DELM_TEST_HOST="$(command -v codex)" cargo test --locked --test native_inheritance -- --ignored
       - name: Verify native cancellation and lifecycle ownership without model calls
         run: |
           cargo build --locked --example native-lifecycle-fixture

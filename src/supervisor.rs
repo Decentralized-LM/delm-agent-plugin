@@ -89,6 +89,25 @@ fn process(_pid: u32) -> Result<Option<Process>> {
 }
 
 impl ProcessIdentity {
+    pub fn is_descendant_of(&self, ancestor: u32) -> Result<bool> {
+        if !self.is_running()? {
+            return Ok(false);
+        }
+        let mut pid = self.pid;
+        for _ in 0..128 {
+            let Some(current) = process(pid)? else {
+                return Ok(false);
+            };
+            if current.parent == ancestor {
+                return Ok(true);
+            }
+            if current.parent <= 1 || current.parent == pid {
+                return Ok(false);
+            }
+            pid = current.parent;
+        }
+        Ok(false)
+    }
     pub fn capture(pid: u32) -> Result<Self> {
         Ok(process(pid)?
             .context("owned process exited before observation")?

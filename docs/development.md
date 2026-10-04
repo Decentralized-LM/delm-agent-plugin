@@ -1,49 +1,49 @@
 # Development
 
-Use macOS with stock Codex CLI on `PATH`, an existing Codex login, Git, Python 3, Xcode Command Line Tools, and the Rust toolchain pinned in `rust-toolchain.toml`. The complete test suite also needs Node.js 22 or later and npm.
+Use macOS with stock Codex CLI on `PATH`, an existing Codex login, Git, Python 3, Xcode Command Line Tools, and the Rust toolchain pinned in `rust-toolchain.toml`. Installer tests also need Node.js 22 or later.
 
-From this checkout, build and install through the native plugin manager:
+Build and install through Codex's native plugin manager:
 
 ```sh
 ./scripts/install.sh
 ```
 
-The installer checks macOS support, the existing Codex home, native plugin commands, Git, Rust/Cargo, and the Xcode compiler before building or changing plugin registrations. Missing prerequisites produce setup guidance. It checks command capabilities rather than requiring a specific Codex version. A staged install with `--no-build` does not require Rust or Xcode; removal and migration do not require build tools either. These checks do not inspect account credentials or start model turns; use Codex itself to complete login before your first DeLM run.
+Restart Codex, review and trust DeLM in `/hooks`, then restart again. Open the intended project and invoke `$delm:run <task>`. The contributor marketplace is `delm-local`. Installation neither replaces Codex nor grants hook trust.
 
-Restart Codex, open `/hooks`, and review and trust the DeLM hooks. Restart Codex once more, then open a Git repository and invoke `$delm:run <task>`. The local marketplace is named `delm-local`, keeping contributor builds separate from public `delm` releases. The installer does not replace Codex, start a task, or grant hook trust. After an update, review changed hooks when Codex requests it and restart before running DeLM.
+To build without installing, run `./scripts/build.sh`. It stages a package under `.build/plugin/` and preserves earlier packages. A compatible prebuilt runtime can be supplied with `--prebuilt /absolute/path/to/delm`.
 
-To build without installing:
-
-```sh
-./scripts/build.sh
-```
-
-The package is staged under `.build/plugin/`. Previous packages are preserved. To stage an existing compatible runtime without compiling, use `./scripts/build.sh --prebuilt /absolute/path/to/delm`.
-
-Run the automated checks:
+## Focused verification
 
 ```sh
 ./scripts/verify.sh
 npm --prefix packages/installer run test:native
-DELM_TEST_HOST="$(command -v codex)" cargo test --locked --test native_sandbox -- --ignored
+DELM_TEST_HOST="$(command -v codex)" cargo test --locked --test native_inheritance -- --ignored
 node --test examples/task-board/task.test.mjs
 ```
 
-The regular suite uses fixture workers. Installation tests use temporary Codex homes and local Git repositories. The native suite checks filesystem restrictions for both workers and installs tiny npm and Python dependencies from a temporary local server, without generating model turns. It needs Node/npm and Python virtual environment support. Run it from a normal terminal, since an enclosing sandbox can prevent local sockets or nested sandbox execution. None of these checks launches a real DeLM task.
+The regular suite uses deterministic workers. It covers task ownership, publication/import checks, shared verification, service ownership, guarded original-project delivery, recovery, and cleanup. Installer tests use temporary Codex homes and local repositories.
 
-The [npm installer](../packages/installer/README.md) has no dependencies or installation scripts. Its version is independent of the plugin version. Source configuration leaves its repository unset; release preparation supplies the destination. Unit and package tests run in the regular suite; `test:native` exercises the prepared, packed command against stock Codex and a local Git marketplace in temporary homes. It does not register a plugin in your normal Codex configuration or contact a published DeLM marketplace.
+Native inheritance qualification creates metadata-only parent and forked sessions in disposable storage, compares a project skill and local documentation MCP, calls that local tool, and verifies the returned native permission settings. It starts no model turn and opens no browser. This establishes the tested saved-configuration path, not exact parity with every override and live connection in an existing user session.
 
-To inspect a configured installer before publication, use a new output directory:
+The [native lifecycle fixtures](native-lifecycle-qualification.md) cover interruption, startup cancellation, parent completion, owner-process death, and plugin removal. Their scripted provider does not call a real model. Run native checks from a terminal that permits local sockets and nested native processes.
+
+For changes affecting launch or delivery, measure invocation-to-worker and completion-to-project separately. Do not omit parent handoff, environment setup, or conflict resolution from user-visible task latency. Use focused fixtures during development; a long application build is not a prerequisite for every edit.
+
+## Installer and release artifacts
+
+The [npm installer](../packages/installer/README.md) has no dependencies or installation scripts. Its version is independent of the plugin version. Source configuration leaves the destination unset; release preparation supplies the selected repository:
 
 ```sh
 python3 scripts/prepare_installer.py --repository OWNER/REPOSITORY --out .validation/prepared-installer
 ```
 
-Replace `OWNER/REPOSITORY` with the intended GitHub destination. The output includes a configured package, its tarball, checksums, and a preparation record. The release workflow generates the same installer alongside the native package and binds them to one destination. See [releases](releases.md) for publication.
+Use a new output directory. The generated package includes its tarball, checksums, and preparation record. Its native installation test uses disposable homes and a local marketplace; it does not register a plugin in your normal Codex configuration.
 
-The [native lifecycle checks](native-lifecycle-qualification.md) cover interruption, cancellation during startup, normal chat completion, owner-process death, and plugin removal. CI runs these with each Codex version in its matrix, using disposable Codex homes and a local scripted provider.
+Release architecture, signing, and publication requirements are documented in [releases](releases.md). Cross-compilation does not establish native Intel qualification. Local checks do not establish that a release workflow, signing, or notarization has passed.
 
-For an explicitly authorized real-model check, put a small development task beginning with `$delm:run ` in a text file, then run:
+## Optional real-task qualification
+
+Only run this when real account use has been authorized. Supply a small task beginning with `$delm:run `:
 
 ```sh
 python3 scripts/verify_fresh_install.py \
@@ -55,33 +55,22 @@ python3 scripts/verify_fresh_install.py \
   --timeout-seconds 1500
 ```
 
-Select a model and effort available to your account. Use a new output directory and allow enough time for startup, the task, and shutdown; reaching the helper's timeout interrupts the task. This check uses real account capacity and is excluded from routine CI. It installs the plugin in a disposable Codex home, trusts only its discovered hooks there, and invokes the installed skill through a real native parent. It reuses an existing file-backed Codex login through a temporary reference, which is removed after verified process shutdown. This qualifies a fresh plugin and configuration setup, not new-account authentication. Evidence records task handoff, both workers, observed collaboration, retained output, original-project integrity, and cleanup. Keep that evidence private.
+Select an available model and effort. This helper installs the plugin into a disposable Codex home, trusts its discovered hooks there, and invokes a real parent session. It uses real account capacity and stays outside routine CI. It references the existing file-backed login without copying its contents and removes that reference after confirmed shutdown.
 
-To measure repository preparation independently of model work:
+Evidence covers native ownership, exact task handoff, both workers, observed collaboration, delivery to the disposable original project, and removal of temporary workspaces. A `delivered` status is distinct from fully verified completion: required local setup or merged-result checks must finish in the parent before reporting the task ready. This qualifies a fresh installation, not new-account login or subjective product quality. Keep its evidence private.
+
+Repository preparation can also be measured without any model work:
 
 ```sh
 cargo test --locked --lib preparation_timing_with_many_ignored_directories -- --ignored --nocapture
 ```
 
-This fixture reports three measurements for 400 ignored directories, 40 empty directories, and a 4 MiB saved file. Compare the same machine and build profile; this measures snapshot preparation, not complete task latency.
+The fixture measures the same saved project three times. Compare like machines and build profiles; preparation time is not complete task latency.
 
-Set `DELM_TEST_PUBLIC_NETWORK=1` for the native suite to also download and execute a pinned npm dependency from the public HTTPS registry. This optional check uses disposable worker projects and does not run package lifecycle scripts. Normal CI remains independent of public package downloads during qualification.
+## Contributor hygiene
 
-For optional browser qualification, set `DELM_TEST_BROWSER_BUNDLE` to an existing Playwright Chromium headless-shell directory containing `chrome-headless-shell` and run the native suite. The test clones that bundle into its disposable project, renders a canvas page, and verifies the screenshot. It uses a private browser profile and never opens an existing browser or profile. Both workers retain the same Codex filesystem restrictions used during tasks.
+Use the user's normal installed browser tools and native permissions. Do not prescribe a special Chromium sandbox workaround or disable their integrations to make a fixture pass. When browser state is shared, coordinate the relevant resource or use independent browser contexts.
 
-Within a worker, Playwright browser downloads use its private `PLAYWRIGHT_BROWSERS_PATH`. A headless Chromium launch can use:
+Remove a contributor installation with `./scripts/uninstall.sh`. Follow [migration](support.md#updating-and-removing-the-plugin) before switching a modified local installation to a published package. Make edits in this source checkout, not the installed cache.
 
-```js
-const browser = await chromium.launch({
-  headless: true,
-  args: ['--single-process', '--no-zygote', '--no-sandbox'],
-});
-```
-
-These arguments were qualified with stock Codex 0.159.3 on Apple Silicon. Multiprocess Chromium cannot register its Mach service within that native sandbox. `--no-sandbox` disables Chromium's inner sandbox only; Codex still enforces worker filesystem isolation. This recipe supports private browser checks, not attachment to the user's browser. The native test verifies rendering and screenshot reads without model calls, so it does not establish model visual judgment. Workers have the native `view_image` capability enabled for their own screenshots.
-
-CI runs on Apple Silicon and Intel with pinned and latest Codex versions. This checks compatibility when Codex changes rather than silently downgrading a user's installation. Release builds and signing are described in [releases](releases.md).
-
-Remove a contributor installation with `./scripts/uninstall.sh`. To move an existing contributor installation to a published release, follow [migration](support.md#updating-and-removing-the-plugin). Do not edit installed plugin files; make changes in the source checkout.
-
-Keep tests, local builds, credentials, product research, and design drafts out of release packages. Packaging uses an explicit file list and records checksums. Test changes to worker behavior separately from installation changes.
+Keep credentials, private run folders, local builds, and research evidence out of release packages. Packaging uses an explicit allowlist and records checksums. No routine qualification command commits or publishes changes.
