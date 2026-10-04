@@ -40,10 +40,25 @@ function fake({installed = false, enabled = true, legacy = false} = {}) {
     }
     return {stdout: `Native progress\n${JSON.stringify(result)}\n`};
   };
-  return {state, options: {host: 'claude', claude: '/existing Claude', platform: 'darwin', release: RELEASE, run}};
+  return {state, options: {host: 'claude', claude: '/existing Claude', platform: 'darwin', release: RELEASE, run, checkMaintenance: async () => {}}};
 }
 
 const mutations = state => state.calls.filter(call => call[1] === 'plugin' && call[2] !== 'list' && !(call[2] === 'marketplace' && call[3] === 'list'));
+
+test('Claude mutation preflight preserves active work and status remains readable', async () => {
+  for (const command of ['install', 'update', 'remove']) {
+    const {state, options} = fake({installed: true, enabled: false});
+    options.checkMaintenance = async ({host}) => {
+      assert.equal(host, 'claude');
+      throw new InstallerError('Stop active work first', 'ACTIVE_DELM_RUN');
+    };
+    await assert.rejects(manage(command, options), {code: 'ACTIVE_DELM_RUN'});
+    assert.deepEqual(mutations(state), []);
+    const result = await manage('status', options);
+    assert.equal(result.readiness.installation, 'disabled');
+    assert.match(describe(result), /Session readiness has not been checked/);
+  }
+});
 
 test('Claude installation uses explicit user scope, fixed source/ref, and no Codex commands', async () => {
   const {state, options} = fake();

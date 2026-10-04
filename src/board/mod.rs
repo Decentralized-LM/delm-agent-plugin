@@ -10,6 +10,7 @@ mod files;
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -21,6 +22,14 @@ use files::{FileVersion, Root};
 
 const VIEW_LIMIT: i64 = 24;
 const MAX_ARGUMENT_BYTES: usize = 128 * 1024;
+
+/// Runtime-only cursor taken when a native worker declares a dependency wait.
+/// It is never added to the model-visible board or tool response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WaitCursor {
+    sequence: i64,
+    dependency: String,
+}
 
 pub struct Board {
     db: Connection,
@@ -131,6 +140,51 @@ impl Board {
 
     pub fn dependency_owner(&self, dependency: &str) -> Result<Option<usize>> {
         dependency_owner(&self.db, dependency)
+    }
+
+    pub(crate) fn wait_cursor(&self, declaration: &Value) -> Result<Option<WaitCursor>> {
+        if declaration["outcome"] != "waiting" {
+            return Ok(None);
+        }
+        let dependency = string(declaration, "dependency", 512)?.to_owned();
+        dependency_owner(&self.db, &dependency)?;
+        let sequence = self
+            .db
+            .query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))?;
+        Ok(Some(WaitCursor {
+            sequence,
+            dependency,
+        }))
+    }
+
+    /// Reconcile durable readiness, including events that arrived after the
+    /// declaration but before native turn completion. Other task completions
+    /// and unrelated publications do not resolve a named task dependency.
+    pub(crate) fn wait_ready(&self, cursor: &WaitCursor) -> Result<bool> {
+        let available: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE state='available' AND
+             (updated>?1 OR (json_extract(body,'$.kind')='integration' AND EXISTS(
+               SELECT 1 FROM tasks WHERE state='done' AND updated>?1 AND json_extract(body,'$.kind')='integration'))) AND
+             (json_extract(body,'$.kind')!='integration' OR NOT EXISTS(
+               SELECT 1 FROM tasks WHERE state='claimed' AND json_extract(body,'$.kind')='integration')))",
+            [cursor.sequence], |r| r.get(0))?;
+        if available {
+            return Ok(true);
+        }
+        let (kind, id) = cursor
+            .dependency
+            .split_once(':')
+            .context("Invalid saved dependency")?;
+        let id: i64 = id.parse()?;
+        match kind {
+            "task" => self.db.query_row(
+                "SELECT state='done' AND updated>? FROM tasks WHERE id=?",
+                params![cursor.sequence, id], |r| r.get(0)).map_err(Into::into),
+            "worker" => self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM publications WHERE worker=? AND id>? AND revision=(SELECT revision FROM context WHERE id=1))",
+                params![id, cursor.sequence], |r| r.get(0)).map_err(Into::into),
+            _ => bail!("Invalid saved dependency"),
+        }
     }
 
     /// Native lifecycle recovery only, after the owner's turn has stopped.
@@ -385,7 +439,7 @@ impl Board {
         }
         // File freezing precedes the database transaction. An interrupted freeze
         // can leave an unreferenced owned object, but never a visible partial publication.
-        let frozen = if name == "delm_publish" {
+        let captured = if name == "delm_publish" {
             Some(self.freeze(worker, args)?)
         } else {
             None
@@ -401,7 +455,11 @@ impl Board {
             "delm_task_release" => task_release(&tx, worker, args)?,
             "delm_task_split" => task_split(&tx, worker, args)?,
             "delm_task_finish" => task_finish(&tx, worker, args)?,
-            "delm_publish" => publish(&tx, worker, frozen.context("missing frozen publication")?)?,
+            "delm_publish" => publish(
+                &tx,
+                worker,
+                captured.context("missing captured publication")?,
+            )?,
             "delm_complete" => complete(&tx, worker, args)?,
             _ => bail!("unknown coordination tool: {name}"),
         };
@@ -446,9 +504,9 @@ impl Board {
             );
             let (result, object) = if let Some(expected) = source {
                 let object = uuid::Uuid::new_v4().to_string();
-                let frozen =
+                let captured =
                     self.workers[worker - 1].freeze(&path, &self.objects, &object, &expected)?;
-                (Some(frozen), Some(object))
+                (Some(captured), Some(object))
             } else {
                 (None, None)
             };
@@ -1218,7 +1276,7 @@ fn select_files(publication: &Value, args: &Value) -> Result<Vec<Value>> {
         .collect()
 }
 
-/// DynamicToolSpec values sent to the pinned native app-server.
+/// DynamicToolSpec values sent to the installed native app-server.
 pub fn tool_definitions() -> Vec<Value> {
     let text = json!({"type":"string"});
     let strings = json!({"type":"array","items":{"type":"string"}});

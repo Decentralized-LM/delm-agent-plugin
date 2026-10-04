@@ -44,6 +44,8 @@ The native manager reads this local package in place. To load source changes, st
 
 This runs Rust formatting, linting, and tests; Python packaging and qualification-helper tests; installer tests; and Claude module tests. The deterministic suites cover task ownership, publication/import checks, shared verification, service ownership, guarded original-project delivery, recovery, and cleanup.
 
+CI tests the qualified Codex and Claude versions on native Apple Silicon and Intel runners, and their latest versions together on Apple Silicon. Host upgrades must pass the same model-free checks. The latest-version job detects compatibility changes; it does not establish support before it passes.
+
 Run the relevant native boundary checks when changing installation, inheritance, or lifecycle behavior:
 
 ```sh

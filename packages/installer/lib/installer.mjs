@@ -5,6 +5,7 @@ import {join, resolve} from 'node:path';
 
 import {InstallerError, execute} from './native.mjs';
 import {manageClaude, describeClaude} from './claude.mjs';
+import {assertMaintenanceSafe, installationReadiness} from './maintenance.mjs';
 export {InstallerError, execute} from './native.mjs';
 const configuration = JSON.parse(readFileSync(new URL('../release.json', import.meta.url), 'utf8'));
 export const RELEASE = Object.freeze({
@@ -38,7 +39,7 @@ export function validateRequest(command, {platform = process.platform, release =
 
 // Distribution identity is fixed at package preparation, never by a CLI flag.
 // Unit tests inject release/run; native tests exercise a prepared package.
-export async function manage(command, {host = 'codex', codex, claude, platform = process.platform, run = execute, release = RELEASE} = {}) {
+export async function manage(command, {host = 'codex', codex, claude, platform = process.platform, run = execute, release = RELEASE, checkMaintenance = assertMaintenanceSafe} = {}) {
   if (!['codex', 'claude'].includes(host)) throw new InstallerError('Choose --host codex or --host claude.', 'USAGE');
   if ((host !== 'codex' && codex !== undefined) || (host !== 'claude' && claude !== undefined)) {
     throw new InstallerError('The executable option must match --host. Use --codex with codex or --claude with claude.', 'USAGE');
@@ -50,17 +51,19 @@ export async function manage(command, {host = 'codex', codex, claude, platform =
   const cwd = await mkdtemp(join(tmpdir(), 'delm-installer-'));
   try {
     const nativeRun = (file, args) => run(file, args, {cwd});
+    const beforeMutation = () => checkMaintenance({host});
     const result = host === 'claude'
-      ? await manageClaude(command, {claude: executable, release, run: nativeRun})
-      : await manageNative(command, {codex: executable, release, run: nativeRun});
-    return {host, ...result};
+      ? await manageClaude(command, {claude: executable, release, run: nativeRun, beforeMutation})
+      : await manageNative(command, {codex: executable, release, run: nativeRun, beforeMutation});
+    return {host, ...result, readiness: installationReadiness(host, result)};
   } finally {
     await rm(cwd, {recursive: true, force: true});
   }
 }
 
-async function manageNative(command, {codex, release: RELEASE, run}) {
+async function manageNative(command, {codex, release: RELEASE, run, beforeMutation}) {
   const native = async (...args) => {
+    if (args[0] !== 'list' && !(args[0] === 'marketplace' && args[1] === 'list')) await beforeMutation();
     let result;
     try {
       result = await run(codex, ['plugin', ...args, '--json']);
@@ -158,6 +161,10 @@ export function describe(result) {
         : ['DeLM is not installed.'];
     if (result.installed && result.legacyInstalled) lines.push('A source installation (delm@delm-local) is also present.');
     if (result.conflict) lines.push('The delm marketplace has a different or unidentifiable source. Review `codex plugin marketplace list --json`.');
+    if (result.installed || result.legacyInstalled) {
+      lines.push('Session readiness has not been checked.');
+      lines.push(...(result.readiness?.nextSteps ?? []));
+    }
     return lines.join('\n');
   }
   if (result.command === 'remove') {

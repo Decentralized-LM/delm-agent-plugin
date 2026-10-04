@@ -51,6 +51,10 @@ For Claude Code, restart to load the plugin, then invoke `/delm:run <task>`. The
 
 Repeating `install` leaves an enabled plugin in place and reports that no reinstall was needed. Installation status does not verify hook trust in your current session. `status` distinguishes the public plugin from a source installation, and `remove` reports when a source installation remains. Updating a disabled plugin keeps it disabled; use `install` when you want to enable it.
 
+`status --json` includes a `readiness` object with the installation state, `session: "not_checked"`, and host-specific next steps. An enabled installation is distinct from a running session that has loaded the plugin and accepted its native trust requirements.
+
+Before each native mutation, the installer checks local DeLM run records for the selected host. Active runs, uncertain records, and remaining worker directories block maintenance with a specific recovery message. This is a preflight check, not a lock on other host sessions: stop DeLM first and keep it stopped until maintenance finishes. Read-only `status` remains available. The installer never removes run records to make an update proceed.
+
 A conflicting `delm` marketplace is preserved and blocks changes. An installed `delm@delm-local` plugin blocks install and update; explicit removal of a verified public plugin remains available and preserves the legacy plugin. An empty `delm-local` marketplace does not block installation. For an ordinary source installation, stop active work, run `./scripts/uninstall.sh` from its original checkout, then retry. That script preserves results and refuses removal of modified cached files. To preserve modified cache contents, use the repository's documented native public-install-then-`migrate.sh` path once a release is available; the npm installer does not automate migration.
 
 For an existing Claude `delm@delm-local` source plugin, inspect and manage it through Claude's native plugin manager; the Codex source uninstall script does not apply. An installed source plugin blocks Claude install/update but is preserved by removal of a verified public plugin.

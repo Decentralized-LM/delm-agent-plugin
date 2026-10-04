@@ -46,11 +46,26 @@ function fake({installed = false, enabled = true, source = RELEASE.url, legacy =
     } else assert.fail(`Unexpected native command ${operation}`);
     return {stdout: JSON.stringify(result)};
   };
-  return {state, options: {codex: '/existing Codex', platform: 'darwin', run, release: RELEASE}};
+  return {state, options: {codex: '/existing Codex', platform: 'darwin', run, release: RELEASE, checkMaintenance: async () => {}}};
 }
 
 const mutations = state => state.calls.filter(call => call[1] === 'plugin' && (
   ['add', 'remove'].includes(call[2]) || ['add', 'upgrade', 'remove'].includes(call[3])));
+
+test('maintenance refusal precedes every Codex mutation and leaves status available', async () => {
+  for (const command of ['install', 'update', 'remove']) {
+    const {state, options} = fake({installed: true});
+    options.checkMaintenance = async ({host}) => {
+      assert.equal(host, 'codex');
+      throw new InstallerError('Stop active work first', 'ACTIVE_DELM_RUN');
+    };
+    await assert.rejects(manage(command, options), {code: 'ACTIVE_DELM_RUN'});
+    assert.deepEqual(mutations(state), []);
+    const result = await manage('status', options);
+    assert.equal(result.readiness.session, 'not_checked');
+    assert.match(describe(result), /Session readiness has not been checked/);
+  }
+});
 
 test('source and invalid release configurations fail before calling native tools', async () => {
   for (const command of COMMANDS) {

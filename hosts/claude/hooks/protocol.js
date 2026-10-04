@@ -81,3 +81,35 @@ export function decodeLines(buffer, chunk) {
   const rest = lines.pop();
   return {rest, events: lines.filter(line => line.trim()).map(line => JSON.parse(line))};
 }
+
+export function followupText(prompt) {
+  if (typeof prompt.text !== 'string' || !Array.isArray(prompt.context || [])
+      || (prompt.context || []).some(value => typeof value !== 'string')) {
+    throw new Error('DeLM could not read the complete text of this update. The peers still have the previous task.');
+  }
+  if (prompt.attachments?.length) {
+    const kinds = [...new Set(prompt.attachments.map(item => item.type))].join(', ');
+    throw new Error('Claude cannot forward ' + kinds + ' attachments into existing DeLM peers. '
+      + 'This update was not sent; the peers still have the previous task. '
+      + 'Use /delm-stop, then start /delm:run with the attachment so both native forks inherit it.');
+  }
+  // Inline/fenced code and quoted literals are not reference submissions.
+  const prose = prompt.text.replace(/```[\s\S]*?```|`[^`\n]*`|(?<!@)"[^"\n]*"|(?<![\p{L}\p{N}_@])'[^'\n]*'(?![\p{L}\p{N}_])/gu, '');
+  if (/(^|\s)@(?:"[^"\n]+"|[^\s@]+)/u.test(prose)) {
+    throw new Error('Claude expands @references after this forwarding boundary. '
+      + 'This update was not sent; the peers still have the previous task. '
+      + 'Paste the relevant text, or use /delm-stop and include the reference in a new /delm:run.');
+  }
+  const context = (prompt.context || []).filter(Boolean);
+  const text = prompt.text + (context.length ? '\n\nAdditional context:\n' + context.join('\n\n') : '');
+  let bytes = 0;
+  for (const character of text) {
+    const point = character.codePointAt(0);
+    bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+  }
+  if (!text.trim() || bytes > 128 * 1024) {
+    throw new Error('DeLM needs a nonempty update of at most 128 KiB including additional context. '
+      + 'This update was not sent; shorten it and retry.');
+  }
+  return text;
+}

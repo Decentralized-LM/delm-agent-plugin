@@ -139,20 +139,20 @@ impl Root {
         );
         objects.verify()?;
         crate::workspace::clone_file_to_dir(&source, &objects.directory, OsStr::new(object))?;
-        let frozen = objects
+        let captured = objects
             .open_file(object)?
-            .context("frozen object is missing")?;
-        let frozen_raw = frozen.as_raw_fd();
+            .context("captured object is missing")?;
+        let captured_raw = captured.as_raw_fd();
         ensure!(
-            unsafe { libc::fchmod(frozen_raw, 0o400) } == 0,
-            "make frozen object read only: {}",
+            unsafe { libc::fchmod(captured_raw, 0o400) } == 0,
+            "make captured object read only: {}",
             std::io::Error::last_os_error()
         );
-        frozen.sync_all()?;
+        captured.sync_all()?;
         objects.directory.sync_all()?;
         let mut result = objects
             .version(object)?
-            .context("frozen object disappeared")?;
+            .context("captured object disappeared")?;
         ensure!(
             result.sha256 == expected.sha256 && result.bytes == expected.bytes,
             "publication source changed during COW capture"

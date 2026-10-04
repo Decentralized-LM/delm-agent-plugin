@@ -14,6 +14,22 @@ fn fixture() -> (TempDir, PathBuf) {
 
 #[test]
 #[cfg(target_os = "macos")]
+fn linked_worktree_is_rejected_before_inventory_or_private_capture() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("linked-worktree");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join(".git"), "gitdir: /unavailable/administration\n").unwrap();
+    fs::write(root.join("large-input"), vec![0; 1024]).unwrap();
+    let before = fs::read(root.join(".git")).unwrap();
+    let run = temp.path().join("run");
+    let error = prepare(&root, &run, 1).unwrap_err();
+    assert!(error.to_string().contains("self-contained Git checkout"));
+    assert!(!run.exists());
+    assert_eq!(fs::read(root.join(".git")).unwrap(), before);
+}
+
+#[test]
+#[cfg(target_os = "macos")]
 fn absent_git_is_initialized_at_selected_root_without_discovering_parent() {
     let (temp, ancestor) = fixture();
     let before_index = fs::read(ancestor.join(".git/index")).unwrap();
@@ -198,14 +214,14 @@ fn cached_baseline_inventory_rejects_file_replacement() {
     fs::create_dir(&destination).unwrap();
     fs::write(source.join("file"), "captured contents").unwrap();
     let root = open_dir(&source).unwrap();
-    let frozen = inventory(&root, u64::MAX, deadline(), true).unwrap();
+    let captured = inventory(&root, u64::MAX, deadline(), true).unwrap();
     fs::write(temp.path().join("replacement"), "captured contents").unwrap();
     fs::rename(temp.path().join("replacement"), source.join("file")).unwrap();
 
     let error = clone_selected(
         &root,
         &destination,
-        &frozen,
+        &captured,
         &BTreeSet::from(["file".into()]),
         deadline(),
     )

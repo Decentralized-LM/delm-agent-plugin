@@ -7,7 +7,7 @@ pub(crate) mod state;
 mod tool_calls;
 
 use crate::{
-    board::Board,
+    board::{Board, WaitCursor},
     protocol::{Event, HostCommand, StartRequest},
     workers::{RpcClient, text_input, verify_thread_response, worker_config},
     workspace::{self, PreparedWorkspace},
@@ -48,6 +48,8 @@ struct Worker {
     #[serde(default)]
     result_policy: workspace::ResultPolicy,
     waiting: bool,
+    #[serde(default)]
+    wait_cursor: Option<WaitCursor>,
     blocked: bool,
     repaired: bool,
     #[serde(default)]
@@ -354,6 +356,7 @@ async fn serve_inner(
         .map(|w| (w.thread.clone(), w.turn.clone()))
         .collect::<Vec<_>>();
     journal.record("shutdown_started", &json!({"revision":saved.revision}))?;
+    journal.observe("phase", &json!({"phase":"shutdown","boundary":"start"}))?;
     let shutdown_started = guard.begin_shutdown();
     let shutdown = rpc.shutdown(&threads).await.and(shutdown_started);
     let supervision = guard.finish();
@@ -361,6 +364,17 @@ async fn serve_inner(
         "shutdown_finished",
         &json!({"native_acknowledged":shutdown.is_ok()}),
     )?;
+    journal.observe(
+        "phase",
+        &json!({"phase":"shutdown","boundary":"end","success":shutdown.is_ok()}),
+    )?;
+    if shutdown.is_ok() && supervision.as_ref().is_ok_and(|report| report.clean()) {
+        for (index, worker) in saved.workers.iter().enumerate() {
+            if let Some(turn) = &worker.turn {
+                journal.observe("worker_turn_finished", &json!({"worker":index+1,"turn_id":turn,"status":"stopped","revision":worker.revision}))?;
+            }
+        }
+    }
     saved.workers.iter_mut().for_each(|w| w.turn = None);
     let mut result = result;
     if *cancel.borrow() {
@@ -402,6 +416,10 @@ async fn serve_inner(
     let mut delivery_failed = false;
     let result = match result {
         Ok(Some((winner, candidate))) => {
+            journal.observe(
+                "phase",
+                &json!({"phase":"delivery_and_cleanup","boundary":"start"}),
+            )?;
             let delivery = (|| -> Result<workspace::DeliveryReport> {
                 ensure!(
                     writers_stopped,
@@ -416,6 +434,7 @@ async fn serve_inner(
                     &saved.workers[winner].result_policy,
                 )
             })();
+            journal.observe("phase", &json!({"phase":"delivery_and_cleanup","boundary":"end","success":delivery.is_ok()}))?;
             match delivery {
                 Ok(delivery) => Ok(Some((winner, delivery))),
                 Err(error) => {
@@ -478,6 +497,10 @@ async fn serve_inner(
             journal.record(&saved.status, &json!({"worker":winner+1}))?;
         }
         other => {
+            journal.observe(
+                "phase",
+                &json!({"phase":"recovery_and_cleanup","boundary":"start"}),
+            )?;
             let recovery = if writers_stopped {
                 workspace::preserve_partial_and_cleanup(&saved.workspace)
             } else {
@@ -485,6 +508,7 @@ async fn serve_inner(
                     "Worker shutdown or result delivery needs recovery"
                 ))
             };
+            journal.observe("phase", &json!({"phase":"recovery_and_cleanup","boundary":"end","success":recovery.is_ok()}))?;
             saved.status = if recovery.is_ok() {
                 if delivery_failed {
                     "delivery_conflict"
@@ -612,6 +636,37 @@ async fn prepare(
     state::check_storage_boundary(&request.project)?;
     let lock = RunLock::acquire(&request.project)?;
     let run_dir = state::create_run()?;
+    let selected_project = request.project.clone();
+    atomic_json(
+        &run_dir.join("run.json"),
+        &json!({
+            "host":"codex", "status":"preparing", "project":selected_project,
+            "native_started":false, "finished":false, "workspace_cleanup_complete":false
+        }),
+    )?;
+    let prepared = prepare_capture(request, input, output, &run_dir).await;
+    match prepared {
+        Ok(saved) => Ok((saved, lock)),
+        Err(error) => {
+            if let Err(record_error) =
+                record_preparation_failure(&run_dir, &selected_project, &error)
+            {
+                return Err(error.context(format!(
+                    "Preparation state needs inspection at {}: {record_error:#}",
+                    run_dir.display()
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn prepare_capture(
+    mut request: StartRequest,
+    input: &mut mpsc::Receiver<HostCommand>,
+    output: &mpsc::UnboundedSender<Event>,
+    run_dir: &std::path::Path,
+) -> Result<Saved> {
     ensure!(
         !run_dir.starts_with(&request.project),
         "Choose a repository, not the directory containing DeLM's private storage"
@@ -626,28 +681,33 @@ async fn prepare(
     preparing.request_revision = Some(1);
     let _ = output.send(preparing);
     fs::create_dir_all(run_dir.join("attachments"))?;
-    request.attachments = crate::inputs::capture(&request.attachments, &run_dir)?;
+    request.attachments = crate::inputs::capture(&request.attachments, run_dir)?;
     let project = request.project.clone();
-    let directory = run_dir.clone();
+    let directory = run_dir.to_path_buf();
     request.auth_settings["invocation_task"] = json!(request.task);
-    let mut preparation_journal = Journal::open(&run_dir)?;
+    let mut preparation_journal = Journal::open(run_dir)?;
     preparation_journal.record(
         "preparation_started",
         &json!({"invocation_received_at_ms":request.auth_settings["invocation_received_at_ms"]}),
     )?;
+    preparation_journal.observe("phase", &json!({"phase":"preparation","boundary":"start"}))?;
     let mut revision = 1;
     let mut prepare = tokio::task::spawn_blocking(move || {
         workspace::prepare(&project, &directory, crate::config::MAX_REPO_SIZE_BYTES)
     });
     let workspace = loop {
         tokio::select! {
-            result = &mut prepare => break result??,
+            result = &mut prepare => {
+                preparation_journal.observe("phase", &json!({"phase":"preparation","boundary":"end","success":result.as_ref().is_ok_and(|result| result.is_ok())}))?;
+                break result??;
+            },
             command = input.recv() => match command {
                 Some(HostCommand::Stop) | None => {
                     // Capture is bounded and has no model work or source writes.
                     // Await it before returning so preparation cannot become an orphan.
                     if let Ok(Ok(workspace)) = prepare.await {
                         let recovery=workspace::preserve_partial_and_cleanup(&workspace)?;
+                        record_preparation_cancelled(&workspace, &recovery)?;
                         let mut event=Event::new("stopped","Preparation cancelled; temporary workspaces removed.");
                         event.partial_paths=vec![recovery.recovery];
                         let _=output.send(event);
@@ -677,7 +737,65 @@ async fn prepare(
     {
         return Err(startup_failure(&mut saved, output, error));
     }
-    Ok((saved, lock))
+    Ok(saved)
+}
+
+fn record_preparation_failure(
+    run_dir: &std::path::Path,
+    project: &std::path::Path,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let record: Value = serde_json::from_slice(&fs::read(run_dir.join("run.json"))?)?;
+    // Once a complete Saved record exists, startup_failure owns its recovery
+    // state. Never replace that evidence with a pre-admission conclusion.
+    if record.get("workspace").is_some()
+        || (record["status"] == "stopped"
+            && record["native_started"] == false
+            && record["finished"] == true
+            && record["workspace_cleanup_complete"] == true)
+    {
+        return Ok(());
+    }
+    ensure!(
+        record["native_started"] == false && record["status"] == "preparing",
+        "Preparation record changed"
+    );
+    let captures = run_dir.join("workspace");
+    let clean = match fs::symlink_metadata(&captures) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::read_dir(&captures)?.all(|entry| {
+                entry.is_ok_and(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            })
+        }
+        _ => false,
+    };
+    atomic_json(
+        &run_dir.join("run.json"),
+        &json!({
+            "host":"codex", "status":"preparation_failed", "project":project,
+            "native_started":false, "finished":clean, "workspace_cleanup_complete":clean,
+            "reason":error.to_string()
+        }),
+    )
+}
+
+fn record_preparation_cancelled(
+    workspace: &PreparedWorkspace,
+    recovery: &workspace::RecoveryReport,
+) -> Result<()> {
+    ensure!(
+        recovery.cleanup_complete,
+        "Preparation cleanup is not complete"
+    );
+    atomic_json(
+        &workspace.run_dir.join("run.json"),
+        &json!({
+            "host":"codex", "status":"stopped", "project":workspace.original,
+            "native_started":false, "finished":true, "workspace_cleanup_complete":true,
+            "recovery":recovery
+        }),
+    )
 }
 
 async fn start_turn(
@@ -686,6 +804,8 @@ async fn start_turn(
     revision: u64,
     text: &str,
     attachments: &[Value],
+    journal: &mut Journal,
+    index: usize,
 ) -> Result<()> {
     let mut input = vec![text_input(text)];
     input.extend_from_slice(attachments);
@@ -708,7 +828,12 @@ async fn start_turn(
     worker.revision_fences = vec![(0, revision)];
     worker.outcome = None;
     worker.waiting = false;
+    worker.wait_cursor = None;
     worker.blocked = false;
+    journal.observe(
+        "worker_turn_started",
+        &json!({"worker":index+1,"turn_id":worker.turn,"revision":worker.revision}),
+    )?;
     Ok(())
 }
 
@@ -718,12 +843,14 @@ async fn update_worker(
     revision: u64,
     text: &str,
     attachments: &[Value],
+    journal: &mut Journal,
+    index: usize,
 ) -> Result<()> {
     let message = format!("User update, revision {revision}: {text}");
     let mut input = vec![text_input(&message)];
     input.extend_from_slice(attachments);
     let Some(turn) = worker.turn.clone() else {
-        return start_turn(rpc, worker, revision, &message, attachments).await;
+        return start_turn(rpc, worker, revision, &message, attachments, journal, index).await;
     };
     if rpc
         .request(
@@ -758,8 +885,15 @@ async fn update_worker(
             ),
         "The update could not be acknowledged safely. No duplicate turn was started."
     );
+    journal.observe(
+        "worker_turn_finished",
+        &json!({
+            "worker":index+1, "turn_id":turn, "revision":worker.revision,
+            "status":latest["status"], "waiting":false, "source":"native_state_reconciliation"
+        }),
+    )?;
     worker.turn = None;
-    start_turn(rpc, worker, revision, &message, attachments).await
+    start_turn(rpc, worker, revision, &message, attachments, journal, index).await
 }
 
 fn initial_turn_input(request: &StartRequest, revision: u64) -> (String, Vec<Value>) {
@@ -811,6 +945,10 @@ async fn drive(
     input: &mut mpsc::Receiver<HostCommand>,
     output: &mpsc::UnboundedSender<Event>,
 ) -> Result<Option<(usize, completion::Completion)>> {
+    journal.observe(
+        "phase",
+        &json!({"phase":"worker_admission","boundary":"start"}),
+    )?;
     let run_id = saved
         .workspace
         .run_dir
@@ -907,8 +1045,21 @@ async fn drive(
             "worker_turn_requested",
             &json!({"worker":index+1,"revision":saved.revision}),
         )?;
-        start_turn(rpc, worker, saved.revision, &task, &initial_inputs).await?;
+        start_turn(
+            rpc,
+            worker,
+            saved.revision,
+            &task,
+            &initial_inputs,
+            journal,
+            index,
+        )
+        .await?;
     }
+    journal.observe(
+        "phase",
+        &json!({"phase":"worker_admission","boundary":"end","success":true}),
+    )?;
     atomic_json(&saved.workspace.run_dir.join("run.json"), saved)?;
     let mut started = Event::new(
         "started",
@@ -934,9 +1085,18 @@ async fn drive(
                     &call.tool,
                     call.arguments,
                     output,
+                    pending_candidate.is_none(),
+                    journal,
                 )
                 .await?;
-                let _ = call.reply.send(json!({"isError":!success,"content":[{"type":"text","text":serde_json::to_string(&body)?}]}));
+                let text = serde_json::to_string(&body)?;
+                journal.observe(
+                    "coordination_response",
+                    &json!({"worker":call.worker+1,"bytes":text.len()}),
+                )?;
+                let _ = call
+                    .reply
+                    .send(json!({"isError":!success,"content":[{"type":"text","text":text}]}));
                 atomic_json(&saved.workspace.run_dir.join("run.json"), saved)?;
             }
         }
@@ -971,9 +1131,9 @@ async fn drive(
                     saved.request.task.push_str(&format!("\n\nUser update:\n{text}"));
                     journal.record("user_update", &json!({"revision":saved.revision,"text":text}))?;
                     saved.request.attachments.extend(attachments.clone());
-                    for worker in &mut saved.workers {
+                    for (index, worker) in saved.workers.iter_mut().enumerate() {
                         worker.outcome = None;
-                        update_worker(rpc,worker,saved.revision,&text,&attachments).await?;
+                        update_worker(rpc,worker,saved.revision,&text,&attachments,journal,index).await?;
                     }
                 }
                 Some(HostCommand::Answer { id, answers }) => {
@@ -1006,9 +1166,9 @@ async fn drive(
                     event.id = Some(id);
                     event.request_revision = Some(saved.revision);
                     let _ = output.send(event);
-                    for worker in &mut saved.workers {
+                    for (index, worker) in saved.workers.iter_mut().enumerate() {
                         worker.outcome = None;
-                        update_worker(rpc,worker,saved.revision,&text,&[]).await?;
+                        update_worker(rpc,worker,saved.revision,&text,&[],journal,index).await?;
                     }
                 }
                 Some(HostCommand::Respond{id,response}) => {
@@ -1060,8 +1220,10 @@ async fn drive(
                         }
                         let tool = params.get("tool").and_then(Value::as_str).unwrap_or("");
                         let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-                        let (success,body) = dispatch_tool(saved,rpc,board,&mut services,index,tool,args,output).await?;
-                        rpc.respond(id,json!({"contentItems":[{"type":"inputText","text":serde_json::to_string(&body)?}],"success":success})).await?;
+                        let (success,body) = dispatch_tool(saved,rpc,board,&mut services,index,tool,args,output,pending_candidate.is_none(),journal).await?;
+                        let text=serde_json::to_string(&body)?;
+                        journal.observe("coordination_response", &json!({"worker":index+1,"bytes":text.len()}))?;
+                        rpc.respond(id,json!({"contentItems":[{"type":"inputText","text":text}],"success":success})).await?;
                     }
                     "item/started" => {
                         tool_calls.observe(index, &saved.workers[index], &params, message["_delm_received_sequence"].as_u64(), true)?;
@@ -1086,6 +1248,7 @@ async fn drive(
                     "turn/completed" => {
                         let turn = params.get("turn").context("Turn result missing")?;
                         if saved.workers[index].turn.as_deref() != turn.get("id").and_then(Value::as_str) { continue; }
+                        journal.observe("worker_turn_finished", &json!({"worker":index+1,"turn_id":turn["id"],"revision":saved.workers[index].revision,"status":turn["status"],"waiting":turn["status"]=="completed" && saved.workers[index].revision==saved.revision && saved.workers[index].outcome.as_ref().is_some_and(|value|value["outcome"]=="waiting")}))?;
                         tool_calls.retire(index);
                         for event in questions.retire_turn(index, turn["id"].as_str().unwrap_or("")) { let _ = output.send(event); }
                         for event in approvals.retire_turn(index, turn["id"].as_str().unwrap_or("")) { let _ = output.send(event); }
@@ -1098,10 +1261,6 @@ async fn drive(
                             let retired_services=services.retire_worker(index+1)?;
                             journal.record("worker_services_retired", &retired_services)?;
                             let _=output.send(Event::new("notice",format!("Worker {} stopped with status {status}. {} tasks are available for its peer.",index+1,released.len())));
-                            let other=1-index;
-                            if !released.is_empty() && saved.workers[other].waiting && saved.workers[other].turn.is_none() {
-                                start_turn(rpc,&mut saved.workers[other],saved.revision,"Your peer stopped. Its task claims have been released. Read the board and continue from its published contributions.",&[]).await?;
-                            }
                         }
                         else if saved.workers[index].revision == saved.revision {
                             let outcome = saved.workers[index].outcome.clone();
@@ -1120,7 +1279,7 @@ async fn drive(
                                 }
                                 Some("partial") => {
                                     let summary = outcome.as_ref().and_then(|o|o.get("summary")).and_then(Value::as_str).unwrap_or("");
-                                    start_turn(rpc,&mut saved.workers[index],saved.revision,&format!("Advance the shared result by addressing this unfinished requirement: {summary}. Read current ownership, take ready work, and reuse peer contributions. Integrate only if no peer owns assembly."),&[]).await?;
+                                    start_turn(rpc,&mut saved.workers[index],saved.revision,&format!("Advance the shared result by addressing this unfinished requirement: {summary}. Read current ownership, take ready work, and reuse peer contributions. Integrate only if no peer owns assembly."),&[],journal,index).await?;
                                 }
                                 Some("waiting") => saved.workers[index].waiting = true,
                                 Some("blocked") => {
@@ -1130,19 +1289,22 @@ async fn drive(
                                 }
                                 _ if !saved.workers[index].repaired => {
                                     saved.workers[index].repaired = true;
-                                    start_turn(rpc,&mut saved.workers[index],saved.revision,"State the whole-request outcome with delm_complete. If a concrete requested requirement remains, finish it. If the result is ready, declare complete with the checks already performed; do not start another improvement pass.",&[]).await?;
+                                    start_turn(rpc,&mut saved.workers[index],saved.revision,"State the whole-request outcome with delm_complete. If a concrete requested requirement remains, finish it. If the result is ready, declare complete with the checks already performed; do not start another improvement pass.",&[],journal,index).await?;
                                 }
                                 _ => saved.workers[index].blocked = true,
                             }
+                        }
+                        if pending_candidate.is_none() {
+                            wake_waiting(saved, rpc, board, journal).await?;
                         }
                         announce_ready(pending_candidate.as_ref(), saved.revision, &questions, &approvals, output);
                         if pending_candidate.is_none() && saved.workers.iter().all(|w|w.turn.is_none()) {
                             let repair_wait = saved.workers.iter().any(|w|w.waiting && !w.wait_repaired);
                             if repair_wait {
-                                for worker in &mut saved.workers {
+                                for (index, worker) in saved.workers.iter_mut().enumerate() {
                                     if worker.waiting && !worker.wait_repaired {
                                         worker.wait_repaired = true;
-                                        start_turn(rpc,worker,saved.revision,"Your named dependency has no active producer. Read the board and resolve the dependency through useful work you can do now. If it requires user input, declare blocked with the concrete reason. Do not repeat the same wait.",&[]).await?;
+                                        start_turn(rpc,worker,saved.revision,"Your named dependency has no active producer. Read the board and resolve the dependency through useful work you can do now. If it requires user input, declare blocked with the concrete reason. Do not repeat the same wait.",&[],journal,index).await?;
                                     }
                                 }
                             } else {return Ok(None);}
@@ -1198,6 +1360,8 @@ async fn dispatch_tool(
     tool: &str,
     args: Value,
     output: &mpsc::UnboundedSender<Event>,
+    allow_wakeup: bool,
+    journal: &mut Journal,
 ) -> Result<(bool, Value)> {
     let checked = if index >= 2 || saved.workers[index].turn.is_none() {
         Err(anyhow::anyhow!("This worker has no active turn"))
@@ -1226,6 +1390,9 @@ async fn dispatch_tool(
     }
     body["recent_commands"] = recent_commands(&saved.workers[index], saved.revision);
     if success && tool == "delm_complete" {
+        if saved.workers[index].outcome.as_ref() != Some(&args) {
+            saved.workers[index].wait_cursor = board.wait_cursor(&args)?;
+        }
         saved.workers[index].outcome = Some(args.clone());
     }
     if success && let Some(event) = task_event(&mut saved.workers[index], index, tool, &body) {
@@ -1245,22 +1412,111 @@ async fn dispatch_tool(
         ));
     }
     if success
+        && allow_wakeup
         && matches!(
             tool,
-            "delm_publish" | "delm_task_finish" | "delm_task_release" | "delm_task_split"
+            "delm_publish"
+                | "delm_task_finish"
+                | "delm_task_release"
+                | "delm_task_split"
+                | "delm_task_create"
         )
     {
-        let other = 1 - index;
-        if saved.workers[other].waiting && saved.workers[other].turn.is_none() {
-            start_turn(rpc,&mut saved.workers[other],saved.revision,"New shared work is available. Read the board and claim useful ready work or continue your now-unblocked dependency.",&[]).await?;
-        }
+        wake_waiting(saved, rpc, board, journal).await?;
     }
     Ok((success, body))
+}
+
+async fn wake_waiting(
+    saved: &mut Saved,
+    rpc: &RpcClient,
+    board: &mut Board,
+    journal: &mut Journal,
+) -> Result<()> {
+    for (index, worker) in saved.workers.iter_mut().enumerate() {
+        if worker.waiting
+            && !worker.blocked
+            && worker.turn.is_none()
+            && worker.revision == saved.revision
+            && let Some(cursor) = &worker.wait_cursor
+            && board.wait_ready(cursor)?
+        {
+            start_turn(rpc,worker,saved.revision,"New shared work is available. Read the board and claim useful ready work or continue your now-unblocked dependency.",&[],journal,index).await?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cancellation_after_preparation_keeps_proven_cleanup_and_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("source.txt"), "Keep this source").unwrap();
+        let prepared = workspace::prepare(&project, &temp.path().join("run"), 1_000_000).unwrap();
+        let recovery = workspace::preserve_partial_and_cleanup(&prepared).unwrap();
+        assert!(recovery.recovery.is_dir());
+        record_preparation_cancelled(&prepared, &recovery).unwrap();
+        let before = fs::read(prepared.run_dir.join("run.json")).unwrap();
+        // The outer preparation error handler must preserve the successful
+        // cleanup proof even though its recovery directory intentionally remains.
+        record_preparation_failure(
+            &prepared.run_dir,
+            &prepared.original,
+            &anyhow::anyhow!("Preparation cancelled; no worker was started"),
+        )
+        .unwrap();
+        assert_eq!(fs::read(prepared.run_dir.join("run.json")).unwrap(), before);
+        let saved: Value = serde_json::from_slice(&before).unwrap();
+        assert_eq!(saved["status"], "stopped");
+        assert_eq!(saved["finished"], true);
+        assert_eq!(saved["workspace_cleanup_complete"], true);
+        assert_eq!(saved["recovery"]["recovery"], json!(recovery.recovery));
+        assert!(prepared.workers.iter().all(|path| !path.exists()));
+        assert_eq!(
+            fs::read_to_string(project.join("source.txt")).unwrap(),
+            "Keep this source"
+        );
+    }
+
+    #[test]
+    fn failed_preparation_is_terminal_only_when_capture_cleanup_is_proven() {
+        for remnants in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let run = temp.path().join("run");
+            fs::create_dir(&run).unwrap();
+            atomic_json(
+                &run.join("run.json"),
+                &json!({"status":"preparing","native_started":false}),
+            )
+            .unwrap();
+            if remnants {
+                fs::create_dir_all(run.join("workspace/capture-2")).unwrap();
+            }
+            record_preparation_failure(&run, temp.path(), &anyhow::anyhow!("Unsupported project"))
+                .unwrap();
+            let saved: Value =
+                serde_json::from_slice(&fs::read(run.join("run.json")).unwrap()).unwrap();
+            assert_eq!(saved["status"], "preparation_failed");
+            assert_eq!(saved["native_started"], false);
+            assert_eq!(saved["finished"], !remnants);
+            assert_eq!(saved["workspace_cleanup_complete"], !remnants);
+            assert_eq!(run.join("workspace/capture-2").exists(), remnants);
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let existing = json!({"status":"recovery_required","workspace":{"run_dir":temp.path()}});
+        atomic_json(&temp.path().join("run.json"), &existing).unwrap();
+        record_preparation_failure(temp.path(), temp.path(), &anyhow::anyhow!("Cleanup failed"))
+            .unwrap();
+        let saved: Value =
+            serde_json::from_slice(&fs::read(temp.path().join("run.json")).unwrap()).unwrap();
+        assert_eq!(saved, existing);
+    }
+
     #[test]
     fn native_input_offsets_attachments_and_early_updates_survive_launch() {
         let temp = tempfile::tempdir().unwrap();

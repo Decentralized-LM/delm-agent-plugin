@@ -92,6 +92,8 @@ and keyboard controls. Include a README and test the main interactions.
 
 Use `$delm:run` for the same request in Codex. Send clarifications in the same conversation while the agents work. In Claude Code, `/delm-status` shows progress and `/delm-stop` stops the run and preserves unfinished work. See [run control and recovery](docs/support.md) for both hosts.
 
+Include images and file mentions when starting a Claude run. During a run, send text or paste the relevant file content. Claude's current native API cannot forward new media attachments to existing agents; DeLM explains this before accepting an unsupported update. See [Claude input support](docs/claude-integration.md) for details.
+
 The current version runs two agents in private project copies. They share contributions and divide useful checks, so a recorded check can be reused when it still applies to the result.
 
 **The result is delivered to your original project.** DeLM preserves your Git index, merges compatible edits, and retains conflicts for recovery. Temporary worker directories are removed after safe delivery or recovery. When the delivered project needs dependency setup or a focused check, the parent completes it before reporting the result ready.
@@ -108,7 +110,7 @@ Codex workers preserve saved skills, plugins, hooks, MCP configuration, and perm
 
 | Guide | Contents |
 | --- | --- |
-| [Support](docs/support.md) | Requirements, permissions, updates, and recovery |
+| [Support](docs/support.md) | Requirements, permissions, timing reports, updates, and recovery |
 | [Architecture](docs/architecture.md) | Host adapters, shared coordination, and project delivery |
 | [Contributing](CONTRIBUTING.md) | Development setup and verification |
 | [Release guide](docs/releases.md) | Build qualification and distribution |

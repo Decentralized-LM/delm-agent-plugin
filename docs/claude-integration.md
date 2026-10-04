@@ -24,7 +24,15 @@ The module records peer identities, their descendants, and native background-tas
 
 Only then does shared delivery apply accepted changes to the original project, preserving its Git index and unrelated edits. Conflicts save recoverable work. After safe delivery or recovery, both worker copies and the temporary baseline are removed. Dependencies remain local to each project, so the parent performs necessary setup or a focused relocated-result check when the delivery report requires it.
 
-Run ownership is durable. Reload recovery confirms the old bridge and owned execution have stopped. An unfinished Claude run also blocks a new Codex run on that project. Uncertain shutdown or an unreconstructable interrupted capture preserves the copies instead of guessing what is safe to remove. `/delm-status` and `/delm-stop` provide native controls.
+Run ownership is durable and keyed by the native conversation ID. Commands and runtime callbacks recheck that identity; clearing, resuming, or branching cannot carry status, updates, or queued control messages into another conversation. Ending a conversation requests cancellation within the host's short shutdown budget. Returning to it restores its saved outcome or performs guarded recovery. Recovery confirms the old bridge and owned execution have stopped. An unfinished Claude run also blocks a new Codex run on that project. Uncertain shutdown or an unreconstructable interrupted capture preserves the copies instead of guessing what is safe to remove. `/delm-status` and `/delm-stop` provide native controls.
+
+## Follow-up instructions
+
+Text updates include the prompt and additional text context accepted by Claude's prompt middleware. A rejected native submission does not advance the DeLM request revision. Both peers receive each accepted update; their next model requests acknowledge it only after complete native delivery and a fresh turn. If native middleware refuses or changes a required context append, DeLM pauses rather than reporting that the full update arrived.
+
+Claude Code 2.1.289 exposes attachment metadata on `prompt.submit`, and its `session.append` API accepts text blocks only. DeLM therefore rejects follow-up images, audio, and documents before changing the task. The error explains that workers retain the previous task and offers the supported route: stop the run and include the attachment in a new `/delm:run`, whose native forks inherit the initial conversation. Unexpanded `@reference` submissions receive the same guidance; paste the relevant text when continuing an existing run. Email addresses, quoted literals, and code are treated as ordinary text. Already supplied textual selections and context are preserved.
+
+These limitations apply to forwarding new inputs into existing peers, not to what native forks inherit at launch. DeLM does not change native permissions, replace skills, select a different model, or read referenced files outside the host's normal tool permissions to work around them.
 
 ## Implementation and qualification
 
@@ -35,11 +43,11 @@ The implementation followed these stages:
 3. Implement the native Claude module, authenticated bridge, revision-bound board calls, and guarded lifecycle using the shared runtime.
 4. Use one installer entry point with host detection, a choice when both hosts are available, and explicit host flags for scripts. Each adapter handles native marketplace registration, update, status, and removal.
 5. Stage self-contained host packages from explicit allowlists, validate through the official CLI, and bind release qualification to the actual runtime and adapter bytes.
-6. Run focused regression tests and the small account-backed collaboration fixture before the local commit.
+6. Exercise lifecycle changes with focused regression tests and native package validation. Qualify account-backed collaboration separately using the fixture documented below.
 
 Native boundary checks use Claude Code 2.1.289 on Apple Silicon with the existing Auto permissions. They establish inherited conversation markers, project instructions, skills, model and observed tools, actual worker working directories, active updates, same-identity resumption, and exact native agent/background-task stops. The real collaboration fixture and its evidence format are documented in [development](development.md#claude-code). It requires useful publications from both workers, checked output delivered to the original project, preservation of original files and staging, and removal of both worker trees.
 
-A small fixture establishes the exercised behavior, not universal task quality or a speedup guarantee. Intel native qualification and checks against the exact signed release candidate remain release requirements. [Release qualification](releases.md) distinguishes model-free CI checks, development fixtures, and publication evidence. Routine tests do not use an account or change the user's saved host settings.
+A small fixture establishes the exercised behavior, not universal task quality or a speedup guarantee. Intel native qualification and checks against the exact signed release candidate remain release requirements. [Release qualification](releases.md) distinguishes model-free CI checks, development fixtures, and publication evidence. Routine tests do not use an account or change the user's saved host settings. The conversation-lifecycle changes were checked with deterministic regressions, native API validation, and distribution checks; an account-backed task was not repeated for this revision. The host regression suite exercises conversation changes without a new `session.start`, delayed callbacks, recovery isolation, rejected inputs, accepted context rewrites, both-peer delivery, and inherited fork settings. Native `claude plugin validate --strict` checks the adapter against the installed host's supported events and APIs.
 
 ## Official references
 

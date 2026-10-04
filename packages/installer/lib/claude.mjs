@@ -38,7 +38,7 @@ function requireSupportedVersion(stdout) {
   }
 }
 
-export async function manageClaude(command, {claude, release, run}) {
+export async function manageClaude(command, {claude, release, run, beforeMutation}) {
   const invoke = async args => {
     try {
       return await run(claude, args);
@@ -55,6 +55,7 @@ export async function manageClaude(command, {claude, release, run}) {
     requireSupportedVersion((await invoke(['--version'])).stdout);
   }
   const native = async (args, mutation = null) => {
+    if (mutation) await beforeMutation();
     let response;
     let failure;
     try {
@@ -162,6 +163,10 @@ export function describeClaude(result) {
     if (result.conflict) lines.push('The delm marketplace source or branch differs. Review `claude plugin marketplace list --json`.');
     if (result.scopeConflict) lines.push('DeLM is registered in another scope or more than once. Review `claude plugin list --json`.');
     if (result.legacyInstalled) lines.push('A source installation (delm@delm-local) is also present.');
+    if (result.installed || result.legacyInstalled) {
+      lines.push('Session readiness has not been checked.');
+      lines.push(...(result.readiness?.nextSteps ?? []));
+    }
     return lines.join('\n');
   }
   if (result.command === 'remove') return result.changed

@@ -1017,3 +1017,96 @@ fn failed_checks_and_changed_inputs_are_visible_but_not_reusable() {
         2
     );
 }
+
+#[test]
+fn wait_cursor_tracks_relevant_readiness_without_changing_board_views() {
+    let fixture = Fixture::new();
+    fixture.seed("source.txt", b"source");
+    let mut board = fixture.board();
+    let task = board
+        .call(
+            2,
+            "delm_task_create",
+            json!({"idempotency_key":"task", "title":"Storage", "description":"Storage"}),
+        )
+        .unwrap()["result"]["task_id"]
+        .as_i64()
+        .unwrap();
+    let claim = board
+        .call(
+            2,
+            "delm_task_claim",
+            json!({"idempotency_key":"claim", "task_id":task}),
+        )
+        .unwrap();
+    let declaration = json!({"idempotency_key":"wait", "expected_revision":1,"outcome":"waiting", "summary":"Waiting for storage", "dependency":format!("task:{task}")});
+    board.call(1, "delm_complete", declaration.clone()).unwrap();
+    let before = board.view().unwrap();
+    let cursor = board.wait_cursor(&declaration).unwrap().unwrap();
+    assert_eq!(board.view().unwrap(), before);
+    assert!(!board.wait_ready(&cursor).unwrap());
+    publish(&mut board, 2, "unrelated-publication", &["source.txt"]);
+    assert!(
+        !board.wait_ready(&cursor).unwrap(),
+        "a peer publication does not finish the named task"
+    );
+    board.call(2,"delm_task_finish",json!({"idempotency_key":"finish", "task_id":task,"expected_version":claim["result"]["version"], "summary":"Storage ready"})).unwrap();
+    assert!(board.wait_ready(&cursor).unwrap());
+}
+
+#[test]
+fn newly_available_work_wakes_but_already_claimed_work_does_not() {
+    let fixture = Fixture::new();
+    let mut board = fixture.board();
+    let declaration = json!({"outcome":"waiting", "dependency":"worker:2"});
+    let cursor = board.wait_cursor(&declaration).unwrap().unwrap();
+    let created = board
+        .call(
+            2,
+            "delm_task_create",
+            json!({"idempotency_key":"new", "title":"API", "description":"API"}),
+        )
+        .unwrap();
+    assert!(board.wait_ready(&cursor).unwrap());
+    let task = created["result"]["task_id"].as_i64().unwrap();
+    let claim = board
+        .call(
+            2,
+            "delm_task_claim",
+            json!({"idempotency_key":"claim", "task_id":task}),
+        )
+        .unwrap();
+    assert!(!board.wait_ready(&cursor).unwrap());
+    board.call(2,"delm_task_release",json!({"idempotency_key":"release", "task_id":task,"expected_version":claim["result"]["version"],"summary":"Available to peer"})).unwrap();
+    assert!(board.wait_ready(&cursor).unwrap());
+    let next_wait = board.wait_cursor(&declaration).unwrap().unwrap();
+    assert!(
+        !board.wait_ready(&next_wait).unwrap(),
+        "unchanged work must not cause another wake"
+    );
+}
+
+#[test]
+fn integration_availability_waits_for_the_current_assembler_to_finish() {
+    let fixture = Fixture::new();
+    let mut board = fixture.board();
+    let current = board.call(2,"delm_task_create",json!({"idempotency_key":"current", "title":"First integration", "description":"Assemble", "kind":"integration"})).unwrap()["result"]["task_id"].clone();
+    let claim = board
+        .call(
+            2,
+            "delm_task_claim",
+            json!({"idempotency_key":"claim", "task_id":current}),
+        )
+        .unwrap();
+    board.call(2,"delm_task_create",json!({"idempotency_key":"next", "title":"Next integration", "description":"Assemble next", "kind":"integration"})).unwrap();
+    let cursor = board
+        .wait_cursor(&json!({"outcome":"waiting", "dependency":"worker:2"}))
+        .unwrap()
+        .unwrap();
+    assert!(!board.wait_ready(&cursor).unwrap());
+    board.call(2,"delm_task_finish",json!({"idempotency_key":"finish", "task_id":current,"expected_version":claim["result"]["version"],"summary":"Assembly complete"})).unwrap();
+    assert!(
+        board.wait_ready(&cursor).unwrap(),
+        "previously unavailable integration is now claimable"
+    );
+}

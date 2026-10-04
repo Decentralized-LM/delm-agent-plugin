@@ -18,11 +18,12 @@
     "lib/claude.mjs",
     "lib/hosts.mjs",
     "lib/installer.mjs",
+    "lib/maintenance.mjs",
     "lib/native.mjs",
     "release.json"
   ],
   "scripts": {
-    "test": "node --test test/installer.test.mjs test/claude.test.mjs test/hosts.test.mjs test/selection-cli.test.mjs test/package.test.mjs",
+    "test": "node --test test/installer.test.mjs test/claude.test.mjs test/hosts.test.mjs test/selection-cli.test.mjs test/maintenance.test.mjs test/package.test.mjs",
     "test:native": "node --test test/native.test.mjs",
     "test:native:claude": "node --test test/native-claude.test.mjs"
   }

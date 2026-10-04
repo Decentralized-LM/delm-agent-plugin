@@ -2,7 +2,7 @@
 //! Only the authenticated native module may send control operations. MCP calls
 //! consume one-use tickets reserved by that module before native permission UI.
 use crate::{
-    board::Board,
+    board::{Board, WaitCursor},
     completion::{Completion, validate_evidence},
     evidence::{CommandCompletion, CommandEvidence, FilesystemScope, NativeHost},
     run::state::{self, Journal, RunLock, atomic_json},
@@ -38,6 +38,7 @@ struct Worker {
     #[serde(skip)]
     observed_calls: HashSet<String>,
     waiting: bool,
+    wait_cursor: Option<WaitCursor>,
     resume_pending: bool,
     blocked: bool,
     repaired: bool,
@@ -80,6 +81,7 @@ pub(super) struct Controller {
     finished: bool,
     status: String,
     token_digest: Option<String>,
+    admission_recorded: bool,
 }
 
 impl Controller {
@@ -114,29 +116,33 @@ impl Controller {
             &json!({"version":1,"host":"claude","project":project,
             "session_id":session_id,"task":task,"runtime":runtime,"native_host":native_host,"status":"preparing","finished":false}),
         )?;
-        let workspace =
-            match workspace::prepare(&project, &run_dir, crate::config::MAX_REPO_SIZE_BYTES) {
-                Ok(workspace) => workspace,
-                Err(error) => {
-                    // The preparation guard normally removes its captures. If any
-                    // directory remains, keep admission closed instead of inferring
-                    // ownership from its name or deleting uncertain data.
-                    let captures = run_dir.join("workspace");
-                    let clean = !captures.try_exists()?
-                        || fs::read_dir(&captures)?.all(|entry| {
-                            entry.is_ok_and(|entry| {
-                                entry.file_type().is_ok_and(|kind| kind.is_file())
-                            })
-                        });
-                    atomic_json(
-                        &run_dir.join("claude.json"),
-                        &json!({"version":1,"host":"claude","project":project,
+        let mut preparation_journal = Journal::open(&run_dir)?;
+        preparation_journal.observe("phase", &json!({"phase":"preparation","boundary":"start"}))?;
+        let prepared = workspace::prepare(&project, &run_dir, crate::config::MAX_REPO_SIZE_BYTES);
+        preparation_journal.observe(
+            "phase",
+            &json!({"phase":"preparation","boundary":"end","success":prepared.is_ok()}),
+        )?;
+        let workspace = match prepared {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                // The preparation guard normally removes its captures. If any
+                // directory remains, keep admission closed instead of inferring
+                // ownership from its name or deleting uncertain data.
+                let captures = run_dir.join("workspace");
+                let clean = !captures.try_exists()?
+                    || fs::read_dir(&captures)?.all(|entry| {
+                        entry.is_ok_and(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                    });
+                atomic_json(
+                    &run_dir.join("claude.json"),
+                    &json!({"version":1,"host":"claude","project":project,
                     "session_id":session_id,"task":task,"runtime":runtime,"native_host":native_host,
                     "status":"preparation_failed","finished":clean,"reason":error.to_string()}),
-                    )?;
-                    return Err(error);
-                }
-            };
+                )?;
+                return Err(error);
+            }
+        };
         Self::from_workspace(lock, workspace, session_id, task, native_host, runtime)
     }
 
@@ -239,8 +245,13 @@ impl Controller {
             finished: false,
             status: "prepared".into(),
             token_digest: None,
+            admission_recorded: false,
         };
         result.journal.record("claude_prepared", &result.ready())?;
+        result.journal.observe(
+            "phase",
+            &json!({"phase":"worker_admission","boundary":"start"}),
+        )?;
         result.persist()?;
         Ok(result)
     }
@@ -303,10 +314,24 @@ impl Controller {
             .sequence
             .checked_add(1)
             .context("Native event sequence overflow")?;
+        let coordination_worker = if request["op"] == "consume" {
+            request["ticket"]
+                .as_str()
+                .and_then(|ticket| self.tickets.get(ticket))
+                .map(|ticket| ticket.worker + 1)
+        } else {
+            None
+        };
         let mut result = self.dispatch(&request);
         if let Ok(body) = &mut result {
             let mut index = 0;
             stamp_actions(body, self.sequence, &mut index);
+            if let Some(worker) = coordination_worker {
+                self.journal.observe(
+                    "coordination_response",
+                    &json!({"worker":worker,"bytes":serde_json::to_vec(body)?.len()}),
+                )?;
+            }
         }
         // Persist even an error that burned a one-use ticket or interrupted a
         // partially completed lifecycle transition. Never persist ticket secrets.
@@ -343,6 +368,10 @@ impl Controller {
             "turn_end" => self.turn_end(request),
             "update" => self.update(request),
             "cancel" => {
+                if !self.stop_requested && self.candidate.is_none() {
+                    self.journal
+                        .observe("phase", &json!({"phase":"shutdown","boundary":"start"}))?;
+                }
                 self.stop_requested = true;
                 self.candidate = None;
                 self.tickets.clear();
@@ -449,13 +478,27 @@ impl Controller {
             ensure!(active == turn, "Previous native turn is still active");
         }
         if self.workers[i].revision != self.revision || self.workers[i].turn_id.is_none() {
+            if self.workers[i].turn_id.is_none() {
+                self.journal.observe(
+                    "worker_turn_started",
+                    &json!({"worker":i+1,"turn_id":turn,"revision":self.revision}),
+                )?;
+            }
             self.workers[i].outcome = None;
             self.workers[i].waiting = false;
+            self.workers[i].wait_cursor = None;
             self.workers[i].blocked = false;
         }
         self.workers[i].resume_pending = false;
         self.workers[i].turn_id = Some(turn.into());
         self.workers[i].revision = self.revision;
+        if !self.admission_recorded && self.workers.iter().all(|worker| worker.revision > 0) {
+            self.admission_recorded = true;
+            self.journal.observe(
+                "phase",
+                &json!({"phase":"worker_admission","boundary":"end","success":true}),
+            )?;
+        }
         Ok(json!({"revision":self.revision,"task":self.task}))
     }
 
@@ -556,6 +599,9 @@ impl Controller {
             _ => self.board.call(i + 1, tool, args.clone())?,
         };
         if tool == "delm_complete" {
+            if self.workers[i].outcome.as_ref() != Some(&args) {
+                self.workers[i].wait_cursor = self.board.wait_cursor(&args)?;
+            }
             self.workers[i].outcome = Some(args.clone());
         }
         self.journal.record("claude_coordination",&json!({"worker":i+1,"revision":self.revision,"tool":tool,"arguments":args,"response":body}))?;
@@ -576,7 +622,7 @@ impl Controller {
                 | "delm_task_split"
                 | "delm_task_create"
         ) {
-            self.wake_waiting(&mut actions,"Shared work changed. Read the board, take ready work, and reuse the new contribution.");
+            self.wake_waiting(&mut actions,"Shared work changed. Read the board, take ready work, and reuse the new contribution.")?;
         }
         body["actions"] = json!(actions);
         Ok(body)
@@ -659,12 +705,13 @@ impl Controller {
         let reason = text(r, "reason", 128)?;
         let answer = r["answer"].as_str().unwrap_or("");
         self.journal.record("claude_turn_completed",&json!({"worker":i+1,"turn_id":turn,"reason":reason,"answer":answer,"revision":self.workers[i].revision}))?;
+        self.journal.observe("worker_turn_finished",&json!({"worker":i+1,"turn_id":turn,"status":reason,"revision":self.workers[i].revision,"waiting":reason=="completed" && self.workers[i].revision==self.revision && self.workers[i].outcome.as_ref().is_some_and(|value|value["outcome"]=="waiting")}))?;
         let mut actions = Vec::new();
         if reason != "completed" {
             self.workers[i].blocked = true;
             self.board.release_worker_claims(i + 1, reason)?;
             self.services.retire_worker(i + 1)?;
-            self.wake_waiting(&mut actions,"Your peer stopped. Read the released tasks and continue useful work from its published contributions.");
+            self.wake_waiting(&mut actions,"Your peer stopped. Read the released tasks and continue useful work from its published contributions.")?;
         } else if !self.stop_requested
             && self.workers[i].revision == self.revision
             && self.candidate.is_none()
@@ -678,6 +725,7 @@ impl Controller {
                     let completion=Completion::capture_with_evidence(&self.workspace.workers[i],declaration,&self.workers[i].checks,self.revision,&self.workers[i].result_policy,shared)?;
                     atomic_json(&self.workspace.run_dir.join("completion.json"),&completion)?;
                     self.candidate=Some((i,completion));
+                    self.journal.observe("phase", &json!({"phase":"shutdown","boundary":"start"}))?;
                     self.status="awaiting_shutdown".into();
                     self.tickets.clear();
                     actions.push(json!({"type":"candidate","agent_id":self.workers[i].agent_id,"revision":self.revision}));
@@ -692,6 +740,10 @@ impl Controller {
                 _=>self.workers[i].blocked=true,
             }
         }
+        self.wake_waiting(
+            &mut actions,
+            "Shared work changed. Read the board, take ready work, and reuse the new contribution.",
+        )?;
         if self.candidate.is_none()
             && !self.stop_requested
             && self
@@ -708,6 +760,8 @@ impl Controller {
             }
             if actions.is_empty() && self.workers.iter().all(|w| w.agent_id.is_some()) {
                 self.stop_requested = true;
+                self.journal
+                    .observe("phase", &json!({"phase":"shutdown","boundary":"start"}))?;
                 self.status = "stopping".into();
                 actions.push(json!({"type":"stop","reason":"No active worker can continue","agents":self.bound_agents()}));
             }
@@ -719,16 +773,24 @@ impl Controller {
         self.workers[i].resume_pending = true;
         json!({"type":"resume","agent_id":self.workers[i].agent_id,"revision":self.revision,"message":message})
     }
-    fn wake_waiting(&mut self, actions: &mut Vec<Value>, message: &str) {
+    fn wake_waiting(&mut self, actions: &mut Vec<Value>, message: &str) -> Result<()> {
         if self.stop_requested || self.candidate.is_some() {
-            return;
+            return Ok(());
         }
         for i in 0..2 {
-            if self.workers[i].waiting && self.workers[i].turn_id.is_none() {
+            if self.workers[i].waiting
+                && !self.workers[i].blocked
+                && !self.workers[i].resume_pending
+                && self.workers[i].turn_id.is_none()
+                && self.workers[i].revision == self.revision
+                && let Some(cursor) = &self.workers[i].wait_cursor
+                && self.board.wait_ready(cursor)?
+            {
                 self.workers[i].waiting = false;
                 actions.push(self.resume(i, message));
             }
         }
+        Ok(())
     }
     fn bound_agents(&self) -> Vec<&str> {
         self.workers
@@ -754,6 +816,7 @@ impl Controller {
         for worker in &mut self.workers {
             worker.outcome = None;
             worker.waiting = false;
+            worker.wait_cursor = None;
             worker.blocked = false;
             worker.repaired = false;
             worker.wait_repaired = false;
@@ -827,6 +890,15 @@ impl Controller {
                 &known,
             )?;
             quiet = true;
+            self.journal.observe(
+                "phase",
+                &json!({"phase":"shutdown","boundary":"end","success":true}),
+            )?;
+            for (i, worker) in self.workers.iter().enumerate() {
+                if let Some(turn) = &worker.turn_id {
+                    self.journal.observe("worker_turn_finished", &json!({"worker":i+1,"turn_id":turn,"status":"stopped","revision":worker.revision}))?;
+                }
+            }
             if let Some((i, candidate)) = &self.candidate {
                 ensure!(
                     self.workers.iter().all(|worker| worker.agent_id.is_some()),
@@ -837,11 +909,14 @@ impl Controller {
                     "Candidate is obsolete or cancelled"
                 );
                 candidate.verify(&self.workspace.workers[*i])?;
-                let delivery = workspace::deliver_result(
-                    &self.workspace,
-                    *i,
-                    &self.workers[*i].result_policy,
+                self.journal.observe(
+                    "phase",
+                    &json!({"phase":"delivery_and_cleanup","boundary":"start"}),
                 )?;
+                let delivery =
+                    workspace::deliver_result(&self.workspace, *i, &self.workers[*i].result_policy);
+                self.journal.observe("phase", &json!({"phase":"delivery_and_cleanup","boundary":"end","success":delivery.is_ok()}))?;
+                let delivery = delivery?;
                 self.status = if !delivery.delivered {
                     "delivery_conflict"
                 } else if delivery.verification_required {
@@ -854,7 +929,13 @@ impl Controller {
                     json!({"type":"final","status":self.status,"delivery":delivery,"summary":candidate.declaration["summary"],"checks":candidate.checks,"shared_checks":candidate.shared_checks}),
                 )
             } else {
-                let recovery = workspace::preserve_partial_and_cleanup(&self.workspace)?;
+                self.journal.observe(
+                    "phase",
+                    &json!({"phase":"recovery_and_cleanup","boundary":"start"}),
+                )?;
+                let recovery = workspace::preserve_partial_and_cleanup(&self.workspace);
+                self.journal.observe("phase", &json!({"phase":"recovery_and_cleanup","boundary":"end","success":recovery.is_ok()}))?;
+                let recovery = recovery?;
                 self.status = "stopped".into();
                 Ok(json!({"type":"final","status":self.status,"recovery":recovery}))
             }
@@ -867,6 +948,12 @@ impl Controller {
                 Ok(json!({"actions":[final_event]}))
             }
             Err(error) => {
+                if !quiet {
+                    self.journal.observe(
+                        "phase",
+                        &json!({"phase":"shutdown","boundary":"end","success":false}),
+                    )?;
+                }
                 self.status = "recovery_required".into();
                 let reason = format!("{error:#}");
                 self.journal.record(
@@ -1315,6 +1402,139 @@ mod tests {
         assert!(c.handle(json!({"op":"turn_end","agent_id":"agent-1","turn_id":"turn-1","reason":"completed","answer":"All done"})).is_err());
         c.handle(json!({"op":"step","agent_id":"agent-1","turn_id":"turn-new","revision":1}))
             .unwrap();
+    }
+
+    #[test]
+    fn readiness_before_or_after_native_wait_completion_resumes_once() {
+        for event_before_end in [true, false] {
+            let (_temp, mut c) = controller();
+            let declaration = json!({"idempotency_key":"wait", "expected_revision":1,"outcome":"waiting", "summary":"Waiting for peer", "dependency":"worker:2"});
+            tool(&mut c, 1, "wait", "delm_complete", declaration.clone());
+            let mut resumes = Vec::new();
+            let create = |c: &mut Controller| {
+                tool(
+                    c,
+                    2,
+                    "create",
+                    "delm_task_create",
+                    json!({"idempotency_key":"create", "title":"Ready work", "description":"Independent work"}),
+                )
+            };
+            if event_before_end {
+                let changed = create(&mut c);
+                assert!(changed["actions"].as_array().unwrap().is_empty());
+                // An idempotent retry must preserve the original wait cursor.
+                tool(&mut c, 1, "wait-retry", "delm_complete", declaration);
+            }
+            let ended = c.handle(json!({"op":"turn_end","agent_id":"agent-1","turn_id":"turn-1","reason":"completed","answer":"Waiting"})).unwrap();
+            resumes.extend(ended["actions"].as_array().unwrap().iter().cloned());
+            if !event_before_end {
+                let changed = create(&mut c);
+                resumes.extend(changed["actions"].as_array().unwrap().iter().cloned());
+            }
+            assert_eq!(resumes.len(), 1);
+            assert_eq!(resumes[0]["type"], "resume");
+            assert_eq!(resumes[0]["agent_id"], "agent-1");
+            assert_eq!(resumes[0]["revision"], 1);
+            assert!(c.workers[0].resume_pending);
+            let changed = tool(
+                &mut c,
+                2,
+                "create-again",
+                "delm_task_create",
+                json!({"idempotency_key":"create-again", "title":"More work", "description":"Another independent task"}),
+            );
+            assert!(changed["actions"].as_array().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn unrelated_publication_does_not_wake_a_named_task_dependency() {
+        let (_temp, mut c) = controller();
+        let created = tool(
+            &mut c,
+            2,
+            "create",
+            "delm_task_create",
+            json!({"idempotency_key":"create", "title":"Storage", "description":"Storage"}),
+        );
+        let task = created["result"]["task_id"].clone();
+        let claim = tool(
+            &mut c,
+            2,
+            "claim",
+            "delm_task_claim",
+            json!({"idempotency_key":"claim", "task_id":task}),
+        );
+        tool(
+            &mut c,
+            1,
+            "wait",
+            "delm_complete",
+            json!({"idempotency_key":"wait", "expected_revision":1,"outcome":"waiting", "summary":"Waiting for storage", "dependency":format!("task:{}",task.as_i64().unwrap())}),
+        );
+        let ended = c.handle(json!({"op":"turn_end","agent_id":"agent-1","turn_id":"turn-1","reason":"completed","answer":"Waiting"})).unwrap();
+        assert!(ended["actions"].as_array().unwrap().is_empty());
+        let publication = tool(
+            &mut c,
+            2,
+            "publish",
+            "delm_publish",
+            json!({"idempotency_key":"publish", "summary":"Unrelated progress", "paths":["source.txt"]}),
+        );
+        assert!(publication["actions"].as_array().unwrap().is_empty());
+        let finished = tool(
+            &mut c,
+            2,
+            "finish",
+            "delm_task_finish",
+            json!({"idempotency_key":"finish", "task_id":task,"expected_version":claim["result"]["version"],"summary":"Storage ready"}),
+        );
+        assert_eq!(finished["actions"][0]["agent_id"], "agent-1");
+    }
+
+    #[test]
+    fn blocked_stale_and_stopping_workers_do_not_resume_for_board_changes() {
+        for state in ["blocked", "stale", "stopping", "candidate"] {
+            let (_temp, mut c) = controller();
+            tool(
+                &mut c,
+                1,
+                "wait",
+                "delm_complete",
+                json!({"idempotency_key":"wait", "expected_revision":1,"outcome":"waiting", "summary":"Waiting", "dependency":"worker:2"}),
+            );
+            c.handle(json!({"op":"turn_end","agent_id":"agent-1","turn_id":"turn-1","reason":"completed","answer":"Waiting"})).unwrap();
+            c.board
+                .call(
+                    2,
+                    "delm_task_create",
+                    json!({"idempotency_key":"create", "title":"Ready work", "description":"Work"}),
+                )
+                .unwrap();
+            match state {
+                "blocked" => c.workers[0].blocked = true,
+                "stale" => c.workers[0].revision = 0,
+                "stopping" => c.stop_requested = true,
+                "candidate" => {
+                    let declaration = json!({"expected_revision":1,"outcome":"complete","summary":"Done","checks":[]});
+                    let completion = Completion::capture_with_evidence(
+                        &c.workspace.workers[1],
+                        &declaration,
+                        &c.workers[1].checks,
+                        1,
+                        &c.workers[1].result_policy,
+                        vec![],
+                    )
+                    .unwrap();
+                    c.candidate = Some((1, completion));
+                }
+                _ => unreachable!(),
+            }
+            let mut actions = Vec::new();
+            c.wake_waiting(&mut actions, "Work changed").unwrap();
+            assert!(actions.is_empty(), "{state} worker resumed");
+        }
     }
     #[test]
     fn orphan_recovery_authenticates_native_stop_then_preserves_work_and_reopens_admission() {

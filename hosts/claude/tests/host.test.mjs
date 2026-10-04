@@ -15,7 +15,7 @@ const ready = {
   workers: [{slot: 1, cwd: '/fixture/worker-1'}, {slot: 2, cwd: '/fixture/worker-2'}], revision: 1,
 };
 
-async function fixture() {
+async function fixture(options = {}) {
   const hooks = [];
   const module = await import('data:text/javascript;base64,' + Buffer.from(
     source.replace("'./protocol.js'", JSON.stringify(protocolURL)) + '\n// fixture ' + moduleID++,
@@ -26,30 +26,37 @@ async function fixture() {
     return {catch: () => {}};
   });
   const requests = [], commands = [], timers = [], notices = [], prompts = [];
-  const agents = new Map(), store = new Map();
-  let queued = [{stream: 'stdout', text: JSON.stringify(ready) + '\n'}], waiting;
-  const stream = {
-    next: () => queued.length ? Promise.resolve({value: queued.shift(), done: false})
-      : new Promise(resolve => { waiting = resolve; }),
-    [Symbol.asyncIterator]() { return this; },
-  };
+  const agents = new Map(), store = options.store || new Map();
+  let session = options.session || 'session-fixture', revision = 1;
+  const streams = [];
+  function createStream() {
+    const state = {queued: [{stream: 'stdout', text: JSON.stringify({...ready, session_id: session}) + '\n'}], waiting: null};
+    streams.push(state);
+    return {
+      next: () => state.queued.length ? Promise.resolve({value: state.queued.shift(), done: false})
+        : new Promise(resolve => { state.waiting = resolve; }),
+      [Symbol.asyncIterator]() { return this; },
+    };
+  }
   const host = {
     plugin: {root: '/fixture/plugin'},
     mcp: {connect: async () => ({isConnected: true, server: 'plugin:delm:delm'})},
     session: {
-      id: async () => 'session-fixture', cwd: async () => '/observed/native/cwd',
+      id: async () => session, cwd: async () => '/observed/native/cwd',
       append: async input => { prompts.push(input); return {uuid: 'stored-update', message: input.message}; },
     },
     store: {get: async key => store.get(key), set: async (key, value) => { store.set(key, structuredClone(value)); }},
     fs: {read: async () => 'Shared DeLM worker contract.'},
     process: {
-      spawn: () => stream,
+      spawn: () => createStream(),
       run: async (argv, init) => {
         const request = JSON.parse(init.stdin);
-        requests.push(request);
+        requests.push(argv.includes('recover') ? {...request, native_recover: true} : request);
+        if (argv.includes('recover')) return {exitCode: 0, stdout: JSON.stringify({status: 'interrupted', message: 'Saved work is recoverable.'}), stderr: ''};
         let result = {};
         if (request.op === 'reserve') result = {ticket: 'one-use-ticket'};
-        if (request.op === 'update') result = {revision: 2};
+        if (request.op === 'update') result = {revision: ++revision};
+        if (request.op === 'status') result = {run: {...ready, status: 'running'}, board: {tasks: []}};
         return {exitCode: 0, stdout: JSON.stringify({ok: true, result}), stderr: '',
           isStdoutTruncated: false, isStderrTruncated: false};
       },
@@ -97,13 +104,14 @@ async function fixture() {
     }, async event => { input = event; agents.set(id, 'running'); return {agentId: id, model: 'native-model'}; });
     return {input, result};
   }
-  async function event(action) {
+  async function event(action, streamIndex = streams.length - 1) {
     const item = {stream: 'stdout', text: JSON.stringify({type: 'action', result: {actions: [action]}}) + '\n'};
-    if (waiting) { const resolve = waiting; waiting = null; resolve({value: item, done: false}); }
-    else queued.push(item);
+    const state = streams[streamIndex];
+    if (state.waiting) { const resolve = state.waiting; state.waiting = null; resolve({value: item, done: false}); }
+    else state.queued.push(item);
     await setImmediate();
   }
-  return {host, call, step, launch, spawn, event, requests, agents, timers, prompts, store, notices};
+  return {host, call, step, launch, spawn, event, requests, agents, timers, prompts, store, notices, select: id => { session = id; }};
 }
 
 test('native launch contract rejects malformed workers and nonabsolute endpoints', () => {
@@ -310,4 +318,238 @@ test('native stop snapshot proves natural shell completion and final delivery ca
   await f.timers.shift()();
   assert.match(f.prompts[0].text, /focused check/);
   assert.match(f.prompts[0].text, /Do not repeat unaffected checks/);
+});
+
+
+test('conversation controls reselect by native session identity without session.start', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn();
+  f.select('new-conversation');
+  assert.match((await f.call('command.run', {command: 'delm-status'})).text, /No DeLM run/);
+  assert.match((await f.call('command.run', {command: 'delm-stop'})).text, /No DeLM run/);
+  const before = f.requests.length;
+  await f.call('prompt.submit', {text: 'Unrelated request.', origin: {kind: 'composer'}});
+  assert.equal(f.requests.length, before);
+  assert.match((await f.call('tool.call', {tool: 'Bash', agentId: 'peer-1', command: 'write'})).deny, /conversation has ended/);
+  f.select('session-fixture');
+  assert.match((await f.call('command.run', {command: 'delm-status'})).text, /native-fixture/);
+});
+
+test('clear, resume, and branch suppress delayed controls and recover only the owning conversation', async () => {
+  for (const reason of ['clear', 'resume']) {
+    const f = await fixture(); await f.launch(); await f.spawn();
+    await f.event({type: 'resume', agent_id: 'peer-1', revision: 1, message: 'Continue.'});
+    await f.call('session.end', {sessionId: 'session-fixture', reason});
+    f.select('destination');
+    await f.timers.shift()();
+    assert.equal(f.prompts.length, 0);
+    assert.ok(f.requests.some(item => item.op === 'cancel' && item.reason.endsWith(reason)));
+    assert.match((await f.call('command.run', {command: 'delm-status'})).text, /No DeLM run/);
+    assert.equal(f.requests.some(item => item.native_recover), false);
+    f.select('session-fixture');
+    const status = await f.call('command.run', {command: 'delm-status'});
+    assert.match(status.text, /interrupted/);
+    assert.equal(f.requests.filter(item => item.native_recover).length, 1);
+    await f.call('command.run', {command: 'delm-status'});
+    assert.equal(f.requests.filter(item => item.native_recover).length, 1);
+  }
+});
+
+test('a final report queued before a conversation switch cannot enter the new conversation', async () => {
+  const f = await fixture(); await f.launch();
+  await f.event({type: 'final', status: 'delivered', delivery: {verification_required: false}});
+  f.select('another-session');
+  await f.timers.shift()();
+  assert.equal(f.prompts.length, 0);
+  f.select('session-fixture');
+  assert.match((await f.call('command.run', {command: 'delm-status'})).text, /delivered/);
+});
+
+test('reload recovery retains failure and never sends controls into an unrelated conversation', async () => {
+  const first = await fixture(); await first.launch(); await first.spawn();
+  const reload = await fixture({store: first.store});
+  await reload.call('session.start');
+  assert.equal(reload.requests.some(item => item.native_recover), false);
+  assert.ok(reload.notices.some(text => /shutdown is not confirmed/iu.test(text)));
+  assert.equal(reload.store.get('native-run:session-fixture').finished, false);
+  reload.select('unrelated');
+  assert.match((await reload.call('command.run', {command: 'delm-stop'})).text, /No DeLM run/);
+});
+
+test('unsupported follow-up attachments never advance the task or start a parent response', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn();
+  for (const type of ['image', 'document', 'audio']) {
+    let entered = false;
+    const result = await f.call('prompt.submit', {text: 'Use this.', origin: {kind: 'composer'}, attachments: [{type, filename: 'input'}]},
+      async () => { entered = true; });
+    assert.match(result.drop, new RegExp(type));
+    assert.match(result.drop, /previous task/);
+    assert.equal(entered, false);
+  }
+  assert.equal(f.requests.some(item => item.op === 'update'), false);
+  assert.equal(f.store.get('native-run:session-fixture').revision, 1);
+  // An attachment on the initial skill submission stays with the native fork.
+  const initial = await fixture();
+  const input = {text: '/delm:run Read this image.', origin: {kind: 'composer'}, attachments: [{type: 'image'}]};
+  assert.deepEqual(await initial.call('prompt.submit', input), input);
+});
+
+test('unexpanded references explain the limitation while emails, quoted values, and code remain ordinary text', () => {
+  for (const text of ['Use @README.md', 'Follow @"design notes.md"', 'Look at @src/main.js', 'Use @AGENTS', "Don't modify @README.md because it's needed."]) {
+    assert.throws(() => protocol.followupText({text}), /@references/);
+  }
+  for (const text of ['Email help@example.com', 'Use `@decorator`', 'Run ```js\n@decorator\n```', 'Set "@scope/package" as the name.', "Set '@scope/package' as the name.", "Don't rename it; it's public."]) {
+    assert.equal(protocol.followupText({text}), text);
+  }
+});
+
+test('accepted prompt rewrites and additional context reach the runtime without DeLM control prose', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn();
+  await f.call('prompt.submit', {text: 'Raw request', context: ['Selected source text'], origin: {kind: 'composer'}},
+    async input => ({...input, text: 'Accepted request', context: [...input.context, 'Organization context']}));
+  const update = f.requests.find(item => item.op === 'update');
+  assert.equal(update.text, 'Accepted request\n\nAdditional context:\nSelected source text\n\nOrganization context');
+  assert.equal(update.text.includes('lightweight control'), false);
+});
+
+test('native middleware rejection does not advance revision or notify peers', async () => {
+  const f = await fixture(); await f.launch();
+  const result = await f.call('prompt.submit', {text: 'Blocked update', origin: {kind: 'composer'}}, async () => ({drop: 'Native policy rejected'}));
+  assert.deepEqual(result, {drop: 'Native policy rejected'});
+  assert.equal(f.requests.some(item => item.op === 'update'), false);
+});
+
+test('both peers receive one complete context update before acknowledging its revision', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn('peer-1'); await f.spawn('peer-2');
+  await f.call('prompt.submit', {text: 'New task', context: ['Selected text'], origin: {kind: 'composer'}});
+  const text = f.requests.find(item => item.op === 'update').text;
+  for (const id of ['peer-1', 'peer-2']) {
+    const action = {type: 'context', agent_id: id, revision: 2, message: text};
+    await f.event(action); await f.event(action);
+  }
+  assert.equal(f.prompts.length, 2);
+  assert.equal(f.prompts.every(item => item.message.content[0].text.includes('Selected text')), true);
+  assert.equal(f.requests.some(item => item.op === 'step' && item.revision === 2), false);
+});
+
+test('native context refusal or truncation cannot acknowledge delivery', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn();
+  await f.call('prompt.submit', {text: 'Important details', origin: {kind: 'composer'}});
+  f.host.session.append = async input => ({uuid: 'rewritten', message: {...input.message, content: [{type: 'text', text: 'truncated'}]}});
+  await f.event({type: 'context', agent_id: 'peer-1', revision: 2, message: 'Important details'});
+  assert.equal(f.store.get('native-run:session-fixture').agents['peer-1'].deliveredRevision, 1);
+  assert.match(f.notices.at(-1), /complete task update/);
+  const stopped = await f.step('peer-1');
+  assert.match(stopped[0].text, /paused/);
+  assert.equal(f.requests.some(item => item.op === 'step'), false);
+});
+
+test('fork middleware preserves native setup fields and changes only workspace and background scheduling', async () => {
+  const f = await fixture(); await f.launch();
+  const original = {fork: true, subagentType: 'fork', tool_use_id: 'native-fork', prompt: 'Inherited context',
+    parentModel: 'parent-model', permissionMode: 'auto', provider: {plugin: 'engine', tier: 'core'},
+    description: 'Peer', background: false};
+  let received;
+  await f.call('agent.spawn', original, async input => { received = input; return {agentId: 'native-peer'}; });
+  assert.deepEqual(received, {...original, cwd: ready.workers[0].cwd, background: true});
+  assert.equal(Object.hasOwn(received, 'model'), false);
+  assert.equal(Object.hasOwn(received, 'isolation'), false);
+});
+
+
+test('newer pending revisions suppress older context and obsolete resume timers', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn();
+  await f.event({type: 'resume', agent_id: 'peer-1', revision: 2, message: 'First update.'});
+  await f.event({type: 'resume', agent_id: 'peer-1', revision: 3, message: 'Newer update.'});
+  await f.event({type: 'context', agent_id: 'peer-1', revision: 2, message: 'Older context.'});
+  assert.equal(f.prompts.length, 0);
+  await f.timers.shift()();
+  assert.equal(f.prompts.length, 0);
+  await f.timers.shift()();
+  assert.equal(f.prompts.length, 1);
+  assert.match(f.prompts[0].text, /Newer update/);
+  assert.equal(f.store.get('native-run:session-fixture').agents['peer-1'].pending.revision, 3);
+});
+
+test('unrelated native agents continue normally while a DeLM update needs attention', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn();
+  await f.call('prompt.submit', {text: 'Update', origin: {kind: 'composer'}});
+  f.host.session.append = async () => ({deny: 'Native policy refused context'});
+  await f.event({type: 'context', agent_id: 'peer-1', revision: 2, message: 'Update'});
+  const unrelated = await f.step('unrelated-agent');
+  assert.equal(unrelated[0].text, 'native');
+});
+
+
+test('parallel slash invocations prepare only one native runtime', async () => {
+  const f = await fixture();
+  let connected;
+  f.host.mcp.connect = () => new Promise(resolve => { connected = resolve; });
+  const first = f.call('command.run', {command: 'delm:run', args: 'First request'});
+  await setImmediate();
+  const second = await f.call('command.run', {command: 'delm:run', args: 'Second request'});
+  assert.match(second.text, /preparing/);
+  connected({isConnected: true});
+  assert.match((await first).args, /First request/);
+});
+
+test('conversation end while preparation waits cannot admit workers even before session ID changes', async () => {
+  const f = await fixture();
+  let connected;
+  f.host.mcp.connect = () => new Promise(resolve => { connected = resolve; });
+  const starting = f.call('command.run', {command: 'delm:run', args: 'Start task'});
+  await setImmediate();
+  await f.call('session.end', {sessionId: 'session-fixture', reason: 'clear'});
+  connected({isConnected: true});
+  const result = await starting;
+  assert.equal(result.exitCode, 1);
+  assert.ok(f.requests.some(item => item.op === 'cancel'));
+  assert.equal(f.store.get('native-run:session-fixture').ending, true);
+});
+
+test('a missing saved run is not cached over a subsequent restored record', async () => {
+  const f = await fixture();
+  await f.call('command.run', {command: 'delm-status'});
+  f.store.set('native-run:session-fixture', {session: 'session-fixture', finished: true, final: {status: 'delivered'}});
+  assert.match((await f.call('command.run', {command: 'delm-status'})).text, /delivered/);
+});
+
+test('session switch while a native append waits cannot acknowledge old worker delivery', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn();
+  await f.call('prompt.submit', {text: 'New requirement', origin: {kind: 'composer'}});
+  let appended;
+  f.host.session.append = input => new Promise(resolve => { appended = () => resolve({uuid: 'stored', message: input.message}); });
+  await f.event({type: 'context', agent_id: 'peer-1', revision: 2, message: 'New requirement'});
+  f.select('other');
+  appended();
+  await setImmediate();
+  assert.equal(f.store.get('native-run:session-fixture').agents['peer-1'].deliveredRevision, 1);
+  assert.equal(f.notices.length, 0);
+});
+
+test('session switch while native step admission waits cannot start the model', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn();
+  const original = f.host.process.run;
+  let admitted;
+  f.host.process.run = async (argv, input) => {
+    if (JSON.parse(input.stdin).op === 'step') await new Promise(resolve => { admitted = resolve; });
+    return original(argv, input);
+  };
+  const stepping = f.step('peer-1');
+  await setImmediate();
+  f.select('other');
+  admitted();
+  const chunks = await stepping;
+  assert.match(chunks[0].text, /paused/);
+  assert.equal(f.store.get('native-run:session-fixture').agents['peer-1'].acknowledgedRevision, 0);
+});
+
+test('a failed update produces a parent stop instead of duplicate task implementation', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn();
+  const original = f.host.process.run;
+  f.host.process.run = async (argv, input) => JSON.parse(input.stdin).op === 'update'
+    ? {exitCode: 1, stdout: '', stderr: 'Bridge unavailable'} : original(argv, input);
+  await f.call('prompt.submit', {text: 'New instruction', origin: {kind: 'composer'}});
+  const parent = await f.step(undefined, 'parent-update');
+  assert.match(parent[0].text, /could not deliver/);
+  assert.match(parent[0].text, /Do not claim.*implement it in the parent/);
 });

@@ -29,6 +29,27 @@ const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// List retained runs, delivery state, and local storage use.
+    Runs {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export counts and timings without prompts, source, or command output.
+    Report {
+        #[arg(long)]
+        run_id: String,
+        /// Save to a new private JSON file instead of standard output.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Preview or remove verbose diagnostics from a successfully delivered run.
+    Clean {
+        #[arg(long)]
+        run_id: String,
+        /// Remove only the listed diagnostic files; retain all recovery material.
+        #[arg(long)]
+        confirm: bool,
+    },
     /// Native Claude Code plugin integration.
     #[command(hide = true)]
     Claude {
@@ -301,6 +322,11 @@ struct AuthenticatedControl {
 
 pub async fn execute(command: Command) -> Result<()> {
     match command {
+        Command::Runs { json } => crate::diagnostics::runs(json),
+        Command::Report { run_id, output } => {
+            crate::diagnostics::report(&run_id, output.as_deref())
+        }
+        Command::Clean { run_id, confirm } => crate::diagnostics::clean(&run_id, confirm),
         Command::Claude { command } => crate::claude::execute(command).await,
         Command::Respond {
             run_id,

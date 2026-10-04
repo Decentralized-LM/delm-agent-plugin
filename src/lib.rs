@@ -4,6 +4,7 @@ pub mod cli;
 pub mod compatibility;
 pub(crate) mod completion;
 pub mod config;
+pub mod diagnostics;
 pub mod evidence;
 pub(crate) mod inputs;
 pub mod lifecycle;

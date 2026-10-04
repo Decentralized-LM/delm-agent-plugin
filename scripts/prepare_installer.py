@@ -13,7 +13,7 @@ import tempfile
 
 SOURCE = Path(__file__).resolve().parents[1] / "packages/installer"
 PACKAGE_FILES = ["LICENSE", "NOTICE", "README.md", "bin/delm-agent.mjs",
-                 "lib/claude.mjs", "lib/hosts.mjs", "lib/installer.mjs", "lib/native.mjs", "package.json", "release.json"]
+                 "lib/claude.mjs", "lib/hosts.mjs", "lib/installer.mjs", "lib/maintenance.mjs", "lib/native.mjs", "package.json", "release.json"]
 REPOSITORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
 
 
@@ -73,6 +73,15 @@ in an existing session. Removal retains saved work and the marketplace; Claude
 removal uses its native `--keep-data` option. Native removal may clear that plugin's
 stored options. Unrelated plugins and host account credentials are preserved.
 Installer and plugin versions are independent; plugin updates use the host's manager.
+
+Before native mutations, the installer checks local DeLM run records for the
+selected host. Active runs, uncertain state, or remaining worker directories
+block changes with recovery guidance. Keep DeLM stopped throughout maintenance;
+the preflight does not lock other host sessions. Read-only status stays available.
+
+Structured status includes `readiness.installation`, `readiness.session` (reported
+as `not_checked`), and host-specific next steps. An enabled installation does not
+establish that a running session has loaded it or accepted its trust requirements.
 
 ## Host selection
 

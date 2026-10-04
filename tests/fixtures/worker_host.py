@@ -108,6 +108,8 @@ calls = {}
 active = {}
 serial = 0
 stale_sent = set()
+wake_wait = None
+wake_created = False
 
 
 def log(direction, message):
@@ -186,6 +188,15 @@ def complete(thread, turn, revision):
     }, "completion")
 
 
+def create_wake_work():
+    global wake_created
+    if wake_wait and "thread-2" in active and not wake_created:
+        wake_created = True
+        tool("thread-2", active["thread-2"], "delm_task_create", {
+            "title": "Ready contribution", "description": "Independent work for the waiting peer"
+        }, "wake-created")
+
+
 for line in sys.stdin:
     message = json.loads(line)
     log("in", message)
@@ -261,7 +272,17 @@ for line in sys.stdin:
         if mode == "lose_turn_ack":
             continue
         send({"id": request_id, "result": {"turn": {"id": turn}}})
-        if mode == "approvals":
+        if mode in ("wake_before_end", "wake_after_end"):
+            if thread == "thread-1" and state["turns"] == 1:
+                tool(thread, turn, "delm_complete", {
+                    "expected_revision": 1, "outcome": "waiting", "summary": "Waiting for a peer contribution",
+                    "dependency": "worker:2", "checks": []
+                }, "wake-wait")
+            elif thread == "thread-1":
+                status(thread, turn)
+            else:
+                create_wake_work()
+        elif mode == "approvals":
             approval(thread, turn)
         elif mode == "stale_approval":
             approval(thread, "retired-turn")
@@ -306,7 +327,22 @@ for line in sys.stdin:
             continue
         content = result.get("contentItems", [])
         body = json.loads(content[0]["text"]) if content else {}
-        if stage == "status":
+        if stage == "wake-wait":
+            assert result.get("success"), result
+            wake_wait = (thread, turn)
+            if mode == "wake_after_end":
+                active.pop(thread, None)
+                send({"method": "turn/completed", "params": {
+                    "threadId": thread, "turn": {"id": turn, "status": "completed"}}})
+            create_wake_work()
+        elif stage == "wake-created":
+            assert result.get("success"), result
+            if mode == "wake_before_end":
+                waiting_thread, waiting_turn = wake_wait
+                active.pop(waiting_thread, None)
+                send({"method": "turn/completed", "params": {
+                    "threadId": waiting_thread, "turn": {"id": waiting_turn, "status": "completed"}}})
+        elif stage == "status":
             if result.get("success"):
                 complete(thread, turn, body["board"]["request_revision"])
         elif result.get("success"):

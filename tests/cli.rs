@@ -928,3 +928,119 @@ fn public_answers_target_one_question_and_leave_the_other_pending() {
     assert!(session.wait(SHORT_LIMIT).success());
     fixture.assert_preserved_and_stopped();
 }
+
+#[test]
+fn newly_created_tasks_resume_waiting_codex_worker_across_turn_end_orderings() {
+    for mode in ["wake_before_end", "wake_after_end"] {
+        let fixture = Fixture::new(mode);
+        let mut session = fixture.start();
+        let id = session.run_id();
+        let deadline = Instant::now() + SHORT_LIMIT;
+        let mut status = fixture.control(&["status", "--run-id", &id, "--keep-alive"]);
+        while status["status"] != "complete" && Instant::now() < deadline {
+            status = fixture.control(&[
+                "status",
+                "--run-id",
+                &id,
+                "--keep-alive",
+                "--after",
+                &status["update_sequence"].as_u64().unwrap().to_string(),
+                "--wait-seconds",
+                "2",
+            ]);
+        }
+        assert_eq!(status["status"], "complete", "{mode}: {status}");
+        let result = session.until(|event| event["type"] == "result", SHORT_LIMIT);
+        assert!(session.wait(SHORT_LIMIT).success());
+        let turns = fixture.requests("turn/start");
+        assert_eq!(turns.len(), 3, "{mode} should resume exactly once");
+        assert_eq!(
+            turns[2]["params"]["threadId"],
+            turns[0]["params"]["threadId"]
+        );
+        assert_eq!(fixture.requests("thread/start").len(), 2);
+        assert_eq!(result["details"]["delivery"]["delivered"], true);
+        assert_eq!(result["details"]["delivery"]["cleanup_complete"], true);
+        let events: Vec<Value> = fs::read_to_string(fixture.run_dir(&id).join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let first_start = events
+            .iter()
+            .position(|event| {
+                event["kind"] == "worker_turn_started" && event["data"]["worker"] == 1
+            })
+            .unwrap();
+        let second_request = events
+            .iter()
+            .position(|event| {
+                event["kind"] == "worker_turn_requested" && event["data"]["worker"] == 2
+            })
+            .unwrap();
+        assert!(
+            first_start < second_request,
+            "the first worker's interval must start before the second admission request"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["kind"] == "worker_turn_started")
+                .count(),
+            3
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["kind"] == "worker_turn_finished")
+                .count(),
+            3
+        );
+        assert!(events.iter().any(
+            |event| event["kind"] == "worker_turn_finished" && event["data"]["waiting"] == true
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|event| event["kind"] == "coordination_response"
+                    && event["data"]["bytes"].as_u64().unwrap_or(0) > 0)
+        );
+        for phase in [
+            "preparation",
+            "worker_admission",
+            "shutdown",
+            "delivery_and_cleanup",
+        ] {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event["kind"] == "phase" && event["data"]["phase"] == phase)
+                    .count(),
+                2,
+                "missing {phase} interval"
+            );
+        }
+    }
+}
+
+#[test]
+fn unsupported_project_records_completed_preparation_failure_without_starting_workers() {
+    let fixture = Fixture::new("complete");
+    fs::rename(fixture.project.join(".git"), fixture.root.join("saved-git")).unwrap();
+    fs::write(fixture.project.join(".git"), "gitdir: external-worktree\n").unwrap();
+    let mut session = fixture.start();
+    let id = session.run_id();
+    assert!(!session.wait(SHORT_LIMIT).success());
+    let saved: Value =
+        serde_json::from_slice(&fs::read(fixture.run_dir(&id).join("run.json")).unwrap()).unwrap();
+    assert_eq!(saved["status"], "preparation_failed");
+    assert_eq!(saved["native_started"], false);
+    assert_eq!(saved["finished"], true);
+    assert_eq!(saved["workspace_cleanup_complete"], true);
+    assert!(!fixture.run_dir(&id).join("workspace").exists());
+    assert!(fixture.requests("turn/start").is_empty());
+    assert_eq!(
+        fs::read_to_string(fixture.project.join(".git")).unwrap(),
+        "gitdir: external-worktree\n"
+    );
+}

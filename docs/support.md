@@ -58,6 +58,38 @@ Ask Codex to stop, or use `/delm-stop` in Claude Code, to request cancellation. 
 
 Run records live under `~/Library/Application Support/DeLM/runs/`. These may contain private source, conversation inputs, native events, and recovery material. Share only the redacted evidence needed for a bug report. Temporary previews stop with the run; a new preview must run from the original project.
 
+## Inspecting runs and collecting a support report
+
+The native runtime provides local support commands for both hosts. From a source checkout after `./scripts/build.sh --host all`, use:
+
+```sh
+./.build/plugin/bin/delm runs
+./.build/plugin/bin/delm runs --json
+./.build/plugin/bin/delm report --run-id <RUN_ID>
+./.build/plugin/bin/delm report --run-id <RUN_ID> --output delm-report.json
+```
+
+Both packages contain the same runtime; a Claude-only source build can use `./.build/plugin-claude/bin/delm`. For an installed plugin, use its current runtime executable. Codex records the retained executable as `control_executable`; Claude records it as `ready.executable` in native control state. These commands require a runtime containing the support commands; use the current build to inspect records created by older releases. These support commands do not start a model, renew a run's monitoring lease, or alter the project. `runs` shows local project paths so you can identify work; use `report`, rather than the run listing or raw state, when sharing diagnostics.
+
+The report uses an explicit export allowlist: host, run identity, delivery flags, counts, and timing measurements. It excludes project paths, source, prompts, command text, native output, credentials, and recovery contents. Output files are created with owner-only permissions; an existing file is never overwritten.
+
+Timing separates preparation, worker admission, shutdown, delivery with cleanup, and recovery with cleanup where recorded. Native worker-turn overlap includes model execution, tools, and host waits; it is not a direct measure of useful work or a speedup claim. Waiting durations count completed waits, and open intervals are identified separately. Older or partial evidence leaves unavailable metrics empty. Parent work after runtime completion is outside this measurement. Recorded coordination-response sizes and repeated checks with identical commands, scoped inputs, and request revisions help identify overhead; repeated evidence alone does not establish unnecessary testing or equivalent environments.
+
+Storage sizes are logical file lengths. APFS copy-on-write sharing means they do not predict how much physical disk space deletion would recover.
+
+## Cleaning verbose diagnostics
+
+Preview cleanup for a specific successfully delivered run, then explicitly confirm:
+
+```sh
+./.build/plugin/bin/delm clean --run-id <RUN_ID>
+./.build/plugin/bin/delm clean --run-id <RUN_ID> --confirm
+```
+
+The preview lists the exact diagnostic files and logical bytes eligible for removal. Confirmation removes only the verbose event journal and worker capability reports listed by the command. A compact privacy-safe timing report is retained first. The run's ownership records, selected completion evidence, shared board, delivery journal, recovery contents, and executable are preserved, along with every file in the original project.
+
+Cleanup requires confirmed delivery, completed workspace cleanup, confirmed native shutdown, an exited runtime, and the project's exclusive maintenance lock. Active, incomplete, conflicting, or uncertain runs are refused. Resolve those runs through their host's stop and recovery path first. This command does not discard partial work or displaced original file contents; those can still matter when recovering interrupted delivery or an editor save.
+
 ## Updating and removing the plugin
 
 For a published marketplace installation, the [common installer](../packages/installer/README.md#host-selection) supports `update`, `remove`, and `status` with the same host detection and choice as installation. Pass `--host codex`, `--host claude`, or `--host both` to select explicitly. You can also use the native commands below. Update and removal are separate operations. Stop active work first.

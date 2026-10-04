@@ -245,6 +245,47 @@ fn skill_content_and_mcp_tool_definitions_must_match_not_only_names() {
     );
 }
 
+#[test]
+fn capability_parity_detects_enablement_dependencies_auth_and_discovery_changes() {
+    let skills = json!([
+        {"name":"design","enabled":true,"plugin_id":"design-plugin","instructions_sha256":"instructions","dependencies_sha256":"dependencies"},
+        {"name":"disabled","enabled":false,"plugin_id":null,"instructions_sha256":null,"dependencies_sha256":"none"}
+    ]);
+    let tools = json!([{"name":"docs","plugin_id":"docs-plugin","auth_status":"oAuth","tools_sha256":"tools","discovery_failed":false}]);
+    for (field, value) in [
+        ("enabled", json!(false)),
+        ("dependencies_sha256", json!("changed")),
+        ("plugin_id", json!("another-plugin")),
+    ] {
+        let mut actual = skills.clone();
+        actual[0][field] = value;
+        assert!(
+            delm::workers::compare_capability_manifests(&skills, &actual, &tools, &tools).is_err(),
+            "accepted changed skill {field}"
+        );
+    }
+    let mut enabled = skills.clone();
+    enabled[1]["enabled"] = json!(true);
+    assert!(
+        delm::workers::compare_capability_manifests(&skills, &enabled, &tools, &tools).is_err()
+    );
+    for (field, value) in [
+        ("auth_status", json!("notLoggedIn")),
+        ("discovery_failed", json!(true)),
+        ("plugin_id", json!("another-plugin")),
+    ] {
+        let mut actual = tools.clone();
+        actual[0][field] = value;
+        assert!(
+            delm::workers::compare_capability_manifests(&skills, &skills, &tools, &actual).is_err(),
+            "accepted changed MCP {field}"
+        );
+    }
+    let mut reordered = skills.clone();
+    reordered.as_array_mut().unwrap().reverse();
+    delm::workers::compare_capability_manifests(&skills, &reordered, &tools, &tools).unwrap();
+}
+
 #[tokio::test]
 async fn lifecycle_hook_discovery_checks_trust_without_starting_worker_threads() {
     let mut fixture = Fixture::new();

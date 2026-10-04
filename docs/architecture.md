@@ -26,6 +26,7 @@ flowchart LR
 | `hooks/`, `skills/`, `src/run/`, `src/workers.rs`, `src/worker_tools.rs` | Codex hooks, skill, native app-server execution, and coordination transport. |
 | `hosts/claude/`, `src/claude/` | Claude skills, plugin module, native MCP sidecar, and lifecycle controller. |
 | `packages/installer/`, `scripts/` | Host selection, native installation, package assembly, and qualification. |
+| `src/diagnostics.rs` | Local run inventory, privacy-safe timing reports, and guarded diagnostic cleanup. |
 
 Host adapters translate native identities, permissions, events, and command outcomes into shared runtime inputs. They do not implement separate task-board or delivery algorithms.
 
@@ -58,6 +59,8 @@ The official MCP sidecar starts no workers when loaded. Middleware reserves a on
 Saved project files, including admitted staged, unstaged, and untracked changes, form a copy-on-write baseline. Each worker receives an independent tree and private Git administration. Ignored inputs and recognized credentials are recorded as exclusions. Existing account storage stays outside project copies.
 
 Private working directories separate edits; they do not replace the user's native permission policy. Board transfers enforce their own contained-path and permission checks. This is trusted local development, not a hostile-code or network-isolation boundary.
+
+When a worker declares a dependency wait, the runtime records the board position internally and checks readiness again after the native turn ends. Task creation, released work, and relevant peer contributions can resume the existing worker. Event ordering cannot discard a useful change between the declaration and the end of the turn, and duplicate events cannot start duplicate resumptions. These internal cursors do not alter the shared board returned to agents.
 
 Both workers claim useful implementation work and expose follow-on tasks. Claims are versioned; updates, releases, and splits cannot let stale owners finish reassigned work. Either worker can temporarily own integration, with at most one active integration owner. The team owes one complete result, without a permanent manager or a requirement that both independently finish the whole task.
 
@@ -93,6 +96,6 @@ Runtime metadata, usage, board evidence, completion records, and needed recovery
 
 ## Installation and qualification
 
-Each host's native plugin manager installs its own self-contained DeLM package. The common installer selects Codex by default or Claude Code with `--host claude`. Codex uses its explicit-only skill and trusted hooks; Claude uses its explicit-only skill, plugin module, and MCP sidecar. DeLM does not replace either host executable or manage account login. A run retains a hash-verified copy of its runtime so later control commands do not depend on an unchanged installed package.
+Each host's native plugin manager installs its own self-contained DeLM package. The common installer detects the available host and offers Codex, Claude Code, or both when both are present. Scripts can select explicitly with `--host codex`, `--host claude`, or `--host both`. Codex uses its explicit-only skill and trusted hooks; Claude uses its explicit-only skill, plugin module, and MCP sidecar. DeLM does not replace either host executable or manage account login. A run retains a hash-verified copy of its runtime so later control commands do not depend on an unchanged installed package.
 
 Codex compatibility checks validate the app-server methods and response fields in use. Claude packages are validated through its official CLI, with adapter tests and native checks for the required plugin APIs. Deterministic fixtures exercise ownership, cancellation, delivery, and cleanup without model calls. Native inheritance and real-task behavior need separate qualification; fixture success does not close the live-session parity gaps above or establish support on an untested release architecture. See [development](development.md) and [release qualification](releases.md).

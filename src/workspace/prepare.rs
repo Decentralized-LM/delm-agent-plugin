@@ -208,21 +208,15 @@ pub fn prepare(project: &Path, run_dir: &Path, limit: u64) -> Result<PreparedWor
     let original = fs::canonicalize(project).context("resolve selected project")?;
     let root = open_dir(&original)?;
     let original_identity = (root.metadata()?.dev(), root.metadata()?.ino());
-    // This complete inventory precedes creation of any baseline or worker tree.
-    let mut scan = inventory(&root, limit, until, true)?;
-    for (path, (_, entry)) in &scan.entries {
-        ensure!(
-            !path.ends_with("/.git") && !path.ends_with("/.gitmodules") && path != ".gitmodules",
-            "nested repositories and submodules are unsupported: {path}"
-        );
-        ensure!(
-            entry.kind != FileKind::Symlink || !path.starts_with(".git"),
-            "Git administration links are unsupported"
-        );
+    // Reject inexpensive layout failures before walking a potentially large tree.
+    match fs::symlink_metadata(original.join(".git")) {
+        Ok(metadata) => ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "DeLM needs a self-contained Git checkout. Linked worktrees and linked Git administration are unsupported; select a normal checkout instead"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("Inspect project Git administration"),
     }
-    // This no-follow inventory measures ignored inputs as well. Link targets
-    // are validated after Git selection, so an omitted local environment does
-    // not need to be self-contained like the source actually given to workers.
     let parent = fs::canonicalize(run_dir.parent().context("private run path has no parent")?)?;
     let intended = parent.join(
         run_dir
@@ -233,6 +227,24 @@ pub fn prepare(project: &Path, run_dir: &Path, limit: u64) -> Result<PreparedWor
         !intended.starts_with(&original) && !original.starts_with(&intended),
         "private storage must be separate from the original project"
     );
+    ensure!(
+        fs::metadata(&parent)?.dev() == root.metadata()?.dev(),
+        "DeLM requires the project and private storage on the same filesystem. Move or clone the project onto the volume containing your home directory before retrying"
+    );
+    // This no-follow inventory measures ignored inputs before creating captures.
+    // Link targets are validated after Git selection, allowing omitted local
+    // environments without admitting external links into the source snapshot.
+    let mut scan = inventory(&root, limit, until, true)?;
+    for (path, (_, entry)) in &scan.entries {
+        ensure!(
+            !path.ends_with("/.git") && !path.ends_with("/.gitmodules") && path != ".gitmodules",
+            "nested repositories and submodules are unsupported: {path}. Select a self-contained repository without nested repositories or submodules"
+        );
+        ensure!(
+            entry.kind != FileKind::Symlink || !path.starts_with(".git"),
+            "Git administration links are unsupported"
+        );
+    }
     if !run_dir.exists() {
         use std::os::unix::fs::DirBuilderExt;
         fs::DirBuilder::new()
@@ -256,7 +268,7 @@ pub fn prepare(project: &Path, run_dir: &Path, limit: u64) -> Result<PreparedWor
     );
     ensure!(
         run.metadata()?.dev() == root.metadata()?.dev(),
-        "COW requires source and private storage on the same filesystem"
+        "DeLM requires the project and private storage on the same filesystem. Move or clone the project onto the volume containing your home directory before retrying"
     );
     let mut capacity = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     ensure!(
@@ -488,9 +500,9 @@ pub(super) fn capture(
         identity(original)? == (root.metadata()?.dev(), root.metadata()?.ino()),
         "selected source root was replaced during capture"
     );
-    let frozen = inventory(&open_dir(baseline)?, u64::MAX, until, true)?;
+    let captured = inventory(&open_dir(baseline)?, u64::MAX, until, true)?;
     let mut admitted_bytes = 0u64;
-    for (path, (identity, entry)) in &frozen.entries {
+    for (path, (identity, entry)) in &captured.entries {
         if path.is_empty() || path == ".git" || selected.contains(path) || admin.contains(path) {
             admitted_bytes = admitted_bytes
                 .checked_add(identity.size)
@@ -508,7 +520,7 @@ pub(super) fn capture(
             exclusions,
             runtime_links: BTreeMap::new(),
         },
-        frozen,
+        captured,
     ))
 }
 

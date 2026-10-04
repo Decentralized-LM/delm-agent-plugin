@@ -280,11 +280,7 @@ impl Journal {
     }
     pub fn record(&mut self, kind: &str, value: &impl Serialize) -> Result<()> {
         let value = serde_json::to_value(value)?;
-        serde_json::to_writer(
-            &mut self.0,
-            &json!({"time":now(),"time_ms":now_ms(),"kind":kind,"data":value}),
-        )?;
-        self.0.write_all(b"\n")?;
+        self.append(kind, &value)?;
         if kind != "native"
             || !value
                 .get("method")
@@ -293,6 +289,21 @@ impl Journal {
         {
             self.0.sync_data()?;
         }
+        Ok(())
+    }
+
+    /// Performance observations do not establish recovery state. A later
+    /// durable record flushes them without a filesystem sync on each sample.
+    pub(crate) fn observe(&mut self, kind: &str, value: &impl Serialize) -> Result<()> {
+        self.append(kind, &serde_json::to_value(value)?)
+    }
+
+    fn append(&mut self, kind: &str, value: &serde_json::Value) -> Result<()> {
+        serde_json::to_writer(
+            &mut self.0,
+            &json!({"time":now(),"time_ms":now_ms(),"kind":kind,"data":value}),
+        )?;
+        self.0.write_all(b"\n")?;
         Ok(())
     }
 }
