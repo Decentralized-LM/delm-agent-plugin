@@ -33,7 +33,7 @@ The implementation followed these stages:
 1. Qualify native forks, inherited context and tools, private working directories, active updates, completed-agent resumption, and exact owned-task stops against the installed host.
 2. Extract host-neutral evidence and filesystem scopes while preserving Codex's existing wire records and behavior.
 3. Implement the native Claude module, authenticated bridge, revision-bound board calls, and guarded lifecycle using the shared runtime.
-4. Extend the installer with explicit `--host claude`, native marketplace registration, update, status, and removal. Codex remains the default.
+4. Use one installer entry point with host detection, a choice when both hosts are available, and explicit host flags for scripts. Each adapter handles native marketplace registration, update, status, and removal.
 5. Stage self-contained host packages from explicit allowlists, validate through the official CLI, and bind release qualification to the actual runtime and adapter bytes.
 6. Run focused regression tests and the small account-backed collaboration fixture before the local commit.
 

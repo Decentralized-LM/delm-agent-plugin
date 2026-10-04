@@ -107,7 +107,7 @@ Restart Claude Code and use `/delm:run <task>`. Update with `claude plugin marke
 
 Repository-hosted installation is distinct from listing in OpenAI's public plugin directory. Publication does not imply directory approval.
 
-The npm wrapper in `packages/installer` delegates marketplace registration and installation to the selected native host CLI. Codex is the default; `--host claude` selects Claude Code. Its proposed name is `delm-agent`, which remains unpublished and unreserved. Its version is independent of the plugin version, so a new plugin release does not require republishing an unchanged installer.
+The npm wrapper in `packages/installer` detects the installed host and delegates marketplace registration and installation to its native CLI. When both hosts are available, it offers Codex, Claude Code, or both. Scripts can choose explicitly with `--host codex`, `--host claude`, or `--host both`. Its proposed name is `delm-agent`, which remains unpublished and unreserved. Its version is independent of the plugin version, so a new plugin release does not require republishing an unchanged installer.
 
 After a successful workflow with `publish` enabled has published the signed native marketplace, download `prepared-npm-installer-not-published` from that same run. Verify its `SHA256SUMS`, then publish the prepared installer tarball. It already contains the selected repository address, package metadata, and an explicit file allowlist. The source package retains `private: true`; publish the prepared tarball rather than changing that source setting.
 
@@ -123,7 +123,6 @@ Run these commands from the final repository's checkout. Replace `RUN_ID` with t
 
 ```sh
 npx --yes delm-agent@latest install
-npx --yes delm-agent@latest install --host claude
 ```
 
 The destination repository must be public for installation without GitHub access credentials. Before announcing a release, verify its installation using the published command, followed by native hook review, update, and removal. The final native plugin and installer must identify the same repository. Until both are published, the command above is not an available public installation path.

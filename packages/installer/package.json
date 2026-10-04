@@ -5,11 +5,24 @@
   "description": "Install and manage native DeLM plugins for Codex and Claude Code.",
   "license": "MIT",
   "type": "module",
-  "bin": {"delm-agent": "bin/delm-agent.mjs"},
-  "engines": {"node": ">=22"},
-  "files": ["bin/delm-agent.mjs", "lib/claude.mjs", "lib/installer.mjs", "lib/native.mjs", "release.json", "LICENSE", "NOTICE"],
+  "bin": {
+    "delm-agent": "bin/delm-agent.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "LICENSE",
+    "NOTICE",
+    "bin/delm-agent.mjs",
+    "lib/claude.mjs",
+    "lib/hosts.mjs",
+    "lib/installer.mjs",
+    "lib/native.mjs",
+    "release.json"
+  ],
   "scripts": {
-    "test": "node --test test/installer.test.mjs test/claude.test.mjs test/package.test.mjs",
+    "test": "node --test test/installer.test.mjs test/claude.test.mjs test/hosts.test.mjs test/selection-cli.test.mjs test/package.test.mjs",
     "test:native": "node --test test/native.test.mjs",
     "test:native:claude": "node --test test/native-claude.test.mjs"
   }

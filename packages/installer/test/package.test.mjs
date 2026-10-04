@@ -21,7 +21,7 @@ test('package exposes help/version, rejects hidden repository overrides, and can
   assert.match(execFileSync(process.execPath, [cli, '--help'], {encoding: 'utf8'}), /unpublished/);
   assert.throws(() => execFileSync(process.execPath, [cli, 'install', '--marketplace', '/tmp/foreign'], {stdio: 'pipe'}), error => error.status === 1);
   assert.throws(() => execFileSync(process.execPath, [cli, 'status', '--json'], {stdio: 'pipe'}), error => error.status === 1 && JSON.parse(error.stderr).code === 'UNCONFIGURED_RELEASE');
-  for (const args of [['--host', 'other'], ['--host', 'claude', '--codex', 'codex'], ['--claude', 'claude'], ['--host', 'claude', '--claude', '']]) {
+  for (const args of [['--host', 'other'], ['--host', 'claude', '--codex', 'codex'], ['--host', 'claude', '--claude', '']]) {
     assert.throws(() => execFileSync(process.execPath, [cli, 'status', ...args, '--json'], {stdio: 'pipe'}), error => error.status === 1 && JSON.parse(error.stderr).code === 'USAGE');
   }
 });
@@ -36,7 +36,7 @@ test('npm pack contains only the runnable CLI, metadata, README and license', ()
     const packed = JSON.parse(execFileSync('npm', ['pack', '--json', '--ignore-scripts', '--offline', '--no-update-notifier', '--pack-destination', temporary,
       '--userconfig', userconfig, '--globalconfig', globalconfig, '--cache', path.join(temporary, 'cache')], {cwd: root, encoding: 'utf8'}));
     assert.deepEqual(packed[0].files.map(file => file.path).sort(), [
-      'LICENSE', 'NOTICE', 'README.md', 'bin/delm-agent.mjs', 'lib/claude.mjs', 'lib/installer.mjs', 'lib/native.mjs', 'package.json', 'release.json',
+      'LICENSE', 'NOTICE', 'README.md', 'bin/delm-agent.mjs', 'lib/claude.mjs', 'lib/hosts.mjs', 'lib/installer.mjs', 'lib/native.mjs', 'package.json', 'release.json',
     ]);
     assert.ok(packed[0].size < 20_000, 'The thin installer should stay small.');
     assert.deepEqual(packed[0].bundled, []);
@@ -76,7 +76,7 @@ test('preparation binds one destination, produces publishable metadata, and pres
     assert.match(readme, /npx --yes delm-agent@latest install/);
     assert.match(readme, /npx --yes delm-agent@latest install --host claude/);
     assert.match(readme, /CLAUDE_CONFIG_DIR/);
-    assert.match(help, /codex \(default\) or claude/);
+    assert.match(help, /codex\|claude\|both/);
     assert.ok(readme.includes(destination));
     assert.doesNotMatch(readme, /jerry2247|unpublished|not an available install command/);
     for (const [relative, digest] of Object.entries(preparation.files)) {

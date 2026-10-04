@@ -13,7 +13,7 @@ import tempfile
 
 SOURCE = Path(__file__).resolve().parents[1] / "packages/installer"
 PACKAGE_FILES = ["LICENSE", "NOTICE", "README.md", "bin/delm-agent.mjs",
-                 "lib/claude.mjs", "lib/installer.mjs", "lib/native.mjs", "package.json", "release.json"]
+                 "lib/claude.mjs", "lib/hosts.mjs", "lib/installer.mjs", "lib/native.mjs", "package.json", "release.json"]
 REPOSITORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
 
 
@@ -30,7 +30,8 @@ def readme(repository):
 
 Install and manage native DeLM plugins for Codex or Claude Code. Both use the
 `marketplace` branch of [the DeLM distribution](https://github.com/{repository})
-and the identity `delm@delm`. Select one host per command; Codex is the default.
+and the identity `delm@delm`. One command detects your installed host and offers
+a choice when both Codex and Claude Code are available.
 
 ## Install
 
@@ -43,8 +44,11 @@ or source checkout is needed.
 
 ```sh
 npx --yes delm-agent@latest install
-npx --yes delm-agent@latest install --host claude
 ```
+
+If one host CLI is available, it is selected automatically. If both are available,
+choose **Codex**, **Claude Code**, or **Both**. Cancelling the selection makes no
+changes. If neither is available, install a host CLI first.
 
 For Codex, restart, open `/hooks`, and review and trust DeLM when requested.
 Restart after granting trust, then enter `$delm:run <task>`. A desktop or IDE
@@ -60,10 +64,6 @@ It does not grant tool permissions, inspect credentials, or start workers.
 npx --yes delm-agent@latest status
 npx --yes delm-agent@latest update
 npx --yes delm-agent@latest remove
-
-npx --yes delm-agent@latest status --host claude
-npx --yes delm-agent@latest update --host claude
-npx --yes delm-agent@latest remove --host claude
 ```
 
 Stop active DeLM work before updating or removing the plugin. Repeating `install`
@@ -74,8 +74,28 @@ removal uses its native `--keep-data` option. Native removal may clear that plug
 stored options. Unrelated plugins and host account credentials are preserved.
 Installer and plugin versions are independent; plugin updates use the host's manager.
 
-Use `--codex PATH` or `--host claude --claude PATH` to select an existing CLI and
-`--json` for structured output. `CODEX_HOME` and `CLAUDE_CONFIG_DIR` are respected.
+## Host selection
+
+All commands use the same host selection. Scripts can skip the menu:
+
+```sh
+npx --yes delm-agent@latest install --host codex
+npx --yes delm-agent@latest install --host claude
+npx --yes delm-agent@latest install --host both
+```
+
+If both CLIs are available, noninteractive commands and `--json` need an explicit
+selection. npm's `--yes` skips its download confirmation, not this host choice.
+
+Use `--codex PATH` or `--claude PATH` to select an existing CLI. A single executable
+option implies that host; supplying both implies both hosts. Options conflicting
+with an explicit single host are rejected. Use `--json` for structured output.
+For one host, output includes `host`; for both, output includes `command`,
+`success`, `results`, and per-host `errors`. Both-host operations run in sequence.
+One failure does not undo the other host's success; any failure makes the overall
+command exit with an error. Retry the failed host using its explicit flag.
+
+`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are respected.
 `--help`, `--version`, and read-only `status` are also available on other operating
 systems. Git access to the distribution is required; a private repository requires
 your own authorized Git access.

@@ -67,11 +67,12 @@ See [support](docs/support.md) for updates, removal, and troubleshooting, or [de
 The proposed package name is **`delm-agent`**. Once the package and prebuilt releases are published, installation will be:
 
 ```sh
-npx --yes delm-agent@latest install               # Codex
-npx --yes delm-agent@latest install --host claude # Claude Code
+npx --yes delm-agent@latest install
 ```
 
-These commands are not available yet; the package name is not reserved. Contributors can [verify the installer locally](packages/installer/README.md).
+The installer detects your installed host. If both Codex and Claude Code are available, choose **Codex**, **Claude Code**, or **Both**. Explicit host flags are available for [scripted installation](packages/installer/README.md#host-selection).
+
+This command is not available yet; the package name is not reserved. Contributors can [verify the installer locally](packages/installer/README.md#private-verification).
 
 ## Run a task
 

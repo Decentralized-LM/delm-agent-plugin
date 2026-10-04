@@ -21,16 +21,7 @@ function collection(value, key) {
   return value[key];
 }
 
-// Distribution identity is fixed at package preparation, never by a CLI flag.
-// Unit tests inject release/run; native tests exercise a prepared package.
-export async function manage(command, {host = 'codex', codex, claude, platform = process.platform, run = execute, release = RELEASE} = {}) {
-  if (!['codex', 'claude'].includes(host)) throw new InstallerError('Choose --host codex or --host claude.', 'USAGE');
-  if ((host !== 'codex' && codex !== undefined) || (host !== 'claude' && claude !== undefined)) {
-    throw new InstallerError('The executable option must match --host. Use --codex with codex or --claude with claude.', 'USAGE');
-  }
-  let executable = (host === 'codex' ? codex : claude) ?? host;
-  if (typeof executable !== 'string' || !executable.trim()) throw new InstallerError(`--${host} requires an executable path.`, 'USAGE');
-  if (executable.includes('/') || executable.includes('\\')) executable = resolve(executable);
+export function validateRequest(command, {platform = process.platform, release = RELEASE} = {}) {
   if (!COMMANDS.includes(command)) throw new InstallerError(`Unknown command: ${command}`, 'USAGE');
   if (release.repository === null) {
     throw new InstallerError('This source installer has no release destination. Use a prepared installer package; contributors can run scripts/prepare_installer.py with --repository OWNER/REPO and --out DIRECTORY.', 'UNCONFIGURED_RELEASE');
@@ -43,6 +34,19 @@ export async function manage(command, {host = 'codex', codex, claude, platform =
   if (command !== 'status' && platform !== 'darwin') {
     throw new InstallerError('DeLM installation currently supports macOS only. Windows and Linux support is not released yet.', 'UNSUPPORTED_PLATFORM');
   }
+}
+
+// Distribution identity is fixed at package preparation, never by a CLI flag.
+// Unit tests inject release/run; native tests exercise a prepared package.
+export async function manage(command, {host = 'codex', codex, claude, platform = process.platform, run = execute, release = RELEASE} = {}) {
+  if (!['codex', 'claude'].includes(host)) throw new InstallerError('Choose --host codex or --host claude.', 'USAGE');
+  if ((host !== 'codex' && codex !== undefined) || (host !== 'claude' && claude !== undefined)) {
+    throw new InstallerError('The executable option must match --host. Use --codex with codex or --claude with claude.', 'USAGE');
+  }
+  let executable = (host === 'codex' ? codex : claude) ?? host;
+  if (typeof executable !== 'string' || !executable.trim()) throw new InstallerError(`--${host} requires an executable path.`, 'USAGE');
+  if (executable.includes('/') || executable.includes('\\')) executable = resolve(executable);
+  validateRequest(command, {platform, release});
   const cwd = await mkdtemp(join(tmpdir(), 'delm-installer-'));
   try {
     const nativeRun = (file, args) => run(file, args, {cwd});

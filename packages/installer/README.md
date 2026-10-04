@@ -4,10 +4,9 @@ This source package is **unpublished**, has not reserved its npm name, and has `
 
 ```sh
 npx --yes delm-agent@latest install
-npx --yes delm-agent@latest install --host claude
 ```
 
-The installer is a small, dependency-free Node CLI. It delegates installation, updates, removal, and status to the selected host's native plugin manager. `--host codex` is the default; `--host claude` selects Claude Code. Each command manages only that host. A prepared package installs `delm@delm` from its configured repository's `marketplace` branch, using that host's native catalog. Preparation takes one GitHub `OWNER/REPO` destination and fixes it inside that package; users cannot override it with a CLI flag. The installer does not replace either host, edit configuration files itself, grant permissions, start workers, or run an updater. The installer version is independent of the plugin version; a new plugin release does not require publishing a new installer.
+The installer is a small, dependency-free Node CLI. It detects the installed host and delegates installation, updates, removal, and status to its native plugin manager. When both Codex and Claude Code are available, you choose one or both. A prepared package installs `delm@delm` from its configured repository's `marketplace` branch, using that host's native catalog. Preparation takes one GitHub `OWNER/REPO` destination and fixes it inside that package; users cannot override it with a CLI flag. The installer does not replace either host, edit configuration files itself, grant permissions, start workers, or run an updater. The installer version is independent of the plugin version; a new plugin release does not require publishing a new installer.
 
 ## Requirements and commands
 
@@ -20,14 +19,31 @@ npx --yes delm-agent@latest install
 npx --yes delm-agent@latest status
 npx --yes delm-agent@latest update
 npx --yes delm-agent@latest remove
-
-npx --yes delm-agent@latest install --host claude
-npx --yes delm-agent@latest status --host claude
-npx --yes delm-agent@latest update --host claude
-npx --yes delm-agent@latest remove --host claude
 ```
 
-Use `--codex PATH` or `--host claude --claude PATH` to select an existing CLI, including a relative executable path. An executable option for the other host is rejected. Use `--json` for structured output, including the selected `host`. All native commands run from one temporary directory per invocation, away from project-specific configuration. Existing `CODEX_HOME` and `CLAUDE_CONFIG_DIR` selections are respected.
+## Host selection
+
+All four commands use the same selection rules:
+
+- When only one host CLI is available on `PATH`, the installer selects it automatically.
+- When both are available, an interactive terminal offers **Codex**, **Claude Code**, or **Both**. There is no preselected answer; cancelling exits before changing either host.
+- When neither is available, the installer explains which CLI to install before trying again.
+
+For a script or a specific target, choose explicitly:
+
+```sh
+npx --yes delm-agent@latest install --host codex
+npx --yes delm-agent@latest install --host claude
+npx --yes delm-agent@latest install --host both
+```
+
+`--host` also applies to update, removal, and status. When both CLIs are detected, noninteractive commands and `--json` require an explicit selection instead of guessing. The `--yes` option belongs to npm and suppresses its package-download confirmation; it does not choose a DeLM host.
+
+Use `--codex PATH` or `--claude PATH` to select a custom executable, including a relative path. Each option implies its host if `--host` is omitted; supplying both implies both hosts. An option that conflicts with an explicit single host is rejected. All native commands run in temporary directories away from project-specific configuration. Existing `CODEX_HOME` and `CLAUDE_CONFIG_DIR` selections are respected.
+
+Selecting both runs the native operations in sequence and reports each outcome. A failure in one host does not undo a successful operation in the other, and the overall command exits with an error if either fails. Retry only the failed host with its explicit flag. Single-host `--json` output retains its `host` field; a both-host response contains `command`, `success`, `results`, and `errors`, with each error identifying its host and code.
+
+## Activation and maintenance
 
 After installation, restart Codex, open `/hooks`, and review and trust the DeLM hooks when requested. Restart again after granting trust, then invoke `$delm:run <task>`. Updates retain Codex's native hook-review requirements. Stop active DeLM work before updating or removing its plugin. Removal retains saved work, accounts, unrelated plugins, and the marketplace registration.
 
@@ -51,7 +67,7 @@ npm run test:native
 npm run test:native:claude
 ```
 
-Private tests also require Python 3 and npm. The regular tests exercise prerequisites, conflict handling, idempotency, updates, removals, errors, preparation, the package allowlist, and an offline npm publication dry run. Native tests additionally require macOS, Git, npm/npx, and stock Codex CLI. They prepare a package for a test repository, run its generated tarball through local `npx`, and redirect that GitHub URL to a disposable local Git fixture using an isolated Git configuration. They install no global packages, use no credentials or model calls, and do not change the user's Codex home. `DELM_TEST_HOST` can select an existing Codex executable for qualification.
+Private tests also require Python 3 and npm. The regular tests exercise host discovery and selection, cancellation, noninteractive output, partial failures, prerequisites, native conflict handling, idempotency, updates, removals, preparation, the package allowlist, and an offline npm publication dry run. Native tests additionally require macOS, Git, npm/npx, and stock Codex CLI. They prepare a package for a test repository, run its generated tarball through local `npx`, and redirect that GitHub URL to a disposable local Git fixture using an isolated Git configuration. They install no global packages, use no credentials or model calls, and do not change the user's Codex home. `DELM_TEST_HOST` can select an existing Codex executable for qualification.
 
 `test:native:claude` uses the same disposable Git transport with a separate temporary `HOME` and `CLAUDE_CONFIG_DIR`. It verifies install, repeated install, disabled update, enable, removal, data retention, unrelated settings/plugins, and wrong-branch rejection through the real Claude CLI. It uses no model calls or account login. `DELM_TEST_CLAUDE` selects an existing executable. This qualifies native distribution, separately from the runtime's worker behavior.
 

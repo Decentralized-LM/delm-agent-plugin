@@ -60,7 +60,7 @@ Run records live under `~/Library/Application Support/DeLM/runs/`. These may con
 
 ## Updating and removing the plugin
 
-For a published marketplace installation, use the selected host's native maintenance commands. Update and removal are separate operations. Stop active work first.
+For a published marketplace installation, the [common installer](../packages/installer/README.md#host-selection) supports `update`, `remove`, and `status` with the same host detection and choice as installation. Pass `--host codex`, `--host claude`, or `--host both` to select explicitly. You can also use the native commands below. Update and removal are separate operations. Stop active work first.
 
 ### Codex
 
