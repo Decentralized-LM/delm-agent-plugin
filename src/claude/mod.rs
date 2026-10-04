@@ -1,6 +1,7 @@
 //! Native Claude plugin transport. The plugin observes native identities; the
 //! MCP sidecar executes board calls only after Claude's own tool permission path.
 mod controller;
+mod view;
 
 use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
@@ -22,6 +23,9 @@ const LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Internal passive display observer. Never sends a host control request.
+    #[command(hide = true)]
+    View(view::Arguments),
     /// Internal native plugin bridge. Its startup request is supplied on stdin.
     #[command(hide = true)]
     Serve,
@@ -70,6 +74,7 @@ async fn print(value: &Value) -> Result<()> {
 
 pub async fn execute(command: Command) -> Result<()> {
     match command {
+        Command::View(arguments) => view::execute(arguments).await,
         Command::Serve => serve().await,
         Command::Mcp => mcp().await,
         Command::Recover { run_id } => {

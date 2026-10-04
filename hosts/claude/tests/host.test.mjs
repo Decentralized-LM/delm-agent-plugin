@@ -6,6 +6,12 @@ import test from 'node:test';
 const protocolSource = await readFile(new URL('../hooks/protocol.js', import.meta.url), 'utf8');
 const protocolURL = 'data:text/javascript;base64,' + Buffer.from(protocolSource).toString('base64');
 const protocol = await import(protocolURL);
+const rendererSource = await readFile(new URL('../hooks/board-render.js', import.meta.url), 'utf8');
+const rendererURL = 'data:text/javascript;base64,' + Buffer.from(rendererSource).toString('base64');
+const boardSource = await readFile(new URL('../hooks/board-view.js', import.meta.url), 'utf8');
+const boardURL = 'data:text/javascript;base64,' + Buffer.from(
+  boardSource.replace("'./board-render.js'", JSON.stringify(rendererURL)),
+).toString('base64');
 const source = await readFile(new URL('../hooks/delm.js', import.meta.url), 'utf8');
 let moduleID = 0;
 
@@ -18,7 +24,8 @@ const ready = {
 async function fixture(options = {}) {
   const hooks = [];
   const module = await import('data:text/javascript;base64,' + Buffer.from(
-    source.replace("'./protocol.js'", JSON.stringify(protocolURL)) + '\n// fixture ' + moduleID++,
+    source.replace("'./protocol.js'", JSON.stringify(protocolURL))
+      .replace("'./board-view.js'", JSON.stringify(boardURL)) + '\n// fixture ' + moduleID++,
   ).toString('base64'));
   module.register((name, matcher, handler) => {
     hooks.push({name, matcher: typeof matcher === 'function' ? null : matcher,
@@ -62,7 +69,10 @@ async function fixture(options = {}) {
       },
     },
     command: {register: async input => { commands.push(input); }},
-    clock: {after: (_, callback) => { timers.push(callback); }, sleep: async () => {}},
+    clock: {after: (milliseconds, callback) => {
+      if (milliseconds <= 30) timers.push(callback);
+      return {cancel() {}};
+    }, every: () => ({cancel() {}}), sleep: async () => {}},
     ui: {log: line => { notices.push(line); }},
     prompt: {submit: async input => { prompts.push(input); }},
     agent: {list: async () => [...agents].map(([id, status]) => ({id, status}))},
@@ -73,10 +83,19 @@ async function fixture(options = {}) {
     }},
   };
   function hook(name, event = {}) {
-    const result = hooks.find(entry => entry.name === name && (!entry.matcher
+    const found = hooks.filter(entry => (entry.name === name
+      || (entry.name.endsWith('.*') && name.startsWith(entry.name.slice(0, -1)))) && (!entry.matcher
       || Object.entries(entry.matcher).every(([key, value]) => event[key] === value)));
-    assert.ok(result, name);
-    return result.handler;
+    assert.ok(found.length, name);
+    return ($, e, final) => {
+      const dispatch = (index, current) => {
+        if (index === found.length) return final(current);
+        const next = input => dispatch(index + 1, input);
+        next.is = pattern => pattern === name;
+        return found[index].handler($, current, next);
+      };
+      return dispatch(0, e);
+    };
   }
   async function call(name, event = {}, next = async input => input) {
     return hook(name, event)(host, event, next);
@@ -144,7 +163,7 @@ test('missing native MCP tools stop before workspace preparation or model launch
   assert.match(result.text, /Native connection failed/);
   assert.equal(result.exitCode, 1);
   assert.equal(f.requests.length, 0);
-  assert.equal(f.store.size, 0);
+  assert.equal([...f.store.keys()].some(key => key.startsWith('native-run:')), false);
 });
 
 test('only two native forks bind to separate workspaces before model execution', async () => {
@@ -331,7 +350,8 @@ test('conversation controls reselect by native session identity without session.
   assert.equal(f.requests.length, before);
   assert.match((await f.call('tool.call', {tool: 'Bash', agentId: 'peer-1', command: 'write'})).deny, /conversation has ended/);
   f.select('session-fixture');
-  assert.match((await f.call('command.run', {command: 'delm-status'})).text, /native-fixture/);
+  assert.match((await f.call('command.run', {command: 'delm-status'})).text, /DeLM/);
+  assert.equal(f.requests.some(item => item.op === 'status'), false);
 });
 
 test('clear, resume, and branch suppress delayed controls and recover only the owning conversation', async () => {
@@ -347,7 +367,9 @@ test('clear, resume, and branch suppress delayed controls and recover only the o
     assert.equal(f.requests.some(item => item.native_recover), false);
     f.select('session-fixture');
     const status = await f.call('command.run', {command: 'delm-status'});
-    assert.match(status.text, /interrupted/);
+    assert.match(status.text, /DeLM/);
+    assert.equal(f.requests.filter(item => item.native_recover).length, 0);
+    await f.call('session.start');
     assert.equal(f.requests.filter(item => item.native_recover).length, 1);
     await f.call('command.run', {command: 'delm-status'});
     assert.equal(f.requests.filter(item => item.native_recover).length, 1);
@@ -361,7 +383,8 @@ test('a final report queued before a conversation switch cannot enter the new co
   await f.timers.shift()();
   assert.equal(f.prompts.length, 0);
   f.select('session-fixture');
-  assert.match((await f.call('command.run', {command: 'delm-status'})).text, /delivered/);
+  assert.match((await f.call('command.run', {command: 'delm-status'})).text, /DeLM/);
+  assert.equal(f.store.get('native-run:session-fixture').final.status, 'delivered');
 });
 
 test('reload recovery retains failure and never sends controls into an unrelated conversation', async () => {
@@ -510,7 +533,8 @@ test('a missing saved run is not cached over a subsequent restored record', asyn
   const f = await fixture();
   await f.call('command.run', {command: 'delm-status'});
   f.store.set('native-run:session-fixture', {session: 'session-fixture', finished: true, final: {status: 'delivered'}});
-  assert.match((await f.call('command.run', {command: 'delm-status'})).text, /delivered/);
+  assert.match((await f.call('command.run', {command: 'delm-status'})).text, /DeLM/);
+  assert.equal(f.requests.some(item => item.op === 'status' || item.native_recover), false);
 });
 
 test('session switch while a native append waits cannot acknowledge old worker delivery', async () => {

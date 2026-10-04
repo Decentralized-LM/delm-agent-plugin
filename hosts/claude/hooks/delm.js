@@ -2,12 +2,16 @@ import {
   TOOL_PREFIX, commandOutcome, completeState, decodeLines,
   followupText, nativeLaunchContext, parseReply, toolArguments, validateReady,
 } from './protocol.js';
+import {registerBoard, observeBoard} from './board-view.js';
 
 const runs = new Map();
 const restores = new Map();
 const starts = new Set();
 const generations = new Map();
 const STORE_PREFIX = 'native-run:';
+function updateBoard($, run) {
+  try { observeBoard(run); } catch { /* Presentation cannot fail a control operation. */ }
+}
 
 function snapshot(run) {
   return {
@@ -21,6 +25,7 @@ async function persist($, run) {
   const value = snapshot(run);
   run.writes = run.writes.then(() => $.store.set(STORE_PREFIX + run.session, value));
   await run.writes;
+  updateBoard($, run);
 }
 
 async function currentRun($, restoreInterrupted = true) {
@@ -357,9 +362,10 @@ function* stoppedStep(event, answer) {
 }
 
 export function register(on) {
+  registerBoard(on);
   on('session.start', async ($, e, next) => {
-    await $.command.register({name: 'delm-status', description: 'Show the current DeLM run', immediate: true});
-    await $.command.register({name: 'delm-stop', description: 'Stop DeLM and preserve unfinished work', immediate: true});
+    await $.command.register({name: 'delm-status', description: 'Show the DeLM board', immediate: true});
+    await $.command.register({name: 'delm-stop', description: 'Stop DeLM and save unfinished changes', immediate: true});
     await currentRun($);
     return next(e);
   });
@@ -379,22 +385,12 @@ export function register(on) {
     } finally { starts.delete(session); }
   });
 
-  on('command.run', {command: 'delm-status'}, async ($) => {
-    const active = await currentRun($);
-    if (!active) return {text: 'No DeLM run is active in this session.'};
-    if (active.finished) return {text: 'DeLM: ' + (active.final?.status || 'finished')};
-    if (active.failure) return {text: 'DeLM needs attention: ' + active.failure + '\nUse /delm-stop in this conversation to recover run ' + active.ready.run_id + '.'};
-    try {
-      const status = await request($, active, 'status');
-      return {text: JSON.stringify({run_id: status.run.run_id, status: status.run.status, board: status.board}, null, 2)};
-    } catch (error) { return {text: String(error.message || error)}; }
-  });
-
   on('command.run', {command: 'delm-stop'}, async ($) => {
     const active = await currentRun($);
     if (!active || active.finished) return {text: 'No DeLM run is active in this session.'};
     try {
       active.stopping = true;
+      updateBoard($, active);
       await request($, active, 'cancel', {reason: 'User requested /delm-stop'});
       $.clock.after(0, () => settle($, active));
       return {text: 'Stopping DeLM and preserving unfinished work.'};

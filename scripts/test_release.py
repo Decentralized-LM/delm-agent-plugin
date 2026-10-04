@@ -91,12 +91,16 @@ class ReleaseTests(unittest.TestCase):
             data["repository"] = "https://github.com/example/delm"
             manifest.write_text(json.dumps(data))
             self.assertEqual(build.claude_adapter_digest(package), before)
-            module = package / "hooks/delm.js"
-            module.write_text(module.read_text() + "\n// changed executed adapter")
-            self.assertNotEqual(build.claude_adapter_digest(package), before)
-            module.unlink()
-            with self.assertRaisesRegex(RuntimeError, "adapter resources are missing"):
-                build.claude_adapter_digest(package)
+            for name in ("delm.js", "board-view.js", "board-render.js"):
+                with self.subTest(module=name):
+                    module = package / "hooks" / name
+                    original = module.read_text()
+                    module.write_text(original + "\n// changed executed adapter")
+                    self.assertNotEqual(build.claude_adapter_digest(package), before)
+                    module.unlink()
+                    with self.assertRaisesRegex(RuntimeError, "adapter resources are missing"):
+                        build.claude_adapter_digest(package)
+                    module.write_text(original)
 
     def test_claude_payload_is_required_self_contained_and_bound_to_native_validation(self):
         with fixture() as (root, source, runtime, revision):

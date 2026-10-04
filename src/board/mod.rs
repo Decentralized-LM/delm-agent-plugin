@@ -6,6 +6,7 @@
 
 mod checks;
 mod files;
+pub(crate) mod reader;
 
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;

@@ -90,7 +90,9 @@ For example, in Claude Code:
 and keyboard controls. Include a README and test the main interactions.
 ```
 
-Use `$delm:run` for the same request in Codex. Send clarifications in the same conversation while the agents work. In Claude Code, `/delm-status` shows progress and `/delm-stop` stops the run and preserves unfinished work. See [run control and recovery](docs/support.md) for both hosts.
+Use `$delm:run` for the same request in Codex. Send clarifications in the same conversation while the agents work.
+
+In Claude Code, a live board opens automatically in the same terminal. It shows the agents, task queue, and shared context while you keep using the normal prompt. Click a row for details. **Hide board** leaves work running; `/delm-status` reopens it without asking the model for a summary. Use `/delm-stop` to stop the run and save unfinished changes. See [run control and recovery](docs/support.md) for details.
 
 Include images and file mentions when starting a Claude run. During a run, send text or paste the relevant file content. Claude's current native API cannot forward new media attachments to existing agents; DeLM explains this before accepting an unsupported update. See [Claude input support](docs/claude-integration.md) for details.
 

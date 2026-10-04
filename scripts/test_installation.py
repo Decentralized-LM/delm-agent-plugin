@@ -32,13 +32,17 @@ def executable(path, content):
     path.chmod(0o755)
 
 
-def fixture_runtime(path, version="fixture"):
+def fixture_runtime(path, version="fixture", board=True):
     replies = [
         {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "delm"}}},
         {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": name} for name in
             ["delm_status", "delm_complete", "delm_service"]]}},
     ]
-    script = '#!/bin/sh\nif [ "$1" = claude ]; then\n'
+    script = '#!/bin/sh\n'
+    if board:
+        script += ('if [ "$1" = claude ] && [ "$2" = view ]; then\n'
+                   "echo '--run-id --session-id --watch --interval-ms --collection --through-sequence --item-id'\nexit 0\nfi\n")
+    script += 'if [ "$1" = claude ]; then\n'
     script += "printf '%s\\n' '" + "' '".join(json.dumps(reply) for reply in replies) + "'\nexit 0\nfi\n"
     script += "echo 'delm " + version + "'\n"
     executable(path, script)
@@ -66,7 +70,8 @@ def fixture_source(path):
     }}})
     package_release.write_json(path / "hosts/claude/hooks/hooks.json", {"modules": ["./hooks/delm.js"]})
     (path / "hosts/claude/hooks/delm.js").write_text("// Unit-test package fixture; not a working host adapter.\n")
-    (path / "hosts/claude/hooks/protocol.js").write_text("export const fixture = true;\n")
+    for name in ("protocol.js", "board-view.js", "board-render.js"):
+        (path / "hosts/claude/hooks" / name).write_text("export const fixture = true;\n")
     skill = path / "hosts/claude/skills/run/SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: run\ndescription: Unit-test package fixture.\n---\nDo not run.\n")
@@ -605,6 +610,21 @@ class BuildTests(unittest.TestCase):
             with mock.patch.object(build, "validate_claude_package") as validation, \
                  contextlib.redirect_stdout(io.StringIO()), \
                  self.assertRaisesRegex(RuntimeError, "native Claude MCP transport"):
+                build.build(source, runtime, host="all")
+            validation.assert_not_called()
+            self.assertEqual(install_support.package_files(original), before)
+            self.assertFalse((source / ".build/plugin-claude").exists())
+
+    def test_runtime_without_board_observer_cannot_activate_new_claude_adapter(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = fixture_source(Path(temporary) / "source")
+            original = fixture_package(source)
+            before = install_support.package_files(original)
+            runtime = Path(temporary) / "old-runtime"
+            fixture_runtime(runtime, board=False)
+            with mock.patch.object(build, "validate_claude_package") as validation, \
+                 contextlib.redirect_stdout(io.StringIO()), \
+                 self.assertRaisesRegex(RuntimeError, "Claude board observer"):
                 build.build(source, runtime, host="all")
             validation.assert_not_called()
             self.assertEqual(install_support.package_files(original), before)

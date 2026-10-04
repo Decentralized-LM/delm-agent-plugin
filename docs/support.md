@@ -26,7 +26,11 @@ Account credentials remain in Codex's normal store. DeLM does not copy them into
 
 ## Claude Code setup and capability inheritance
 
-Use Claude Code 2.1.289 or later with your normal login. The plugin uses official native skills, plugin modules, and an MCP sidecar. Invoke `/delm:run <task>`. `/delm-status` and `/delm-stop` remain available while work is running.
+Use Claude Code 2.1.289 or later with your normal login. The plugin uses official native skills, plugin modules, and an MCP sidecar. Invoke `/delm:run <task>` to start work and open the live board. It appears on the right in fullscreen terminals at least 110 columns wide, or above the normal prompt in narrower terminals and the classic renderer.
+
+Click a task or shared entry for details; **Back** returns to the overview. **Hide board** closes the view while work continues. Reopen it with `/delm-status` or **Show board** in the compact status. Opening and updating the board add no model calls. Keep typing follow-ups in the normal prompt, and answer questions or permissions through Claude's normal interface. `/delm-stop` requests cancellation; the board shows **Stopping** until shutdown and saving are confirmed.
+
+The final board distinguishes applied changes, required local verification, recovery, and cleanup. When local verification is required, use Claude's final handoff for its outcome; the board does not observe the parent's later checks. If updates disconnect, the last snapshot remains marked as disconnected, which does not mean the run stopped. `/delm-status` retries the view and provides a short text summary if the pane is unavailable. Merely opening or hiding the board does not recover, resume, or cancel a run.
 
 Two native conversation forks inherit the current session's model, system prompt, history, and available tools. A short parent launch turn makes the Agent calls through Claude's ordinary permissions. Task updates reach both peers under their existing identities. An active peer receives the update with plugin provenance and starts a fresh native turn before acknowledging the new revision; native SendMessage resumes peers when needed. DeLM does not change the permission mode or add allow rules. Claude surfaces background-agent permission prompts in the main session through its [native Agent behavior](https://code.claude.com/docs/en/tools-reference).
 

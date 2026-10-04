@@ -22,7 +22,8 @@ PACKAGE_FILES = (
 )
 CLAUDE_PACKAGE_FILES = (
     ".claude-plugin/plugin.json", ".mcp.json", "skills/run/SKILL.md", "hooks/hooks.json",
-    "hooks/delm.js", "hooks/protocol.js", "hooks/worker.md", "LICENSE", "NOTICE", DEPENDENCY_NOTICES,
+    "hooks/delm.js", "hooks/protocol.js", "hooks/board-view.js", "hooks/board-render.js",
+    "hooks/worker.md", "LICENSE", "NOTICE", DEPENDENCY_NOTICES,
 )
 HOST_PACKAGE_FILES = {"codex": PACKAGE_FILES, "claude": CLAUDE_PACKAGE_FILES}
 
@@ -60,7 +61,7 @@ def claude_adapter_digest(package):
 
 
 def validate_claude_runtime(runtime):
-    """Probe the bundled MCP transport without installing, invoking tools, or starting a session."""
+    """Probe bundled host interfaces without invoking tools or starting a session."""
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-03-26", "capabilities": {},
@@ -72,6 +73,8 @@ def validate_claude_runtime(runtime):
         result = subprocess.run([str(runtime.resolve()), "claude", "mcp"],
                                 input="".join(json.dumps(value) + "\n" for value in requests),
                                 cwd=temporary, env=env, text=True, capture_output=True, timeout=15)
+        view = subprocess.run([str(runtime.resolve()), "claude", "view", "--help"],
+                              cwd=temporary, env=env, text=True, capture_output=True, timeout=15)
     try:
         replies = [json.loads(line) for line in result.stdout.splitlines()]
         valid = (result.returncode == 0 and len(replies) == 2
@@ -85,6 +88,9 @@ def validate_claude_runtime(runtime):
         valid = False
     if not valid:
         raise RuntimeError("The prebuilt runtime does not provide the native Claude MCP transport; rebuild DeLM first.")
+    if view.returncode != 0 or not all(flag in view.stdout for flag in (
+            "--run-id", "--session-id", "--watch", "--interval-ms", "--collection", "--through-sequence", "--item-id")):
+        raise RuntimeError("The prebuilt runtime does not provide the Claude board observer; rebuild DeLM first.")
 
 
 def validate_claude_package(package, claude="claude"):

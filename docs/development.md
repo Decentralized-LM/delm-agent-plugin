@@ -28,7 +28,7 @@ claude plugin marketplace add "$PWD" --scope user
 claude plugin install delm@delm-local --scope user
 ```
 
-The build stages `.build/plugin-claude/` and validates it with the official CLI. The repository's local marketplace points to that package. Restart Claude Code, open the intended project, and invoke `/delm:run <task>`. Review native trust or permission prompts. Claude resources live in `hosts/claude/`; the build copies the shared worker policy into the package.
+The build stages `.build/plugin-claude/` and validates it with the official CLI. The repository's local marketplace points to that package. Restart Claude Code, open the intended project, and invoke `/delm:run <task>`. The live board opens in the same terminal; `/delm-status` reopens it after hiding. Review native trust or permission prompts. Claude resources live in `hosts/claude/`; the build copies the shared worker policy and both board modules into the package.
 
 The native manager reads this local package in place. To load source changes, stop active DeLM work, rebuild, and restart Claude Code. Keep the checkout and staged package available while this source installation is registered. For a session without marketplace registration, open the intended project and use `claude --plugin-dir /absolute/path/to/this-checkout/.build/plugin-claude` instead.
 
@@ -60,6 +60,10 @@ The installer commands exercise Codex and Claude Code respectively, using dispos
 The Codex native inheritance check creates metadata-only parent and forked sessions in disposable storage, compares a project skill and local documentation MCP, calls that local tool, and verifies the returned native permission settings. It starts no model turn and opens no browser. This establishes the tested saved-configuration path, not exact parity with every override and live connection in an existing user session.
 
 The [Codex native lifecycle fixtures](native-lifecycle-qualification.md) cover interruption, startup cancellation, parent completion, owner-process death, and plugin removal. Their scripted provider does not call a real model. Claude's module and controller tests cover its native event routing and lifecycle contract; the account-backed fixture below separately exercises real forks and collaboration. Run native checks from a terminal that permits local sockets and nested native processes.
+
+Claude board changes also need passive-observer, renderer, and view-lifecycle checks. Follow the [board qualification checklist](terminal-ui-plan.md) for native layout, prompt focus, keyboard interaction, themes, hiding, and conversation changes. Package validation checks supported APIs and resources; it does not establish those interactive behaviors. Keep display refresh independent of the control stream and use passive view data for `/delm-status`.
+
+Claude Code 2.1.289 accepts one entry in `hooks.json`'s `modules` list and permits static imports only; a second entry or `import()` prevents loading. Keep imported view modules free of fallible startup work and guard their initialization, observer, and rendering operations. Those guards isolate runtime view failures; malformed module syntax or a refused native API can still prevent the plugin from loading and must be caught by package validation.
 
 For changes affecting launch or delivery, measure invocation-to-worker and completion-to-project separately. Do not omit parent handoff, environment setup, or conflict resolution from user-visible task latency. Use focused fixtures during development; a long application build is not a prerequisite for every edit.
 

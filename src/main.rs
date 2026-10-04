@@ -38,10 +38,19 @@ fn main() -> Result<()> {
     {
         delm::package::preserve_for_run(project)?;
     }
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(serve(args))
+    // The passive viewer has one sampling loop and owns no worker/control
+    // tasks. Avoid creating an idle CPU-sized thread pool for each open board.
+    let mut runtime = if matches!(
+        &args.command,
+        Some(delm::cli::Command::Claude {
+            command: delm::claude::Command::View(..)
+        })
+    ) {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+    };
+    runtime.enable_all().build()?.block_on(serve(args))
 }
 
 async fn serve(args: Args) -> Result<()> {
