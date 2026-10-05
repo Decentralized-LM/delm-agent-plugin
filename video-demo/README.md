@@ -1,12 +1,12 @@
-# DeLM for Codex: video demo
+# DeLM for Claude Code and Codex: video demo
 
-[Watch the 56-second film](renders/delm-demo.mp4).
+[Watch the 55-second film](renders/delm-demo.mp4).
 
-A terminal-led product demo: install DeLM, type a request in Codex's bottom composer, follow two agents building and sharing features, then see the working result. The edit is 1920×1080 at 60 fps, with the research video's music and synchronized interface sounds.
+The title introduces DeLM for Claude Code, then turns to Codex. One installer sets up both. The rest of the film runs in Claude Code: one `/delm:run` request opens the DeLM board, two agents work side by side and share their progress through it, and the finished Neon Rush game plays. The film renders at 3840×2160 and 60 fps, with the research video's music and a synchronized sound design.
 
 ## Open the project
 
-Requires macOS with its Terminal font, Node 22 or newer, Python 3, FFmpeg, and Chrome. From this folder:
+Requires macOS with its Terminal font, Node 22 or newer, Python 3 with NumPy and SciPy, FFmpeg, and Chrome. From this folder:
 
 ```sh
 npm ci
@@ -25,31 +25,26 @@ npm run review
 
 ## Edit
 
-- `src/content.js`: installer command, prompt, and links.
+- `src/content.js`: installer command, prompt, Claude Code header, replies, and task names.
+- `src/timing.json`: every scene, board change, agent step, route, and camera move, shared by picture and sound.
 - `src/template.html`: scene structure.
-- `src/film.css`: typography, windows, and composition.
-- `src/film.js`: transitions, typing, and file handoffs.
-- `src/terminal-camera.js`: rigid terminal projection and alignment.
+- `src/film.css`: typography, windows, and the terminal palette.
+- `src/film.js`: title wheel, installation, transitions, camera, closing, and mascots.
+- `src/claude.js`: Claude Code, the DeLM board, the two agents, and the routes between them, on a 129 × 30 character grid.
+- `src/features.js`: the agents' movement and soundtrack previews.
 - `src/typing.json`: generated character timing shared by picture and sound.
-- `src/workflow.json`: task claims, publications, imports, and verification events.
-- `src/timing.json`: shared 56-second timing map for picture and sound.
-- `src/features.js`: illustrated movement and soundtrack previews.
-- `assets/`: Geist fonts, sound, real game source, and captured footage.
-- `scripts/`: build, capture, sound mix, and export checks.
-- `reference/`: installation and rendering notes.
+- `assets/pets/`: Clawd and the Codex pet as vector art.
+- `assets/`: Geist fonts, sound, the Neon Rush game, and its footage.
+- `reference/`: the Claude Code palette and rendering notes.
 
-`index.html` is generated from `src/` by `npm run build`. The render and preview commands build it automatically. [Creative direction](CREATIVE.md) explains the purpose of each shot. [Asset sources](assets/SOURCES.md) records what comes from the original DeLM session.
+`index.html` is generated from `src/` by `npm run build`. The render and preview commands build it automatically. [Creative direction](CREATIVE.md) explains each shot. [Asset sources](assets/SOURCES.md) records where each asset comes from.
 
 ## What the film shows
 
-The film opens with “DeLM for Codex” for 1.2 seconds. Installation follows, then the request, parallel work, a brief view of the integrated game, and the close. During collaboration, the shared context and task queue sit between the workers. Numbered task claims match their current work, and each window contains its own feature preview. Shared findings and attached files remain visible while labeled paths show publication and reuse. Feature previews gain jumping, obstacles, bass, and arpeggios as the code develops. The result shot carries those contributions into the real game.
+“DeLM for” stays still while the host name turns once like a wheel: Claude Code in orange with Clawd waving, then Codex with the Codex pet waving. The installer installs DeLM in Claude Code and Codex and confirms it is ready in both. The same terminal window grows into Claude Code, where `/delm:run` is chosen from the command menu and the Neon Rush request is sent.
 
-The Codex interaction and feature canvases are illustrative reconstructions of real collaboration. The game footage comes from the unchanged retained DeLM-built project, captured with mouse and keyboard inputs. This is not a newly timed DeLM run, and the film presents no baseline comparison or measured speedup.
-
-`npx delm-agent-plugin` is an approved future installer placeholder and is not published yet. Replace it with the released and tested command before a public launch. Installation, hook trust, and restarts are abridged. Current setup still requires reviewing and trusting DeLM in `/hooks` and restarting Codex; those steps are not shown.
+The DeLM board opens beside the conversation. The camera moves in as both agents appear side by side, each editing its own part of the game with a live preview. Both agents claim their first task at the same moment; after that, each share, import, and claim travels between the agents and the board on its own beat, and every board change follows the route that caused it. When the work is applied, Claude reports that Neon Rush is ready, and the game opens out of that message. Callouts credit each agent's part as the game plays, and the film closes on `/delm:run` with both mascots standing on the command.
 
 Titles use Geist. Terminal text uses the exact SF Mono font from this Mac's Terminal app, copied into `.cache/fonts/` for local rendering and not redistributed.
 
-The soundtrack reuses the research video's `clean-desk.mp3`, with its original tempo and approved gain. The first 56.2 seconds play with a gentle closing fade. Typing, confirmation, and file arrivals use quiet digital ticks without noise sweeps. `npm run sound` rebuilds the character timing and mix from the retained recording without generating music. [Asset sources](assets/SOURCES.md) records the source and edit.
-
-`npm run capture` rebuilds the source recording and its six-second edit. `npm run edit-footage` rebuilds just the edit from the retained recording. `preview.html` opens the exported film without the editor.
+`npm run capture` rebuilds the game recording and its six-second edit. `npm run edit-footage` rebuilds just the edit. `preview.html` opens the exported film without the editor.

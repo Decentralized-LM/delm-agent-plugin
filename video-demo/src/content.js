@@ -4,12 +4,18 @@ window.DELM_FILM = Object.freeze({
   prompt:
     "Build Neon Rush, a Geometry Dash-inspired game with responsive controls and synthwave music. Test the gameplay.",
   repository: "github.com/jerry2247/delm-agent-plugin",
-  stages: [
-    { name: "Title", start: 0, end: 1.2 },
-    { name: "Install", start: 1.2, end: 9.2 },
-    { name: "Request", start: 9.2, end: 22.2 },
-    { name: "Collaborate", start: 22.2, end: 44.2 },
-    { name: "Result", start: 44.2, end: 50.2 },
-    { name: "Close", start: 50.2, end: 56.2 },
+  project: "~/neon-rush",
+  claudeVersion: "v2.1.289",
+  claudeModel: "Opus 5.5 · Claude Max",
+  command: "/delm:run",
+  commandDescription: "(delm) Build in parallel with collaborating Claude Code agents and deliver their changes to your project.",
+  reply: "Two DeLM agents are working on Neon Rush. Their progress is on the board.",
+  finalReply:
+    "Neon Rush is ready in ~/neon-rush. Both agents' changes are applied, and all 25 gameplay and audio tests pass.",
+  tasks: [
+    { id: 1, title: "Physics + level" },
+    { id: 2, title: "Soundtrack + effects" },
+    { id: 3, title: "Integrate the game" },
+    { id: 4, title: "Controller checks" },
   ],
 });

@@ -16,75 +16,156 @@
   font-weight: 600;
   font-display: block;
 }
-
-* {
-  box-sizing: border-box;
-}
+/* SF Mono matches the native Terminal. It is cached locally and never redistributed. */
 @font-face {
-  font-family: "Codex Mono";
+  font-family: "Terminal Mono";
   src: url("../.cache/fonts/SF-Mono-Regular.otf") format("opentype");
   font-weight: 400;
   font-display: block;
 }
+@font-face {
+  font-family: "Terminal Mono";
+  src: url("../.cache/fonts/SF-Mono-Bold.otf") format("opentype");
+  font-weight: 700;
+  font-display: block;
+}
+
+:root {
+  --ink: #181a20;
+  --blue: #315ee8;
+  --claude: #d97757;
+  --term: #181818;
+  --pane: #262626;
+  --text: #d5d5d5;
+  --dim: #999999;
+  --board-blue: #6b8fff;
+  --suggest: #b1b9f9;
+  --ok: #4eba65;
+  --mono: "Terminal Mono", Menlo, "Apple Symbols", monospace;
+}
+* {
+  box-sizing: border-box;
+}
 html,
 body {
   margin: 0;
-  width: 100%;
-  height: 100%;
   overflow: hidden;
   background: #f5f5f2;
 }
 body {
   font-family: Geist, sans-serif;
-  color: #181a20;
+  color: var(--ink);
   -webkit-font-smoothing: antialiased;
 }
+/* Fixed composition size: the renderer's viewport can be shorter than 1080. */
 #film {
-  width: 100%;
-  height: 100%;
+  width: 1920px;
+  height: 1080px;
   position: relative;
   overflow: hidden;
 }
 .paper {
   position: absolute;
   inset: 0;
-  background: radial-gradient(
-    ellipse at 48% 10%,
-    #fff 0%,
-    #f8f8f5 50%,
-    #eceeec 100%
-  );
-}
-.blue {
-  color: #315ee8;
-}
-.muted {
-  color: #74777d;
+  background: radial-gradient(ellipse at 48% 10%, #fff 0%, #f8f8f5 50%, #eceeec 100%);
 }
 .scene {
   position: absolute;
   inset: 0;
   opacity: 0;
 }
-.opening-title {
+
+/* Mascots: vector art with waving arms, blinking eyes, and a gentle bob. */
+.pet svg,
+.perched svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.clawd-wave-arm {
+  transform-origin: 166px 136px;
+}
+.codex-wave-arm {
+  transform-origin: 127px 148px;
+}
+.clawd-eyes,
+.codex-eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* Title: "DeLM for" stays still while the host name turns like a wheel. */
+#cover {
+  position: absolute;
+  inset: 0;
+}
+#cover-title {
   position: absolute;
   left: 0;
   right: 0;
-  top: 155px;
-  text-align: center;
-  font-size: 82px;
-  line-height: 1.12;
-  font-weight: 500;
-  letter-spacing: -4.4px;
-  opacity: 0;
+  top: 330px;
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 500 112px/1 Geist, sans-serif;
+  letter-spacing: -5px;
+  white-space: nowrap;
 }
-.opening-title span {
-  color: #315ee8;
+.cover-brand {
+  color: var(--blue);
+}
+.cover-for {
+  margin-left: 30px;
+}
+#host-slot {
+  position: relative;
+  display: block;
+  height: 200px;
+  margin-left: 30px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(transparent 0, #000 14%, #000 86%, transparent 100%);
+  mask-image: linear-gradient(transparent 0, #000 14%, #000 86%, transparent 100%);
+}
+.host {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 200px;
+  display: flex;
+  align-items: center;
+}
+#host-claude .host-name {
+  color: var(--claude);
+}
+#host-codex .host-name {
+  color: var(--ink);
+}
+/* Each mascot stands on the title's baseline. */
+.host .pet {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  width: 180px;
+  height: 195px;
+  margin-left: 14px;
+}
+#host-claude .pet {
+  top: -49px;
+}
+#host-codex .pet {
+  width: 140px;
+  height: 152px;
+  top: -27px;
 }
 .install-copy {
   position: absolute;
-  left: 643px;
-  top: 235px;
+  left: 0;
+  right: 0;
+  top: 612px;
+  width: max-content;
+  margin-inline: auto;
   display: flex;
   align-items: center;
   gap: 36px;
@@ -94,10 +175,10 @@ body {
   border: 1px solid #d9dce2;
   border-radius: 13px;
   box-shadow: 0 5px 14px #242a3610;
-  opacity: 0;
-  font:
-    27px "Codex Mono",
-    monospace;
+  font: 27px var(--mono);
+}
+.copy-command {
+  letter-spacing: -1px;
 }
 .copy-icon {
   display: block;
@@ -111,238 +192,379 @@ body {
   stroke: #656b75;
   stroke-width: 1.7;
 }
-.copy-command {
-  letter-spacing: -1px;
-}
-#installer-rig {
+
+.opening-title {
   position: absolute;
-  left: 320px;
-  top: 300px;
-  width: 1280px;
-  height: 610px;
-  transform-style: flat;
+  left: 0;
+  right: 0;
+  top: 118px;
+  text-align: center;
+  font-size: 82px;
+  line-height: 1.12;
+  font-weight: 500;
+  letter-spacing: -4.4px;
+  opacity: 0;
+}
+.opening-title span {
+  color: var(--blue);
 }
 
+/* One dark terminal window carries installation, Claude Code, and the agents. */
+#camera {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+}
+#term-rig {
+  position: absolute;
+  left: 320px;
+  top: 255px;
+  width: 1280px;
+  height: 700px;
+  perspective: 3400px;
+  opacity: 0;
+}
 .window {
   position: absolute;
   width: 100%;
   height: 100%;
-  border: 1px solid #d7d8d9;
   border-radius: 15px;
   overflow: hidden;
-  background: #fff;
-  box-shadow:
-    0 55px 80px -35px #1723374d,
-    0 12px 25px -14px #10172635,
-    0 2px 3px #ffffff;
   transform-origin: 50% 50%;
 }
-.window-bar {
-  height: 62px;
-  background: linear-gradient(#fafaf9, #f1f1ef);
-  border-bottom: 1px solid #e1e2e3;
+#term {
+  background: var(--term);
+  border: 1px solid #0b0b0b;
+  box-shadow:
+    0 0 0 1px #ffffff1c inset,
+    0 60px 90px -40px #0d121c80,
+    0 22px 40px -22px #0d121c66;
+}
+#term .window-bar {
+  position: relative;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 24px;
-  color: #6a6b6e;
-  font-size: 21px;
+  padding: 0 18px;
+  background: #2b2b2b;
+  border-bottom: 1px solid #0d0d0d;
+  color: #a5a5a5;
+  font: 500 16px Geist, sans-serif;
+  letter-spacing: -0.1px;
 }
 .traffic {
   display: flex;
-  gap: 10px;
-  width: 88px;
+  gap: 9px;
+  width: 80px;
 }
 .traffic i {
-  width: 15px;
-  height: 15px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
-  background: #ff6059;
-  border: 1px solid #00000013;
+  background: #ff5f57;
+  box-shadow: inset 0 0 0 0.5px #00000030;
 }
 .traffic i:nth-child(2) {
-  background: #ffbd2e;
+  background: #febc2e;
 }
 .traffic i:nth-child(3) {
-  background: #28c940;
+  background: #28c840;
 }
 .bar-spacer {
-  width: 88px;
+  width: 80px;
 }
-.terminal-content {
+.term-content {
   position: absolute;
-  inset: 62px 0 0;
-  padding: 50px 60px;
-  font:
-    35px/1.6 "Codex Mono",
-    monospace;
-  letter-spacing: -1.3px;
+  inset: 44px 0 0;
+  font-family: var(--mono);
+  color: var(--text);
 }
-.shell-command {
-  display: flex;
-  align-items: center;
-  gap: 17px;
-  font-size: inherit;
-  letter-spacing: 0;
+
+#install-screen {
+  padding: 30px 40px;
+  font-size: 23px;
+  line-height: 34px;
+  overflow: hidden;
 }
-.shell-tilde {
-  color: #397f66;
+#install-lines {
+  position: relative;
 }
-.shell-dollar {
-  color: #545960;
+.install-line {
+  height: 34px;
+  white-space: pre;
 }
+.install-line .path,
+.install-line .ok {
+  color: #5fb28a;
+}
+.install-line .prompt-symbol,
+.install-line .spin {
+  color: #8d8d8d;
+}
+.install-line .brand {
+  color: var(--board-blue);
+  font-weight: 700;
+}
+.install-line .ready {
+  color: #fff;
+  font-weight: 700;
+}
+.install-line.logo {
+  color: var(--board-blue);
+  height: 26px;
+  line-height: 26px;
+}
+.install-line .typed-caret,
 .caret {
   display: inline-block;
-  width: 22px;
-  height: 43px;
-  background: #282e37;
-  vertical-align: -7px;
-  margin-left: 4px;
-}
-.install-output {
-  font-size: inherit;
-  margin-top: 26px;
-  opacity: 0;
-}
-.install-step { opacity: 0; line-height: inherit; }
-.install-step > span { color: #397f66; margin-right: 0; }
-
-.codex-screen {
-  opacity: 0;
-  padding: 28px 32px 23px;
-  display: flex;
-  flex-direction: column;
-  font-size: 29px;
-  letter-spacing: -0.9px;
-}
-.codex-header {
-  border: 1px solid #bcc2c9;
-  border-radius: 12px;
-  width: 655px;
-  padding: 17px 24px;
-  font-size: 24px;
-  line-height: 1.6;
-  flex: 0 0 auto;
-  margin-left: 14px;
-}
-.codex-header strong {
-  font-weight: 400;
-}
-.codex-directory {
-  font-size: 23px;
-  padding-top: 8px;
-}
-.composer {
-  display: flex;
-  gap: 18px;
-  padding: 15px 21px;
-  min-height: 76px;
-  background: #eef0f2;
-  font-size: 32px;
-  line-height: 1.45;
-}
-.prompt-chevron {
-  color: #585c64;
-}
-.skill-mention {
-  color: #285cd9;
-}
-.codex-screen .caret {
-  height: 32px;
-  width: 17px;
-  vertical-align: -5px;
-}
-.codex-response {
-  display: flex;
-  gap: 23px;
-  font-size: 26px;
-  margin-top: 22px;
-  opacity: 0;
-  line-height: 1.4;
-}
-.codex-response > span {
-  color: #626a75;
+  width: 1ch;
+  height: 1.15em;
+  background: #e8e8e8;
+  vertical-align: -0.2em;
 }
 
-.section-heading {
+#claude-screen {
+  right: auto;
+  bottom: auto;
+  width: 1728px;
+  height: 876px;
+  transform-origin: 0 0;
+  padding: 18px 24px;
+  font-size: 21px;
+  line-height: 28px;
+  opacity: 0;
+}
+#claude-rows,
+#board-rows {
   position: absolute;
-  top: 70px;
+  inset: 0;
+}
+#claude-rows {
+  inset: 18px 24px;
+}
+.row {
+  position: absolute;
   left: 0;
   right: 0;
-  text-align: center;
-  font-size: 64px;
-  letter-spacing: -3.2px;
-  line-height: 1.13;
-  font-weight: 500;
+  height: 28px;
+  white-space: pre;
 }
-.section-heading span {
-  color: #315ee8;
-}
-.section-heading p {
-  font-size: 29px;
-  letter-spacing: -0.7px;
-  font-weight: 400;
-  color: #6b7280;
-  margin: 22px 0;
-}
-#browser-rig {
+.row > span {
   position: absolute;
-  left: 192px;
-  top: 240px;
-  width: 1536px;
-  height: 770px;
+  top: 0;
+}
+.row .fill {
+  height: 28px;
+}
+.row .caret {
+  top: 3px;
+  height: 22px;
+  width: 1ch;
+  background: #e6e6e6;
+}
+.claude-logo {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 10ch;
+  height: 84px;
+}
+.bright {
+  color: #ffffff;
+}
+.bold {
+  font-weight: 700;
+}
+.dim {
+  color: var(--dim);
+}
+.blue {
+  color: var(--board-blue);
+}
+.suggest,
+.key {
+  color: var(--suggest);
+}
+.ok {
+  color: var(--ok);
+}
+.bad {
+  color: #ff6b6b;
+}
+.divider {
+  color: #6f6f6f;
+}
+.rule {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: #888888;
+}
+#board {
+  position: absolute;
+  top: 18px;
+  left: calc(24px + 71ch);
+  right: 24px;
+  height: calc(26 * 28px);
+  background: var(--pane);
   opacity: 0;
 }
-.browser {
-  border-color: #393d4b;
-  background: #080d1c;
-  border-radius: 13px;
+
+/* Each agent's live work, side by side under the conversation. */
+.agent {
+  position: absolute;
+  top: 326px;
+  width: 430px;
+  height: 386px;
+  border: 1px solid #575757;
+  border-radius: 10px;
+  background: #1c1c1c;
+  box-shadow: 0 14px 30px -18px #000;
+  opacity: 0;
 }
-.browser-bar {
-  height: 50px;
-  background: #f4f4f2;
-  padding: 0 20px;
+#agent-1 {
+  left: 36px;
 }
-.browser-bar .traffic i {
-  width: 12px;
-  height: 12px;
+#agent-2 {
+  left: 482px;
 }
-.address {
-  height: 31px;
-  width: 660px;
-  background: #e6e7e5;
-  border-radius: 7px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
+.agent-rows {
+  position: absolute;
+  inset: 10px 14px;
+}
+.agent .code {
+  background: rgba(78, 186, 101, 0.14);
+}
+.agent .code.bad-line {
+  background: rgba(255, 107, 107, 0.14);
+}
+.agent-preview {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 14px;
+  height: 160px;
+}
+.preview-label {
+  height: 24px;
   font-size: 17px;
-  color: #575d66;
+  line-height: 20px;
+  color: var(--dim);
 }
-.address svg {
-  width: 12px;
-  height: 12px;
-  fill: none;
-  stroke: #737d88;
+.agent-preview canvas {
+  display: block;
+  width: 100%;
+  height: 128px;
+  margin-top: 8px;
+  border-radius: 7px;
+  box-shadow: 0 0 0 1px #2d3a55;
+}
+#routes {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1728px;
+  height: 876px;
+  overflow: visible;
+  pointer-events: none;
+}
+.route-label rect {
+  fill: #141a2e;
+  stroke: var(--board-blue);
   stroke-width: 1.4;
+}
+.route-label text {
+  font: 500 17px Geist, sans-serif;
+  fill: #aec0ff;
+}
+
+/* The finished game, shown large against a synthwave night. */
+#game-backdrop {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  background: radial-gradient(ellipse at 50% 62%, #241a52 0%, #0d1229 46%, #05070f 100%);
+}
+#game {
+  position: absolute;
+  left: 80px;
+  top: 45px;
+  width: 1760px;
+  height: 990px;
+  border-radius: 18px;
+  overflow: hidden;
+  background: #070b18;
+  opacity: 0;
+  transform-origin: 50% 50%;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.09),
+    0 40px 120px -24px rgba(110, 80, 230, 0.5),
+    0 30px 60px -30px #000;
 }
 #game-footage {
   display: block;
   width: 100%;
-  height: calc(100% - 50px);
+  height: 100%;
   object-fit: cover;
-  object-position: center;
 }
-.result-footer {
+/* Callouts tie each agent's work to what the game is doing. */
+.callout {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 46px;
-  text-align: center;
-  color: #6e7783;
-  font-size: 26px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 22px 12px 13px;
+  border-radius: 16px;
+  background: rgba(11, 15, 30, 0.88);
+  border: 1px solid rgba(107, 143, 255, 0.6);
+  box-shadow: 0 14px 34px -12px #000, 0 0 24px -6px rgba(107, 143, 255, 0.45);
+  font: 500 27px/1 Geist, sans-serif;
+  letter-spacing: -0.4px;
+  color: #eef2ff;
+  white-space: nowrap;
   opacity: 0;
 }
+.callout .badge {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--board-blue);
+  color: #0b1022;
+  font: 600 19px/1 Geist, sans-serif;
+}
+.callout .who {
+  color: #a9bcff;
+}
+.callout::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  left: var(--caret, 50%);
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  background: rgba(11, 15, 30, 0.88);
+  border-left: 1px solid rgba(107, 143, 255, 0.6);
+  border-top: 1px solid rgba(107, 143, 255, 0.6);
+  transform: rotate(45deg);
+}
+/* Under the cube, on the empty floor of the level. */
+#callout-1 {
+  left: 529px;
+  top: 790px;
+}
+/* Under the tempo readout in the top right. */
+#callout-2 {
+  right: 92px;
+  top: 214px;
+  --caret: calc(100% - 62px);
+}
+
+/* Closing: the original layout, unchanged. */
 .closing {
   display: flex;
   flex-direction: column;
@@ -359,7 +581,7 @@ body {
 }
 #closing-command {
   font:
-    31px "Codex Mono",
+    31px "Terminal Mono",
     monospace;
   letter-spacing: -1.2px;
   background: #fff;
@@ -381,6 +603,32 @@ body {
   vertical-align: -5px;
   margin-left: 4px;
 }
+#closing-title .closing-line { display: inline-block; color: #181a20; }
+#closing-with { position: relative; margin: 18px 0 72px; font: 500 98px/1.05 Geist, sans-serif; letter-spacing: -5.5px; white-space: pre; }
+.closing-with-size { visibility: hidden; }
+.closing-with-text { position: absolute; inset: 0; }
+#closing-with-fast, #closing-with-brand { color: #315ee8; }
+#closing-with-caret { display: none; width: 3px; height: 83px; background: #315ee8; margin-left: 8px; vertical-align: -10px; }
+
+/* The two mascots stand on the command. They are positioned out of flow. */
+#closing-command {
+  position: relative;
+}
+#closing-command > .perched {
+  position: absolute;
+  bottom: calc(100% - 4px);
+  width: 78px;
+  height: 84px;
+  margin: 0;
+  opacity: 0;
+}
+#closing-clawd {
+  left: 14px;
+}
+#closing-codex {
+  right: 18px;
+}
+
 #pointer {
   position: absolute;
   width: 38px;
@@ -391,188 +639,3 @@ body {
   z-index: 50;
   opacity: 0;
 }
-/* The result retains the captured browser's 16:9 viewport. */
-#browser-rig {
-  top: 155px;
-  height: 914px;
-}
-.result-footer {
-  display: none;
-}
-
-.install-copy {
-  left: 0;
-  right: 0;
-  width: max-content;
-  margin-inline: auto;
-}
-
-
-#installer {
-  border-color: #d5d9df;
-  box-shadow: 0 32px 65px -34px #18283a38, 0 5px 14px -7px #18283a20;
-  background: #fff;
-}
-.codex-conversation {
-  flex: 1 1 auto;
-  min-height: 0;
-  padding-top: 26px;
-}
-.submitted-request {
-  display: flex;
-  gap: 18px;
-  background: #f2f3f5;
-  padding: 15px 21px;
-  font-size: 29px;
-  line-height: 1.6;
-  opacity: 0;
-}
-.codex-input-area { flex: 0 0 auto; }
-.input-text { position: relative; flex: 1; }
-#prompt-placeholder {
-  position: absolute;
-  top: 0;
-  left: 0;
-  color: #8a9098;
-  pointer-events: none;
-}
-.codex-statusline {
-  padding: 8px 20px 0;
-  font-size: 25px;
-  line-height: 1.45;
-  color: #8a6822;
-}
-.project-directory { color: #407953; }
-.status-separator, .codex-shortcuts { color: #7a7f87; }
-.codex-shortcuts { padding: 0 20px; font-size: 23px; line-height: 1.45; }
-#closing-title .closing-line { display: inline-block; color: #181a20; }
-#closing-with { position: relative; margin: 18px 0 72px; font: 500 98px/1.05 Geist, sans-serif; letter-spacing: -5.5px; white-space: pre; }
-.closing-with-size { visibility: hidden; }
-.closing-with-text { position: absolute; inset: 0; }
-#closing-with-fast, #closing-with-brand { color: #315ee8; }
-#closing-with-caret { display: none; width: 3px; height: 83px; background: #315ee8; margin-left: 8px; vertical-align: -10px; }
-
-/* Shared resources stay between the peers, making the data flow visible. */
-.task-queue, .context-strip {
-  position: absolute;
-  left: 670px;
-  width: 580px;
-  padding: 24px;
-  background: #fff;
-  border: 1.7px solid #40444c;
-  border-radius: 20px;
-  box-shadow: none;
-  opacity: 0;
-}
-.context-strip { top: 220px; height: 374px; }
-.task-queue { top: 624px; height: 324px; }
-.context-label, .queue-heading {
-  font-size: 32px;
-  font-weight: 500;
-  color: #17191d;
-  line-height: 38px;
-  letter-spacing: -.5px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #e0e3e8;
-  margin-bottom: 5px;
-}
-.queue-heading { display: flex; justify-content: space-between; align-items: center; }
-.context-label { padding-bottom: 10px; }
-.context-post {
-  padding: 11px 14px;
-  margin-top: 7px;
-  height: 82px;
-  background: #f5f4f0;
-  border: 0;
-  border-radius: 10px;
-}
-.post-text { font-size: 26px; font-weight: 500; line-height: 30px; letter-spacing: -.5px; color: #17191d; }
-.post-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 5px; }
-.context-attachment { font: 21px "Codex Mono", monospace; color: #666b74; }
-.post-author { font-size: 21px; color: #666b74; }
-#context-audio, #context-fix { opacity: 0; }
-.queue-items { display: grid; gap: 7px; }
-.queue-item {
-  display: flex;
-  align-items: center;
-  height: 48px;
-  padding: 0 12px;
-  background: #f5f4f0;
-  border: 0;
-  border-radius: 8px;
-  font-size: 25px;
-  letter-spacing: -.5px;
-}
-.queue-number { flex: 0 0 34px; font: 19px "Codex Mono", monospace; color: #666b74; }
-.queue-task { flex: 1; font-weight: 500; color: #17191d; }
-.queue-owner { flex: 0 0 auto; margin-left: 10px; font-size: 21px; color: #315ee8; letter-spacing: -.5px; }
-#queue-integration, #queue-checks { opacity: 0; }
-#worker-checks { font-size: 18px; font-weight: 400; color: #315ee8; opacity: 0; }
-.worker-window {
-  top: 340px;
-  width: 500px;
-  height: 570px;
-  border-color: #cfd5df;
-  border-radius: 16px;
-  box-shadow: 0 18px 35px -28px #192a4930;
-  opacity: 0;
-}
-#worker-left { left: 90px; }
-#worker-right { left: 1330px; }
-.worker-window .window-bar { height: 52px; padding: 0 27px; background: #f8f8f6; }
-.worker-name { font: 23px "Codex Mono", monospace; color: #253247; }
-.worker-body { padding: 27px; }
-.worker-role { font-size: 27px; font-weight: 500; color: #252e3c; margin-bottom: 27px; letter-spacing: -.6px; }
-.worker-file { font: 20px "Codex Mono", monospace; color: #315ee8; }
-.tool-bullet { color: #7a838f; }
-.feature-code { height: 64px; margin: 19px 0 0; font: 20px/1.55 "Codex Mono", monospace; letter-spacing: -.7px; color: #536071; white-space: pre; }
-.worker-detail { font-size: 21px; line-height: 1.5; color: #626d7d; margin-top: 12px; }
-.feature-preview { position: absolute; left: 27px; right: 27px; bottom: 27px; opacity: 0; }
-.preview-label { font-size: 20px; color: #637080; margin: 0 0 12px; }
-.feature-preview canvas { display: block; width: 444px; height: 142px; border-radius: 7px; }
-#transfer-route { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
-#transfer-label text { font: 18px Geist, sans-serif; fill: #315ee8; }
-
-#installer .window-bar { height: 50px; font-size: 19px; }
-#installer > .window-bar { position: relative; }
-#worker-morph { position: absolute; inset: 62px 0 0; opacity: 0; }
-#worker-morph-caption { position: absolute; left: 27px; top: 50%; transform: translateY(-50%); opacity: 0; }
-#installer .terminal-content { inset: 50px 0 0; }
-#installer #install-screen { padding: 32px 42px; font: 26px/1.5 "Codex Mono", monospace; letter-spacing: 0; }
-#installer #codex-screen { padding: 28px 32px 23px; }
-#installer .shell-command { gap: 15.6px; }
-#installer .caret { width: 15.6px; height: 29px; margin: 0; vertical-align: -5px; }
-#install-open { margin-top: 20px; opacity: 0; }
-
-.result-contributions { position: absolute; top: 85px; left: 192px; width: 1536px; display: flex; justify-content: space-around; opacity: 0; font-size: 27px; color: #333d4d; }
-.result-contributions span { color: #315ee8; margin-right: 17px; }
-
-#copied-glyph { opacity: 0; stroke: #315ee8; stroke-width: 2; }
-
-.install-logo {
-  height: 130px;
-  font: inherit;
-  line-height: 1;
-  letter-spacing: 0;
-  color: #315ee8;
-  margin: 0 0 22px;
-  white-space: pre;
-}
-
-#collaboration .section-heading { top: 104px; font-size: 52px; font-weight: 500; letter-spacing: -1.7px; }
-#collab-subtitle { display: none; }
-
-
-#codex-screen, #codex-screen .codex-header, #codex-screen .codex-directory, #codex-screen .composer, #codex-screen .submitted-request, #codex-screen .codex-response, #codex-screen .codex-statusline { font-size: 26px; line-height: 1.5; letter-spacing: 0; }
-
-#cover-title { position: absolute; inset: 0; padding-bottom: 76px; display: flex; align-items: center; justify-content: center; gap: 28px; font: 500 112px/1.1 Geist, sans-serif; letter-spacing: -5px; white-space: nowrap; }
-#cover-title span { color: #315ee8; }
-.transfer-route { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.transfer-label text { font: 18px Geist, sans-serif; fill: #315ee8; }
-
-/* The finished project remains in a browser window, without a game-camera zoom. */
-#browser-rig { left: 320px; top: 235px; width: 1280px; height: 770px; }
-.result-contributions { top: 150px; left: 320px; width: 1280px; }
-
-/* The install command belongs to the title card. The terminal types it next. */
-#install-copy { top: 612px; opacity: 1; }

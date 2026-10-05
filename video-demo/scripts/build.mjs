@@ -1,24 +1,20 @@
 import { readFile, writeFile, mkdir, copyFile } from "node:fs/promises";
-import { build } from "esbuild";
-import { fileURLToPath } from "node:url";
 // SF Mono matches the user's native Terminal. Cache locally, never redistribute it.
 const fontCache = new URL("../.cache/fonts/", import.meta.url);
 await mkdir(fontCache, { recursive: true });
-await copyFile(
-  "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts/SF-Mono-Regular.otf",
-  new URL("SF-Mono-Regular.otf", fontCache),
-);
+for (const face of ["SF-Mono-Regular.otf", "SF-Mono-Bold.otf"]) {
+  await copyFile(`/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts/${face}`, new URL(face, fontCache));
+}
 const read = (path) => readFile(new URL("../" + path, import.meta.url), "utf8");
 let html = await read("src/template.html");
 const timing = JSON.parse(await read("src/timing.json"));
-const workflow = JSON.parse(await read("src/workflow.json"));
 html = html.replace('data-duration="40"', `data-duration="${timing.duration}"`);
-html = html.replace(/(<video\b[^>]*id="game-footage"[^>]*data-start=")[^"]+/, (_, prefix) => `${prefix}${40 + timing.intro_seconds + timing.codex_extension_seconds}`);
+html = html.replace(/(<video\b[^>]*id="game-footage"[^>]*data-start=")[^"]+/, (_, prefix) => `${prefix}${timing.result.footage}`);
 html = html.replace(/(<audio\b[^>]*id="interface-sound"[^>]*data-duration=")[^"]+/, (_, prefix) => `${prefix}${timing.duration}`);
 const content = await read("src/content.js");
-const prompt = JSON.parse(content.match(/prompt:\s*("(?:[^"\\]|\\.)*")/)[1]);
-const installer = JSON.parse(content.match(/installer:\s*("(?:[^"\\]|\\.)*")/)[1]);
-function typingField(name, text, start, duration) {
+const field = (name) => JSON.parse(content.match(new RegExp(`${name}:\\s*("(?:[^"\\\\]|\\\\.)*")`))[1]);
+const prompt = field("prompt"), installer = field("installer");
+function typingField(name, text, [start, duration]) {
   let seed = 2247;
   const random = () => {
     seed ^= seed << 13;
@@ -28,10 +24,6 @@ function typingField(name, text, start, duration) {
   };
   let burst = 1;
   const weights = [...text].map((character, i) => {
-    if (name === "skill") {
-      const cadence = .72 + ((i * 29 + 13) % 17) / 22;
-      return cadence * (text[i - 1] === " " ? 1.8 : 1);
-    }
     let pause = 1;
     if (i === 0 || text[i - 1] === " ") {
       // Some words flow together; others leave a brief planning pause.
@@ -50,22 +42,31 @@ function typingField(name, text, start, duration) {
   return {name, text, times};
 }
 
-const typing = {fields: [typingField("skill", "$delm:run ", 7.65, .58), typingField("prompt", prompt, 8.25, 3.05), typingField("installer", installer, 1.3, 1.65), typingField("closing", "Faster with DeLM.", 34.9, 1.5)]};
+const typing = {fields: [
+  typingField("installer", installer, timing.install.typing),
+  typingField("choice", "3", timing.install.choice),
+  typingField("launch", "claude", timing.install.launch),
+  typingField("slash", "/delm:", timing.claude.slash),
+  typingField("prompt", prompt, timing.claude.prompt),
+  typingField("closing", "Faster with DeLM.", timing.closing.typing),
+]};
 await writeFile(new URL("../src/typing.json", import.meta.url), JSON.stringify(typing, null, 2) + "\n");
-html = html.replace('<script src="src/content.js"></script>', `<script>window.DELM_TIMING = ${JSON.stringify(timing)}; window.DELM_TYPING = ${JSON.stringify(typing.fields)}; window.DELM_WORKFLOW = ${JSON.stringify(workflow)};</script>\n<script src="src/content.js"></script>`);
-const camera = await build({entryPoints: [fileURLToPath(new URL("../src/terminal-camera.js", import.meta.url))], bundle: true, write: false, format: "iife", minify: true});
-html = html.replace('<script src="src/film.js"></script>', `<script>${camera.outputFiles[0].text}</script>\n<script src="src/film.js"></script>`);
+html = html.replace('<script src="src/content.js"></script>', () => `<script>window.DELM_TIMING = ${JSON.stringify(timing)}; window.DELM_TYPING = ${JSON.stringify(typing.fields)};</script>\n<script src="src/content.js"></script>`);
+// Inline the vector mascots so their arms and eyes can move.
+for (const name of ["clawd", "codex"]) {
+  const svg = (await read(`assets/pets/${name}.svg`)).trim();
+  html = html.replaceAll(`<!--mascot:${name}-->`, () => svg);
+}
 const css = (await read("src/film.css"))
   .replaceAll("../assets/", "assets/")
   .replaceAll("../.cache/", ".cache/");
 const stylesheet = /<link\s+rel="stylesheet"\s+href="src\/film\.css"\s*\/?\s*>/;
 if (!stylesheet.test(html)) throw new Error("The template is missing its stylesheet.");
-html = html.replace(stylesheet, `<style>\n${css}\n</style>`);
-for (const path of ["src/content.js", "src/features.js", "src/film.js"]) {
-  html = html.replace(
-    `<script src="${path}"></script>`,
-    `<script>\n${await read(path)}\n</script>`,
-  );
+html = html.replace(stylesheet, () => `<style>\n${css}\n</style>`);
+for (const path of ["src/content.js", "src/features.js", "src/claude.js", "src/film.js"]) {
+  const script = await read(path);
+  // A replacer function keeps "$$" and "$&" in the source literal.
+  html = html.replace(`<script src="${path}"></script>`, () => `<script>\n${script}\n</script>`);
 }
 await writeFile(new URL("../index.html", import.meta.url), html);
 console.log("Built index.html from src/.");

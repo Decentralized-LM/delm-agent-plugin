@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=1920, height=1080" />
-    <title>DeLM for Codex</title>
+    <title>DeLM for Claude Code and Codex</title>
     <link rel="stylesheet" href="src/film.css" />
   </head>
   <body>
@@ -16,183 +16,85 @@
       data-fps="60"
     >
       <div class="paper"></div>
-      <div id="cover-title"><span>DeLM</span> for Codex</div>
 
-      <div id="opening-title" class="opening-title">
-        Build faster with <span>DeLM.</span>
-      </div>
-      <div id="install-copy" class="install-copy">
-        <span class="copy-command">npx delm-agent-plugin</span
-        ><span class="copy-icon"
-          ><svg viewBox="0 0 24 24">
-            <g id="copy-glyph"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V4H4v12h4" /></g><path id="copied-glyph" d="M4 12l5 5L21 5" /></svg
-        ></span>
-      </div>
-
-      <div id="installer-rig">
-        
-        <div id="installer" class="window terminal">
-          <div class="window-bar">
-            <div class="traffic"><i></i><i></i><i></i></div>
-            <span id="terminal-caption">Terminal</span><span class="bar-spacer"></span>
-          </div>
-          <div id="install-screen" class="terminal-content">
-            <div class="shell-command">
-              <span class="shell-tilde">~</span>
-              <span class="shell-dollar">$</span>
-              <span id="install-typed"></span
-              ><b id="install-caret" class="caret"></b>
-            </div>
-            <div id="install-output" class="install-output">
-              <pre class="install-logo" aria-label="DeLM"> ____       _     __  __
-|  _ \  ___| |   |  \/  |
-| | | |/ _ \ |   | |\/| |
-| |_| |  __/ |___| |  | |
-|____/ \___|_____|_|  |_|</pre>
-              <div id="install-step-1" class="install-step">Installing DeLM for Codex...</div>
-              <div id="install-step-2" class="install-step"><span>✓</span> Installed delm@delm.</div>
-              <div id="install-step-3" class="install-step">Restart Codex and trust DeLM in /hooks.</div>
-            </div>
-            <div id="install-open" class="shell-command">
-              <span class="shell-tilde">~</span><span class="shell-dollar">$</span><span id="open-codex-typed"></span><b class="caret"></b>
-            </div>
-          </div>
-          <div id="codex-screen" class="terminal-content codex-screen">
-            <div class="codex-header">
-              <div>
-                <strong>›_ OpenAI Codex</strong>
-                <span class="muted">(v0.159.3)</span>
-              </div>
-              <div class="codex-directory">
-                <span class="muted">directory:</span> ~/neon-rush
-              </div>
-            </div>
-            <div class="codex-conversation">
-              <div id="submitted-request" class="submitted-request">
-                <span class="prompt-chevron">›</span>
-                <div><span class="skill-mention">$delm:run </span><span id="submitted-prompt"></span></div>
-              </div>
-              <div id="codex-response" class="codex-response">
-                <span>•</span>
-                <div>Two DeLM workers are running and sharing progress.</div>
-              </div>
-              </div>
-            <div class="codex-input-area">
-              <div class="composer">
-                <span class="prompt-chevron">›</span>
-                <div class="input-text">
-                  <span id="prompt-placeholder">Ask Codex to do anything</span>
-                  <span id="skill-typed" class="skill-mention"></span><span id="prompt-typed"></span><b id="prompt-caret" class="caret"></b>
-                </div>
-              </div>
-              <div class="codex-statusline"><span>GPT-6-Astra xhigh</span><span class="status-separator"> · </span><span class="project-directory">~/neon-rush</span></div>
-            </div>
-          </div>
+      <div id="cover">
+        <div id="cover-title">
+          <span class="cover-brand">DeLM</span><span class="cover-for">for</span
+          ><span id="host-slot"
+            ><span id="host-claude" class="host"
+              ><span class="host-name">Claude Code</span><span class="pet"><!--mascot:clawd--></span></span
+            ><span id="host-codex" class="host"
+              ><span class="host-name">Codex</span><span class="pet"><!--mascot:codex--></span></span
+            ></span
+          >
         </div>
-      </div>
-      <div id="collaboration" class="scene">
-        <div class="section-heading">
-          <div id="collab-title">Agents claim tasks and build in <span>parallel.</span></div>
+        <div id="install-copy" class="install-copy">
+          <span class="copy-command"></span
+          ><span class="copy-icon"
+            ><svg viewBox="0 0 24 24">
+              <rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V4H4v12h4" /></svg
+          ></span>
         </div>
-        <div id="task-queue" class="task-queue">
-          <div class="queue-heading"><span>Task queue</span><span id="worker-checks" style="opacity: 0">25 tests passing</span></div>
-          <div class="queue-items">
-            <div id="queue-physics" class="queue-item"><span class="queue-number">#1</span><span id="queue-physics-task" class="queue-task">Physics + level</span><span id="queue-physics-owner" class="queue-owner">Agent 1</span></div>
-            <div id="queue-audio" class="queue-item"><span class="queue-number">#2</span><span id="queue-audio-task" class="queue-task">Soundtrack + effects</span><span id="queue-audio-owner" class="queue-owner">Agent 2</span></div>
-            <div id="queue-integration" class="queue-item"><span class="queue-number">#3</span><span id="queue-integration-task" class="queue-task">Integrate the game</span><span id="queue-integration-owner" class="queue-owner">Available</span></div>
-            <div id="queue-checks" class="queue-item"><span class="queue-number">#4</span><span id="queue-checks-task" class="queue-task">Controller checks</span><span id="queue-checks-owner" class="queue-owner">Available</span></div>
-          </div>
-        </div>
-        <div id="context-strip" class="context-strip">
-          <div class="context-label">Shared context</div>
-          <div id="context-core" class="context-post" style="opacity: 0">
-            <div id="context-core-text" class="post-text">Jump controls ready</div>
-            <div class="post-meta"><span id="context-core-file" class="context-attachment">core.js</span><span id="context-core-author" class="post-author">Agent 1</span></div>
-          </div>
-          <div id="context-audio" class="context-post" style="opacity: 0">
-            <div class="post-text">Soundtrack connected</div>
-            <div class="post-meta"><span id="context-audio-name" class="context-attachment">audio.js</span><span class="post-author">Agent 2</span></div>
-          </div>
-          <div id="context-fix" class="context-post" style="opacity: 0">
-            <div class="post-text">Progress save fixed</div>
-            <div class="post-meta"><span class="context-attachment">game.js</span><span class="post-author">Agent 2</span></div>
-          </div>
-        </div>
-        <div id="worker-left" class="worker-window window">
-          <div class="window-bar">
-            <span class="worker-name">›_ Codex · Agent 1</span
-            >
-          </div>
-          <div class="worker-body"><div class="worker-role">Physics + level</div>
-            <div class="worker-file"><span class="tool-bullet">•</span> <span id="worker-left-action">Edited</span> <span id="worker-left-file">js/core.js</span></div>
-            <pre id="worker-left-code" class="feature-code"></pre>
-            <div id="worker-left-detail" class="worker-detail">Implementing jump controls.</div>
-          </div>
-          <div id="physics-feature" class="feature-preview"><div class="preview-label">Movement</div><canvas id="physics-preview" width="444" height="142"></canvas></div>
-        </div>
-        <div id="worker-right" class="worker-window window">
-          <div class="window-bar">
-            <span class="worker-name">›_ Codex · Agent 2</span
-            >
-          </div>
-          <div class="worker-body"><div class="worker-role">Soundtrack + effects</div>
-            <div class="worker-file"><span class="tool-bullet">•</span> <span id="worker-right-action">Edited</span> <span id="worker-right-file">js/audio.js</span></div>
-            <pre id="worker-right-code" class="feature-code"></pre>
-            <div id="worker-right-detail" class="worker-detail">Composing drums and arpeggios.</div>
-          </div>
-          <div id="audio-feature" class="feature-preview"><div class="preview-label">Drums · 140 BPM</div><canvas id="audio-preview" width="444" height="142"></canvas></div>
-        </div>
-        <svg id="transfer-route" viewBox="0 0 1920 1080" aria-hidden="true">
-          <path id="transfer-path" fill="none" stroke="#315ee8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          <g id="transfer-token"><path d="M-12-18H4L12-10V18H-12Z" fill="white" stroke="#315ee8" stroke-width="1.8"/><path d="M4-18V-10H12M-6 0H6M-6 6H6" fill="none" stroke="#315ee8" stroke-width="1.5"/></g>
-          <g id="transfer-label"><rect x="-34" y="-13" width="68" height="26" rx="5" fill="#f8f8f5"/><text text-anchor="middle" dominant-baseline="middle">Share</text></g>
-        </svg>
       </div>
 
-      <div id="result-contributions" class="result-contributions">
-        <div><span>Agent 1</span> Physics + level</div>
-        <div><span>Agent 2</span> Soundtrack + fixes</div>
-      </div>
-      <div id="browser-rig" data-layout-allow-overflow="true">
-        <div id="browser" class="window browser">
-          <div class="window-bar browser-bar">
-            <div class="traffic"><i></i><i></i><i></i></div>
-            <div class="address">
-              <svg viewBox="0 0 18 18">
-                <path d="M5 8V5a4 4 0 0 1 8 0v3M4 8h10v8H4Z" /></svg
-              >Neon Rush
+      <div id="opening-title" class="opening-title">Build faster with <span>DeLM.</span></div>
+
+      <div id="camera">
+        <div id="term-rig">
+          <div id="term" class="window">
+            <div class="window-bar">
+              <div class="traffic"><i></i><i></i><i></i></div>
+              <span id="term-caption">neon-rush — -zsh</span><span class="bar-spacer"></span>
             </div>
-            <span class="bar-spacer"></span>
+            <div id="install-screen" class="term-content">
+              <div id="install-lines"></div>
+            </div>
+            <div id="claude-screen" class="term-content">
+              <div id="claude-rows"></div>
+              <div id="agent-1" class="agent">
+                <div class="agent-rows"></div>
+                <div class="agent-preview"><canvas id="physics-preview" width="444" height="142"></canvas></div>
+              </div>
+              <div id="agent-2" class="agent">
+                <div class="agent-rows"></div>
+                <div class="agent-preview"><canvas id="audio-preview" width="444" height="142"></canvas></div>
+              </div>
+              <div id="board">
+                <div id="board-rows"></div>
+              </div>
+              <svg id="routes" viewBox="0 0 1728 876" aria-hidden="true"></svg>
+            </div>
           </div>
-          <video
-            id="game-footage"
-            src="assets/footage/neon-rush-edit.mp4"
-            data-start="40"
-            data-duration="6"
-            data-track-index="1"
-            muted
-            playsinline
-            preload="auto"
-          ></video>
         </div>
       </div>
-      <div id="result-footer" class="result-footer">Built with DeLM.</div>
+
+      <!-- The finished game opens out of Claude's message. -->
+      <div id="game-backdrop"></div>
+      <div id="game">
+        <video
+          id="game-footage"
+          src="assets/footage/neon-rush-edit.mp4"
+          data-start="40"
+          data-duration="6"
+          data-track-index="1"
+          muted
+          playsinline
+          preload="auto"
+        ></video>
+      </div>
+      <div id="callout-1" class="callout"><span class="badge">1</span><span class="who">Agent 1</span> Jump physics + level</div>
+      <div id="callout-2" class="callout"><span class="badge">2</span><span class="who">Agent 2</span> Synthwave soundtrack</div>
 
       <div id="closing" class="scene closing">
         <h1 id="closing-title"><span class="closing-line">Build your next idea.</span></h1>
         <div id="closing-with" aria-label="Faster with DeLM."><span class="closing-with-size" aria-hidden="true">Faster with DeLM.</span><span class="closing-with-text" aria-hidden="true"><span id="closing-with-fast"></span><span id="closing-with-prefix"></span><span id="closing-with-brand"></span><b id="closing-with-caret"></b></span></div>
         <div id="closing-command">
-          <span>›</span> $delm:run <b class="closing-caret"></b>
+          <span>›</span> /delm:run <b class="closing-caret"></b><span id="closing-clawd" class="perched"><!--mascot:clawd--></span><span id="closing-codex" class="perched"><!--mascot:codex--></span>
         </div>
       </div>
+
       <svg id="pointer" viewBox="0 0 32 40" aria-hidden="true">
-        <path
-          d="M3 2L3 29L10 23L16 37L22 34L16 20L27 20Z"
-          fill="#161a21"
-          stroke="white"
-          stroke-width="2.5"
-          stroke-linejoin="round"
-        />
+        <path d="M3 2L3 29L10 23L16 37L22 34L16 20L27 20Z" fill="#161a21" stroke="white" stroke-width="2.5" stroke-linejoin="round" />
       </svg>
       <audio
         id="interface-sound"
@@ -205,6 +107,7 @@
     <script src="node_modules/gsap/dist/gsap.min.js"></script>
     <script src="src/content.js"></script>
     <script src="src/features.js"></script>
+    <script src="src/claude.js"></script>
     <script src="src/film.js"></script>
   </body>
 </html>

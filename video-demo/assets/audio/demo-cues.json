@@ -1,703 +1,1802 @@
 {
-  "duration": 56.2,
-  "timing": {
-    "duration": 56.2,
-    "anchors": [
-      [
-        0,
-        0
-      ],
-      [
-        3.5,
-        3.5
-      ],
-      [
-        4.55,
-        7.55
-      ],
-      [
-        6.6,
-        7.6
-      ],
-      [
-        7.65,
-        9.473684210526317
-      ],
-      [
-        8.25,
-        10.34436090225564
-      ],
-      [
-        11.3,
-        15.54436090225564
-      ],
-      [
-        12.15,
-        17.14436090225564
-      ],
-      [
-        12.25,
-        17.54436090225564
-      ],
-      [
-        12.7,
-        18.14436090225564
-      ],
-      [
-        13.25,
-        20.25
-      ],
-      [
-        13.85,
-        20.85
-      ],
-      [
-        27.45,
-        42.45
-      ],
-      [
-        40,
-        55
-      ]
-    ],
-    "intro_seconds": 1.2,
-    "codex_extension_seconds": 3
-  },
-  "actions": [
-    4.53,
-    8.48,
-    18.344361,
-    44.79
-  ],
-  "typing": [
-    2.571012,
-    2.697502,
-    2.855029,
-    3.10537,
-    3.325526,
-    3.661006,
-    3.995935,
-    7.856,
-    8.008,
-    8.16,
-    10.777683,
-    10.863651,
-    11.0428,
-    11.211131,
-    11.368644,
-    11.582244,
-    11.689781,
-    11.908282,
-    12.161602,
-    12.536429,
-    12.765247,
-    12.904248,
-    13.147894,
-    13.447768,
-    13.641329,
-    13.944914,
-    14.150631,
-    14.324737,
-    14.637921,
-    14.942525,
-    15.29473,
-    15.664453,
-    15.870926,
-    16.370484,
-    16.704802,
-    51.182934,
-    51.330661,
-    51.589285,
-    51.815391,
-    51.992236,
-    52.269248,
-    52.455389,
-    52.529729
-  ],
+  "duration": 55.2,
   "events": [
     {
-      "time": 2.571012,
-      "original_time": 1.371012,
-      "category": "typing_key",
-      "label": "installer",
-      "duration": 0.018,
-      "gain": 0.0341,
-      "character_index": 1,
-      "character": "n",
-      "seed": 54074
+      "time": 0.35,
+      "category": "mascot",
+      "label": "Clawd waves",
+      "gain": 0.16,
+      "pan": -0.15
     },
     {
-      "time": 2.697502,
-      "original_time": 1.497502,
-      "category": "typing_key",
-      "label": "installer",
-      "duration": 0.018,
-      "gain": 0.0335,
-      "character_index": 3,
-      "character": "x",
-      "seed": 17557
+      "time": 1.45,
+      "category": "wheel",
+      "label": "Title wheel",
+      "gain": 0.045,
+      "pan": 0.0
     },
     {
-      "time": 2.855029,
-      "original_time": 1.655029,
-      "category": "typing_key",
-      "label": "installer",
-      "duration": 0.018,
-      "gain": 0.0334,
-      "character_index": 5,
-      "character": "d",
-      "seed": 25182
+      "time": 1.4969,
+      "category": "wheel",
+      "label": "Title wheel",
+      "gain": 0.05,
+      "pan": 0.0
     },
     {
-      "time": 3.10537,
-      "original_time": 1.90537,
-      "category": "typing_key",
-      "label": "installer",
-      "duration": 0.018,
-      "gain": 0.0293,
-      "character_index": 8,
-      "character": "m",
-      "seed": 63113
+      "time": 1.625,
+      "category": "wheel",
+      "label": "Title wheel",
+      "gain": 0.055,
+      "pan": 0.0
     },
     {
-      "time": 3.325526,
-      "original_time": 2.125526,
-      "category": "typing_key",
-      "label": "installer",
-      "duration": 0.018,
-      "gain": 0.0358,
-      "character_index": 11,
-      "character": "g",
-      "seed": 4204
+      "time": 1.8,
+      "category": "wheel",
+      "label": "Title wheel",
+      "gain": 0.06,
+      "pan": 0.0
     },
     {
-      "time": 3.661006,
-      "original_time": 2.461006,
-      "category": "typing_key",
-      "label": "installer",
-      "duration": 0.018,
-      "gain": 0.0368,
-      "character_index": 15,
-      "character": "-",
-      "seed": 33186
+      "time": 1.975,
+      "category": "wheel",
+      "label": "Title wheel",
+      "gain": 0.055,
+      "pan": 0.0
     },
     {
-      "time": 3.995935,
-      "original_time": 2.795935,
-      "category": "typing_key",
-      "label": "installer",
-      "duration": 0.018,
-      "gain": 0.0328,
-      "character_index": 19,
-      "character": "g",
-      "seed": 73879
+      "time": 2.1031,
+      "category": "wheel",
+      "label": "Title wheel",
+      "gain": 0.05,
+      "pan": 0.0
     },
     {
-      "time": 4.53,
-      "original_time": 3.33,
+      "time": 2.15,
+      "category": "wheel",
+      "label": "Title wheel",
+      "gain": 0.045,
+      "pan": 0.0
+    },
+    {
+      "time": 2.2,
+      "category": "mascot",
+      "label": "Codex waves",
+      "gain": 0.16,
+      "pan": 0.15
+    },
+    {
+      "time": 3.2,
+      "category": "air",
+      "label": "Terminal rises",
+      "gain": 0.07,
+      "pan": 0
+    },
+    {
+      "time": 4.0124,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.045
+    },
+    {
+      "time": 4.0628,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.018
+    },
+    {
+      "time": 4.1236,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.044
+    },
+    {
+      "time": 4.262,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.026
+    },
+    {
+      "time": 4.3309,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": 0.01
+    },
+    {
+      "time": 4.4101,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.026
+    },
+    {
+      "time": 4.482,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": 0.027
+    },
+    {
+      "time": 4.5547,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.065
+    },
+    {
+      "time": 4.6143,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.068
+    },
+    {
+      "time": 4.6755,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.021
+    },
+    {
+      "time": 4.7526,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.011
+    },
+    {
+      "time": 4.816,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.05
+    },
+    {
+      "time": 4.8987,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": 0.013
+    },
+    {
+      "time": 4.9703,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": 0.042
+    },
+    {
+      "time": 5.0479,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.057
+    },
+    {
+      "time": 5.1347,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": 0.035
+    },
+    {
+      "time": 5.2028,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": 0.041
+    },
+    {
+      "time": 5.2646,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": 0.037
+    },
+    {
+      "time": 5.3231,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": -0.078
+    },
+    {
+      "time": 5.4,
+      "category": "typing_key",
+      "label": "installer",
+      "gain": 0.062,
+      "pan": 0.053
+    },
+    {
+      "time": 5.55,
       "category": "enter_key",
       "label": "Run installer",
-      "duration": 0.055,
-      "gain": 0.09
+      "gain": 0.2,
+      "pan": 0
     },
     {
-      "time": 7.856,
-      "original_time": 4.318222,
+      "time": 7,
       "category": "typing_key",
-      "label": "launch_codex",
-      "duration": 0.018,
-      "gain": 0.03,
-      "character_index": 1,
-      "character": "c",
-      "seed": 401
+      "label": "choice",
+      "gain": 0.062,
+      "pan": 0.008
     },
     {
-      "time": 8.008,
-      "original_time": 4.35763,
-      "category": "typing_key",
-      "label": "launch_codex",
-      "duration": 0.018,
-      "gain": 0.03,
-      "character_index": 3,
-      "character": "d",
-      "seed": 403
-    },
-    {
-      "time": 8.16,
-      "original_time": 4.397037,
-      "category": "typing_key",
-      "label": "launch_codex",
-      "duration": 0.018,
-      "gain": 0.03,
-      "character_index": 5,
-      "character": "x",
-      "seed": 405
-    },
-    {
-      "time": 8.48,
-      "original_time": 4.48,
+      "time": 7.25,
       "category": "enter_key",
-      "label": "Launch Codex",
-      "duration": 0.055,
-      "gain": 0.09
+      "label": "Choose both",
+      "gain": 0.2,
+      "pan": 0
     },
     {
-      "time": 10.777683,
-      "original_time": 7.721668,
+      "time": 7.95,
+      "category": "success",
+      "label": "Installed in Claude Code",
+      "gain": 0.1,
+      "pan": -0.1
+    },
+    {
+      "time": 8.55,
+      "category": "success",
+      "label": "Installed in Codex",
+      "gain": 0.1,
+      "pan": 0.1
+    },
+    {
+      "time": 8.8,
+      "category": "success",
+      "label": "Ready in both",
+      "gain": 0.11,
+      "pan": 0
+    },
+    {
+      "time": 9.6212,
       "category": "typing_key",
-      "label": "skill",
-      "duration": 0.018,
-      "gain": 0.0371,
-      "character_index": 1,
-      "character": "$",
-      "seed": 79670
+      "label": "launch",
+      "gain": 0.062,
+      "pan": 0.044
     },
     {
-      "time": 10.863651,
-      "original_time": 7.78091,
+      "time": 9.6787,
       "category": "typing_key",
-      "label": "skill",
-      "duration": 0.018,
-      "gain": 0.0367,
-      "character_index": 2,
-      "character": "d",
-      "seed": 25471
+      "label": "launch",
+      "gain": 0.062,
+      "pan": 0.055
     },
     {
-      "time": 11.0428,
-      "original_time": 7.904365,
+      "time": 9.748,
       "category": "typing_key",
-      "label": "skill",
-      "duration": 0.018,
-      "gain": 0.03,
-      "character_index": 4,
-      "character": "l",
-      "seed": 41389
+      "label": "launch",
+      "gain": 0.062,
+      "pan": -0.054
     },
     {
-      "time": 11.211131,
-      "original_time": 8.020365,
+      "time": 9.8233,
       "category": "typing_key",
-      "label": "skill",
-      "duration": 0.018,
-      "gain": 0.0288,
-      "character_index": 6,
-      "character": ":",
-      "seed": 38908
+      "label": "launch",
+      "gain": 0.062,
+      "pan": 0.019
     },
     {
-      "time": 11.368644,
-      "original_time": 8.12891,
+      "time": 9.8937,
       "category": "typing_key",
-      "label": "skill",
-      "duration": 0.018,
-      "gain": 0.0391,
-      "character_index": 8,
-      "character": "u",
-      "seed": 24666
+      "label": "launch",
+      "gain": 0.062,
+      "pan": -0.017
     },
     {
-      "time": 11.582244,
-      "original_time": 8.27222,
+      "time": 9.97,
       "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0271,
-      "character_index": 1,
-      "character": "B",
-      "seed": 11951
+      "label": "launch",
+      "gain": 0.062,
+      "pan": -0.06
     },
     {
-      "time": 11.689781,
-      "original_time": 8.335295,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0251,
-      "character_index": 4,
-      "character": "l",
-      "seed": 97969
+      "time": 10.2,
+      "category": "air",
+      "label": "Window grows",
+      "gain": 0.07,
+      "pan": 0
     },
     {
-      "time": 11.908282,
-      "original_time": 8.463454,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0328,
-      "character_index": 9,
-      "character": "o",
-      "seed": 10663
-    },
-    {
-      "time": 12.161602,
-      "original_time": 8.612036,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0291,
-      "character_index": 14,
-      "character": "s",
-      "seed": 65273
-    },
-    {
-      "time": 12.536429,
-      "original_time": 8.831886,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0316,
-      "character_index": 20,
-      "character": "G",
-      "seed": 1794
-    },
-    {
-      "time": 12.765247,
-      "original_time": 8.966096,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0261,
-      "character_index": 26,
-      "character": "r",
-      "seed": 50717
-    },
-    {
-      "time": 12.904248,
-      "original_time": 9.047626,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0323,
-      "character_index": 29,
-      "character": "D",
-      "seed": 64644
-    },
-    {
-      "time": 13.147894,
-      "original_time": 9.190534,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0264,
-      "character_index": 34,
-      "character": "i",
-      "seed": 64174
-    },
-    {
-      "time": 13.447768,
-      "original_time": 9.366422,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0364,
-      "character_index": 40,
-      "character": "e",
-      "seed": 89417
-    },
-    {
-      "time": 13.641329,
-      "original_time": 9.479952,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0308,
-      "character_index": 44,
-      "character": "a",
-      "seed": 59325
-    },
-    {
-      "time": 13.944914,
-      "original_time": 9.658017,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0306,
-      "character_index": 51,
-      "character": "h",
-      "seed": 95643
-    },
-    {
-      "time": 14.150631,
-      "original_time": 9.778678,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0358,
-      "character_index": 56,
-      "character": "p",
-      "seed": 87306
-    },
-    {
-      "time": 14.324737,
-      "original_time": 9.880798,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0369,
-      "character_index": 61,
-      "character": "v",
-      "seed": 6113
-    },
-    {
-      "time": 14.637921,
-      "original_time": 10.064492,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.038,
-      "character_index": 68,
-      "character": "r",
-      "seed": 54552
-    },
-    {
-      "time": 14.942525,
-      "original_time": 10.243154,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0265,
-      "character_index": 73,
-      "character": "a",
-      "seed": 50329
-    },
-    {
-      "time": 15.29473,
-      "original_time": 10.449736,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0372,
-      "character_index": 80,
-      "character": "t",
-      "seed": 48950
-    },
-    {
-      "time": 15.664453,
-      "original_time": 10.666592,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0262,
-      "character_index": 87,
-      "character": "m",
-      "seed": 66158
-    },
-    {
-      "time": 15.870926,
-      "original_time": 10.787697,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0343,
-      "character_index": 93,
-      "character": " ",
-      "seed": 35045
-    },
-    {
-      "time": 16.370484,
-      "original_time": 11.080707,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0333,
-      "character_index": 101,
-      "character": "e",
-      "seed": 16615
-    },
-    {
-      "time": 16.704802,
-      "original_time": 11.276797,
-      "category": "typing_key",
-      "label": "prompt",
-      "duration": 0.018,
-      "gain": 0.0255,
-      "character_index": 110,
-      "character": "y",
-      "seed": 63284
-    },
-    {
-      "time": 18.344361,
-      "original_time": 12.15,
+      "time": 10.25,
       "category": "enter_key",
-      "label": "Submit request",
-      "duration": 0.055,
-      "gain": 0.09
+      "label": "Launch Claude Code",
+      "gain": 0.2,
+      "pan": 0
     },
     {
-      "time": 28.927059,
-      "original_time": 18.18,
-      "category": "file_arrival",
-      "label": "File published",
-      "duration": 0.018,
-      "gain": 0.075
+      "time": 12.1348,
+      "category": "typing_key",
+      "label": "slash",
+      "gain": 0.062,
+      "pan": -0.065
     },
     {
-      "time": 30.229412,
-      "original_time": 19.0,
-      "category": "file_arrival",
-      "label": "File imported",
-      "duration": 0.018,
-      "gain": 0.075
+      "time": 12.2033,
+      "category": "typing_key",
+      "label": "slash",
+      "gain": 0.062,
+      "pan": 0.053
     },
     {
-      "time": 31.944706,
-      "original_time": 20.08,
-      "category": "file_arrival",
-      "label": "File published",
-      "duration": 0.018,
-      "gain": 0.075
+      "time": 12.2857,
+      "category": "typing_key",
+      "label": "slash",
+      "gain": 0.062,
+      "pan": -0.08
     },
     {
-      "time": 33.247059,
-      "original_time": 20.9,
-      "category": "file_arrival",
-      "label": "File imported",
-      "duration": 0.018,
-      "gain": 0.075
+      "time": 12.3753,
+      "category": "typing_key",
+      "label": "slash",
+      "gain": 0.062,
+      "pan": -0.002
     },
     {
-      "time": 38.059412,
-      "original_time": 23.93,
-      "category": "file_arrival",
-      "label": "File published",
-      "duration": 0.018,
-      "gain": 0.075
+      "time": 12.4592,
+      "category": "typing_key",
+      "label": "slash",
+      "gain": 0.062,
+      "pan": 0.056
     },
     {
-      "time": 39.361765,
-      "original_time": 24.75,
-      "category": "file_arrival",
-      "label": "File imported",
-      "duration": 0.018,
-      "gain": 0.075
+      "time": 12.55,
+      "category": "typing_key",
+      "label": "slash",
+      "gain": 0.062,
+      "pan": 0.04
     },
     {
-      "time": 44.79,
-      "original_time": 28.59,
+      "time": 13.25,
+      "category": "typing_key",
+      "label": "Complete command",
+      "gain": 0.07,
+      "pan": 0
+    },
+    {
+      "time": 13.5806,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.016
+    },
+    {
+      "time": 13.6351,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.049
+    },
+    {
+      "time": 13.6977,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.016
+    },
+    {
+      "time": 13.7698,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.028
+    },
+    {
+      "time": 13.8439,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.062
+    },
+    {
+      "time": 13.9058,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.039
+    },
+    {
+      "time": 14.0029,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.041
+    },
+    {
+      "time": 14.0844,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.048
+    },
+    {
+      "time": 14.1476,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.062
+    },
+    {
+      "time": 14.316,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.063
+    },
+    {
+      "time": 14.3875,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.034
+    },
+    {
+      "time": 14.4473,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.038
+    },
+    {
+      "time": 14.5073,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.053
+    },
+    {
+      "time": 14.5691,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.009
+    },
+    {
+      "time": 14.6484,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.066
+    },
+    {
+      "time": 14.7248,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.012
+    },
+    {
+      "time": 14.812,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.002
+    },
+    {
+      "time": 14.8815,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.066
+    },
+    {
+      "time": 14.9707,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.049
+    },
+    {
+      "time": 15.0473,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.011
+    },
+    {
+      "time": 15.1363,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.076
+    },
+    {
+      "time": 15.2078,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.017
+    },
+    {
+      "time": 15.2712,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.042
+    },
+    {
+      "time": 15.3462,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.023
+    },
+    {
+      "time": 15.4136,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.023
+    },
+    {
+      "time": 15.4889,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.047
+    },
+    {
+      "time": 15.5667,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.067
+    },
+    {
+      "time": 15.627,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.055
+    },
+    {
+      "time": 15.6817,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.031
+    },
+    {
+      "time": 15.7402,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.021
+    },
+    {
+      "time": 15.7957,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.026
+    },
+    {
+      "time": 15.8561,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.01
+    },
+    {
+      "time": 15.937,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.031
+    },
+    {
+      "time": 16.0162,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.052
+    },
+    {
+      "time": 16.0851,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.039
+    },
+    {
+      "time": 16.165,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.01
+    },
+    {
+      "time": 16.2947,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.074
+    },
+    {
+      "time": 16.3737,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.019
+    },
+    {
+      "time": 16.4514,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.067
+    },
+    {
+      "time": 16.5359,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.042
+    },
+    {
+      "time": 16.6288,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.008
+    },
+    {
+      "time": 16.7116,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.067
+    },
+    {
+      "time": 16.8048,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.063
+    },
+    {
+      "time": 16.8778,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.06
+    },
+    {
+      "time": 16.9291,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.044
+    },
+    {
+      "time": 16.9872,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.014
+    },
+    {
+      "time": 17.0445,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.019
+    },
+    {
+      "time": 17.2214,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.063
+    },
+    {
+      "time": 17.3126,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.063
+    },
+    {
+      "time": 17.3871,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.046
+    },
+    {
+      "time": 17.448,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.026
+    },
+    {
+      "time": 17.521,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.032
+    },
+    {
+      "time": 17.5763,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.031
+    },
+    {
+      "time": 17.6335,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": -0.017
+    },
+    {
+      "time": 17.6841,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.018
+    },
+    {
+      "time": 17.75,
+      "category": "typing_key",
+      "label": "prompt",
+      "gain": 0.062,
+      "pan": 0.028
+    },
+    {
+      "time": 18.2,
+      "category": "enter_key",
+      "label": "Send request",
+      "gain": 0.2,
+      "pan": 0
+    },
+    {
+      "time": 19.35,
+      "category": "board",
+      "label": "Board opens",
+      "gain": 0.08,
+      "pan": 0.35
+    },
+    {
+      "time": 19.4,
+      "category": "board",
+      "label": "Board opens",
+      "gain": 0.1,
+      "pan": 0.35
+    },
+    {
+      "time": 22.4,
+      "category": "board",
+      "label": "Agent 1 appears",
+      "gain": 0.13,
+      "pan": -0.35
+    },
+    {
+      "time": 22.54,
+      "category": "board",
+      "label": "Agent 2 appears",
+      "gain": 0.13,
+      "pan": 0.1
+    },
+    {
+      "time": 23.4,
+      "category": "route",
+      "label": "claim departs",
+      "gain": 0.045,
+      "pan": -0.4
+    },
+    {
+      "time": 23.4,
+      "category": "route",
+      "label": "claim departs",
+      "gain": 0.045,
+      "pan": 0.05
+    },
+    {
+      "time": 23.9,
+      "category": "route",
+      "label": "claim arrives",
+      "gain": 0.135,
+      "pan": 0.4
+    },
+    {
+      "time": 23.9,
+      "category": "route",
+      "label": "claim arrives",
+      "gain": 0.135,
+      "pan": 0.4
+    },
+    {
+      "time": 23.9,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 23.9,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 23.96,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 23.9931,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 24.02,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.08,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.0862,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 24.14,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.1793,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 24.2,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.26,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.2724,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 24.32,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.3655,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 24.38,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.44,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.4586,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 24.5,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.5517,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 24.56,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.62,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.6448,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 24.68,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 24.7379,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 24.74,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.2,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.2457,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.2913,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.337,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.3826,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.4283,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.4739,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.5196,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.5652,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.6109,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.6565,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.7022,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.7478,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.7935,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.8391,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.8848,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 25.9,
+      "category": "route",
+      "label": "share departs",
+      "gain": 0.045,
+      "pan": -0.4
+    },
+    {
+      "time": 26.5,
+      "category": "route",
+      "label": "share arrives",
+      "gain": 0.135,
+      "pan": 0.4
+    },
+    {
+      "time": 26.7,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 26.7571,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 26.8143,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 26.8714,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 26.9286,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 26.9857,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 27.0429,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 27.1,
+      "category": "route",
+      "label": "import departs",
+      "gain": 0.045,
+      "pan": 0.05
+    },
+    {
+      "time": 27.1,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 27.1571,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 27.2143,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 27.2714,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 27.3286,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 27.3857,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 27.4429,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 27.7,
+      "category": "route",
+      "label": "import arrives",
+      "gain": 0.135,
+      "pan": 0.4
+    },
+    {
+      "time": 27.7,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 27.76,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 27.82,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 27.88,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 27.94,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 28.0,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 28.06,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 28.12,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 28.18,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 28.24,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 28.3,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 28.36,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 28.4,
+      "category": "route",
+      "label": "share departs",
+      "gain": 0.045,
+      "pan": 0.05
+    },
+    {
+      "time": 29.0,
+      "category": "route",
+      "label": "share arrives",
+      "gain": 0.135,
+      "pan": 0.4
+    },
+    {
+      "time": 29.5,
+      "category": "route",
+      "label": "claim departs",
+      "gain": 0.045,
+      "pan": 0.05
+    },
+    {
+      "time": 30.0,
+      "category": "route",
+      "label": "claim arrives",
+      "gain": 0.135,
+      "pan": 0.4
+    },
+    {
+      "time": 30.6,
+      "category": "route",
+      "label": "import departs",
+      "gain": 0.045,
+      "pan": -0.4
+    },
+    {
+      "time": 31.2,
+      "category": "route",
+      "label": "import arrives",
+      "gain": 0.135,
+      "pan": 0.4
+    },
+    {
+      "time": 31.8,
+      "category": "route",
+      "label": "claim departs",
+      "gain": 0.045,
+      "pan": -0.4
+    },
+    {
+      "time": 32.3,
+      "category": "route",
+      "label": "claim arrives",
+      "gain": 0.135,
+      "pan": 0.4
+    },
+    {
+      "time": 32.3,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 32.3628,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 32.4256,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 32.4884,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 32.5512,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 32.614,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 32.6767,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 32.7395,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 32.8023,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 32.8651,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 32.9279,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 32.9907,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 33.0535,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 33.1163,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 33.1791,
+      "category": "agent_typing",
+      "label": "Agent 1 edits",
+      "gain": 0.03,
+      "pan": -0.4
+    },
+    {
+      "time": 33.2,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.2538,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.3077,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.3615,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.4154,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.4692,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.5231,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.5769,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.6308,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.6846,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.7385,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.7923,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 33.8462,
+      "category": "agent_typing",
+      "label": "Agent 2 edits",
+      "gain": 0.03,
+      "pan": 0.05
+    },
+    {
+      "time": 34.0,
+      "category": "route",
+      "label": "share departs",
+      "gain": 0.045,
+      "pan": 0.05
+    },
+    {
+      "time": 34.6,
+      "category": "route",
+      "label": "share arrives",
+      "gain": 0.135,
+      "pan": 0.4
+    },
+    {
+      "time": 35.2,
+      "category": "route",
+      "label": "import departs",
+      "gain": 0.045,
+      "pan": -0.4
+    },
+    {
+      "time": 35.8,
+      "category": "route",
+      "label": "import arrives",
+      "gain": 0.135,
+      "pan": 0.4
+    },
+    {
+      "time": 37.1,
+      "category": "success",
+      "label": "Tests pass",
+      "gain": 0.11,
+      "pan": -0.3
+    },
+    {
+      "time": 38.3,
+      "category": "success",
+      "label": "Changes applied",
+      "gain": 0.13,
+      "pan": 0.2
+    },
+    {
+      "time": 40.9,
+      "category": "air",
+      "label": "Push into the message",
+      "gain": 0.1,
+      "pan": 0
+    },
+    {
+      "time": 41.55,
+      "category": "result",
+      "label": "Game opens",
+      "gain": 0.1,
+      "pan": 0
+    },
+    {
+      "time": 42.49,
       "category": "mouse_button",
       "label": "Play game",
-      "duration": 0.097,
+      "gain": 0.2,
+      "pan": -0.2
+    },
+    {
+      "time": 44.3,
+      "category": "result",
+      "label": "Agent 1 callout",
+      "gain": 0.09,
+      "pan": -0.3
+    },
+    {
+      "time": 44.73,
+      "category": "game",
+      "label": "Jump",
       "gain": 0.13,
-      "release_offset": 0.09
+      "pan": -0.3
     },
     {
-      "time": 51.182934,
-      "original_time": 34.982934,
-      "category": "typing_key",
-      "label": "closing",
-      "duration": 0.018,
-      "gain": 0.0349,
-      "character_index": 1,
-      "character": "F",
-      "seed": 75614
+      "time": 45.4,
+      "category": "result",
+      "label": "Agent 2 callout",
+      "gain": 0.09,
+      "pan": 0.4
     },
     {
-      "time": 51.330661,
-      "original_time": 35.130661,
-      "category": "typing_key",
-      "label": "closing",
-      "duration": 0.018,
-      "gain": 0.0342,
-      "character_index": 3,
-      "character": "s",
-      "seed": 93141
+      "time": 46.45,
+      "category": "game",
+      "label": "Jump",
+      "gain": 0.13,
+      "pan": -0.3
     },
     {
-      "time": 51.589285,
-      "original_time": 35.389285,
-      "category": "typing_key",
-      "label": "closing",
-      "duration": 0.018,
-      "gain": 0.0387,
-      "character_index": 6,
-      "character": "r",
-      "seed": 40489
+      "time": 47.25,
+      "category": "air",
+      "label": "Game closes",
+      "gain": 0.05,
+      "pan": 0
     },
     {
-      "time": 51.815391,
-      "original_time": 35.615391,
+      "time": 49.3829,
       "category": "typing_key",
       "label": "closing",
-      "duration": 0.018,
-      "gain": 0.0314,
-      "character_index": 8,
-      "character": "w",
-      "seed": 88650
+      "gain": 0.075,
+      "pan": 0.048
     },
     {
-      "time": 51.992236,
-      "original_time": 35.792236,
+      "time": 49.45,
       "category": "typing_key",
       "label": "closing",
-      "duration": 0.018,
-      "gain": 0.0305,
-      "character_index": 10,
-      "character": "t",
-      "seed": 68501
+      "gain": 0.075,
+      "pan": 0.045
     },
     {
-      "time": 52.269248,
-      "original_time": 36.069248,
+      "time": 49.5307,
       "category": "typing_key",
       "label": "closing",
-      "duration": 0.018,
-      "gain": 0.0311,
-      "character_index": 13,
-      "character": "D",
-      "seed": 27996
+      "gain": 0.075,
+      "pan": -0.003
     },
     {
-      "time": 52.455389,
-      "original_time": 36.255389,
+      "time": 49.6184,
       "category": "typing_key",
       "label": "closing",
-      "duration": 0.018,
-      "gain": 0.0295,
-      "character_index": 15,
-      "character": "L",
-      "seed": 59464
+      "gain": 0.075,
+      "pan": -0.044
     },
     {
-      "time": 52.529729,
-      "original_time": 36.329729,
+      "time": 49.7004,
       "category": "typing_key",
       "label": "closing",
-      "duration": 0.018,
-      "gain": 0.0334,
-      "character_index": 16,
-      "character": "M",
-      "seed": 29897
+      "gain": 0.075,
+      "pan": 0.057
+    },
+    {
+      "time": 49.7893,
+      "category": "typing_key",
+      "label": "closing",
+      "gain": 0.075,
+      "pan": -0.063
+    },
+    {
+      "time": 50.0154,
+      "category": "typing_key",
+      "label": "closing",
+      "gain": 0.075,
+      "pan": 0.029
+    },
+    {
+      "time": 50.1125,
+      "category": "typing_key",
+      "label": "closing",
+      "gain": 0.075,
+      "pan": 0.08
+    },
+    {
+      "time": 50.1922,
+      "category": "typing_key",
+      "label": "closing",
+      "gain": 0.075,
+      "pan": -0.014
+    },
+    {
+      "time": 50.274,
+      "category": "typing_key",
+      "label": "closing",
+      "gain": 0.075,
+      "pan": 0.035
+    },
+    {
+      "time": 50.4692,
+      "category": "typing_key",
+      "label": "closing",
+      "gain": 0.075,
+      "pan": -0.062
+    },
+    {
+      "time": 50.5735,
+      "category": "typing_key",
+      "label": "closing",
+      "gain": 0.075,
+      "pan": -0.043
+    },
+    {
+      "time": 50.6554,
+      "category": "typing_key",
+      "label": "closing",
+      "gain": 0.075,
+      "pan": -0.002
+    },
+    {
+      "time": 50.7297,
+      "category": "typing_key",
+      "label": "closing",
+      "gain": 0.075,
+      "pan": 0.078
+    },
+    {
+      "time": 50.8,
+      "category": "typing_key",
+      "label": "closing",
+      "gain": 0.075,
+      "pan": 0.004
+    },
+    {
+      "time": 51.45,
+      "category": "closing",
+      "label": "Command appears",
+      "gain": 0.08,
+      "pan": 0
+    },
+    {
+      "time": 51.9,
+      "category": "mascot",
+      "label": "Clawd hops",
+      "gain": 0.16,
+      "pan": -0.1
+    },
+    {
+      "time": 52.06,
+      "category": "mascot",
+      "label": "Codex hops",
+      "gain": 0.16,
+      "pan": 0.1
     }
   ],
-  "sources": {
-    "mouse_button": "effects.wav, 3.098\u20133.112 seconds, press and quieter release",
-    "typing": "Deterministic dry 18 ms digital harmonic impulses",
-    "enter": "Dry 55 ms two-tone confirmation with no noise",
-    "file_arrival": "Dry 18 ms harmonic ticks at publication and import arrivals"
-  },
   "music": {
     "source": "assets/audio/clean-desk.mp3",
-    "source_start_seconds": 0,
-    "source_end_seconds": 56.2,
     "sha256": "a57eba531742e14c9ea0e5ab9c9843499aad069a7c9514d8dd61313850bb2169",
-    "input": {
-      "duration": 60.029375,
-      "channels": 2,
-      "sample_rate": 44100,
-      "trimmed_seconds": 3.829374999999999
-    },
-    "music_gain_db": -12.87,
-    "click_gain_db": 0,
-    "fade_in_seconds": 0.015,
-    "fade_out_seconds": 1.5,
-    "mix": {
-      "duration": 56.2,
-      "sample_rate": 48000,
-      "channels": 2,
-      "integrated_lufs": -25.71,
-      "true_peak_dbtp": -13.21,
-      "lra_lu": 5.9
-    }
+    "gain_db": -12.87,
+    "fade_out_seconds": 1.5
+  },
+  "mix": {
+    "integrated_lufs": -16.01,
+    "true_peak_dbtp": -1.48,
+    "lra_lu": 6.5,
+    "normalization_gain_db": 8.45
   }
 }

@@ -2,11 +2,11 @@
   "name": "delm-video-demo",
   "version": "0.1.0",
   "private": true,
-  "description": "DeLM for Codex product film",
+  "description": "DeLM for Claude Code and Codex product film",
   "type": "module",
   "scripts": {
     "preview": "node scripts/hyperframes.mjs preview --no-open",
-    "render": "node scripts/hyperframes.mjs render --fps 60 --quality delivery --workers 4 --output renders/delm-demo.mp4",
+    "render": "node scripts/hyperframes.mjs render --fps 60 --quality delivery --crf 12 --resolution 4k --workers 4 --output renders/delm-demo.mp4",
     "lint": "node scripts/hyperframes.mjs lint",
     "review": "node scripts/review.mjs",
     "build": "node scripts/build.mjs",
@@ -19,10 +19,8 @@
     "edit-footage": "node scripts/capture-game.mjs --edit-only"
   },
   "devDependencies": {
-    "esbuild": "0.25.12",
     "gsap": "3.15.0",
     "hyperframes": "0.8.114",
-    "playwright": "1.63.0",
-    "three": "0.186.1"
+    "playwright": "1.63.0"
   }
 }

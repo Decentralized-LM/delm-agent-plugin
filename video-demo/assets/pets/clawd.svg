@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 208" width="192" height="208" class="mascot mascot-clawd">
+  <!-- Proportions follow Claude Code's terminal mascot: a 13 x 4 body of half cells,
+       eyes one cell in from each side, arms on the third row, and four legs in pairs. -->
+  <defs>
+    <linearGradient id="clawd-skin" gradientUnits="userSpaceOnUse" x1="0" y1="74" x2="0" y2="198">
+      <stop offset="0" stop-color="#eb8f6f"/>
+      <stop offset=".35" stop-color="#d97757"/>
+      <stop offset=".8" stop-color="#cc6a4b"/>
+      <stop offset="1" stop-color="#bf5e41"/>
+    </linearGradient>
+    <radialGradient id="clawd-volume" gradientUnits="userSpaceOnUse" cx="90" cy="108" r="100">
+      <stop offset=".55" stop-color="#7a2410" stop-opacity="0"/>
+      <stop offset="1" stop-color="#7a2410" stop-opacity=".3"/>
+    </radialGradient>
+    <linearGradient id="clawd-sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="clawd-ground" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#3a2018" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#3a2018" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <ellipse cx="96" cy="201" rx="80" ry="5.5" fill="url(#clawd-ground)"/>
+  <g class="clawd-figure">
+    <!-- Outline pass, then fills. -->
+    <g stroke="#2a1510" stroke-width="6" stroke-linejoin="round" fill="#2a1510">
+      <rect x="24" y="166" width="11" height="32" rx="3.5"/>
+      <rect x="46" y="166" width="11" height="32" rx="3.5"/>
+      <rect x="135" y="166" width="11" height="32" rx="3.5"/>
+      <rect x="157" y="166" width="11" height="32" rx="3.5"/>
+      <rect x="2" y="124" width="26" height="24" rx="4"/>
+      <g class="clawd-wave-rest"><g class="clawd-wave-arm"><rect x="164" y="124" width="26" height="24" rx="4"/></g></g>
+      <rect x="24" y="76" width="144" height="96" rx="10"/>
+    </g>
+    <g fill="url(#clawd-skin)">
+      <rect x="24" y="166" width="11" height="32" rx="3.5"/>
+      <rect x="46" y="166" width="11" height="32" rx="3.5"/>
+      <rect x="135" y="166" width="11" height="32" rx="3.5"/>
+      <rect x="157" y="166" width="11" height="32" rx="3.5"/>
+      <rect x="2" y="124" width="26" height="24" rx="4"/>
+      <g class="clawd-wave-rest"><g class="clawd-wave-arm"><rect x="164" y="124" width="26" height="24" rx="4"/></g></g>
+    </g>
+    <g fill="#7a2410" opacity=".22">
+      <rect x="24" y="186" width="11" height="12" rx="3.5"/><rect x="46" y="186" width="11" height="12" rx="3.5"/>
+      <rect x="135" y="186" width="11" height="12" rx="3.5"/><rect x="157" y="186" width="11" height="12" rx="3.5"/>
+    </g>
+    <rect x="24" y="76" width="144" height="96" rx="10" fill="url(#clawd-skin)"/>
+    <rect x="24" y="76" width="144" height="96" rx="10" fill="url(#clawd-volume)"/>
+    <!-- A soft top light and a crisp rim, without turning the block into a pill. -->
+    <rect x="31" y="81" width="130" height="26" rx="7" fill="url(#clawd-sheen)"/>
+    <path d="M30 92v-4a7 7 0 0 1 7-7h118" fill="none" stroke="#ffd2bf" stroke-width="2.2" stroke-linecap="round" opacity=".8"/>
+    <circle cx="38" cy="88" r="2.6" fill="#fff" opacity=".9"/>
+    <path d="M34 166h124" fill="none" stroke="#f0a07f" stroke-width="2" stroke-linecap="round" opacity=".4"/>
+    <!-- Eyes: tall and narrow, set high and in from each side. -->
+    <g class="clawd-eyes">
+      <rect x="46" y="100" width="11" height="24" rx="2.6" fill="#1d120e"/>
+      <rect x="135" y="100" width="11" height="24" rx="2.6" fill="#1d120e"/>
+      <rect x="48" y="103" width="3.6" height="5" rx="1.4" fill="#fff" opacity=".92"/>
+      <rect x="137" y="103" width="3.6" height="5" rx="1.4" fill="#fff" opacity=".92"/>
+    </g>
+    <!-- While waving, the arm is drawn in front of the body. -->
+    <g class="clawd-wave-front" opacity="0">
+      <g class="clawd-wave-arm">
+        <rect x="164" y="124" width="26" height="24" rx="4" fill="#2a1510" stroke="#2a1510" stroke-width="6" stroke-linejoin="round"/>
+        <rect x="164" y="124" width="26" height="24" rx="4" fill="url(#clawd-skin)"/>
+        <rect x="167" y="127" width="17" height="6" rx="3" fill="#fff" opacity=".3"/>
+      </g>
+    </g>
+  </g>
+</svg>

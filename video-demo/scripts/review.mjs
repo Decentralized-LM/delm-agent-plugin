@@ -25,11 +25,11 @@ const video = media.streams.find((s) => s.codec_type === "video");
 const audio = media.streams.find((s) => s.codec_type === "audio");
 const duration = Number(media.format.duration);
 if (
-  video.width !== 1920 ||
-  video.height !== 1080 ||
+  video.width !== 3840 ||
+  video.height !== 2160 ||
   video.r_frame_rate !== "60/1"
 )
-  throw new Error("Expected a1920x1080,60fps delivery.");
+  throw new Error("Expected a 3840x2160, 60 fps delivery.");
 if (Math.abs(duration - timing.duration) > 0.05)
   throw new Error(`Unexpected duration: ${duration}; expected ${timing.duration}`);
 if (!audio) throw new Error("Interface sound is missing.");
@@ -53,12 +53,12 @@ const checks = {
   video: video.codec_name,
   audio: audio.codec_name,
   decoded: true,
-  cues: sound.events?.length ?? sound.actions.length + sound.typing.length,
+  cues: sound.events.length,
   cueCategories: sound.events?.reduce((counts, cue) => {
     counts[cue.category] = (counts[cue.category] || 0) + 1;
     return counts;
   }, {}),
-  music: sound.music || false,
+  loudness: sound.mix,
 };
 mkdirSync(new URL("../.review", import.meta.url), { recursive: true });
 writeFileSync(

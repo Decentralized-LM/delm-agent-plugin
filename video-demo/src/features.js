@@ -12,8 +12,10 @@
   function surface(id, paint, time) {
     const canvas = document.getElementById(id);
     if (!canvas) return;
-    if (canvas.width !== WIDTH) canvas.width = WIDTH;
-    if (canvas.height !== HEIGHT) canvas.height = HEIGHT;
+    // Draw at the output's pixel density so previews stay sharp in 4K.
+    const density = Math.max(1, Math.round(window.devicePixelRatio || 1));
+    if (canvas.width !== WIDTH * density) canvas.width = WIDTH * density;
+    if (canvas.height !== HEIGHT * density) canvas.height = HEIGHT * density;
     const c = canvas.getContext("2d");
     if (!c) return;
     c.save();

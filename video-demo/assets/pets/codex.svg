@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 208" width="192" height="208" class="mascot mascot-codex">
+  <defs>
+    <linearGradient id="codex-skin" gradientUnits="userSpaceOnUse" x1="0" y1="30" x2="0" y2="200">
+      <stop offset="0" stop-color="#a4c1ff"/>
+      <stop offset=".2" stop-color="#7ba5fb"/>
+      <stop offset=".48" stop-color="#6190f8"/>
+      <stop offset=".78" stop-color="#4d76ef"/>
+      <stop offset="1" stop-color="#3f60df"/>
+    </linearGradient>
+    <radialGradient id="codex-volume" gradientUnits="userSpaceOnUse" cx="104" cy="66" r="104">
+      <stop offset=".5" stop-color="#1a2a9e" stop-opacity="0"/>
+      <stop offset="1" stop-color="#1a2a9e" stop-opacity=".5"/>
+    </radialGradient>
+    <radialGradient id="codex-body-volume" gradientUnits="userSpaceOnUse" cx="90" cy="146" r="48">
+      <stop offset=".45" stop-color="#1a2a9e" stop-opacity="0"/>
+      <stop offset="1" stop-color="#1a2a9e" stop-opacity=".45"/>
+    </radialGradient>
+    <radialGradient id="codex-gloss" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#fff" stop-opacity=".9"/>
+      <stop offset=".55" stop-color="#fff" stop-opacity=".3"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="codex-screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#303d8a"/>
+      <stop offset=".45" stop-color="#232c66"/>
+      <stop offset="1" stop-color="#19204f"/>
+    </linearGradient>
+    <linearGradient id="codex-screen-sheen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".18"/>
+      <stop offset=".42" stop-color="#fff" stop-opacity=".05"/>
+      <stop offset=".43" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="codex-ground" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#1b2340" stop-opacity=".3"/>
+      <stop offset="1" stop-color="#1b2340" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="codex-head-shape">
+      <circle cx="68" cy="68" r="26"/><circle cx="97" cy="61" r="29"/><circle cx="127" cy="67" r="26"/>
+      <circle cx="148" cy="96" r="21"/><circle cx="44" cy="96" r="21"/>
+      <circle cx="50" cy="115" r="19"/><circle cx="143" cy="115" r="19"/>
+      <rect x="36" y="70" width="122" height="64" rx="20"/>
+    </clipPath>
+    <filter id="codex-glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.6"/>
+    </filter>
+  </defs>
+  <ellipse cx="96" cy="201" rx="46" ry="6" fill="url(#codex-ground)"/>
+  <g class="codex-figure">
+    <!-- Legs, arms, and torso: outline pass, then fill. -->
+    <g stroke="#0b1030" stroke-width="7" stroke-linejoin="round" fill="#0b1030">
+      <rect x="77" y="168" width="17" height="31" rx="8"/>
+      <rect x="99" y="168" width="17" height="31" rx="8"/>
+      <ellipse cx="57" cy="161" rx="12" ry="17" transform="rotate(24 57 161)"/>
+      <g class="codex-wave-rest"><g class="codex-wave-arm"><ellipse cx="136" cy="161" rx="12" ry="17" transform="rotate(-24 136 161)"/></g></g>
+      <rect x="67" y="128" width="59" height="56" rx="22"/>
+    </g>
+    <g fill="url(#codex-skin)">
+      <rect x="77" y="168" width="17" height="31" rx="8"/>
+      <rect x="99" y="168" width="17" height="31" rx="8"/>
+      <ellipse cx="57" cy="161" rx="12" ry="17" transform="rotate(24 57 161)"/>
+      <g class="codex-wave-rest"><g class="codex-wave-arm"><ellipse cx="136" cy="161" rx="12" ry="17" transform="rotate(-24 136 161)"/></g></g>
+      <rect x="67" y="128" width="59" height="56" rx="22"/>
+    </g>
+    <rect x="67" y="128" width="59" height="56" rx="22" fill="url(#codex-body-volume)"/>
+    <path d="M87 151l9 6-9 6" fill="none" stroke="#f2f8ff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M100 160h9" stroke="#f2f8ff" stroke-width="3.6" stroke-linecap="round"/>
+    <!-- Cloud head: outline, fill, then shading clipped to the head. -->
+    <g stroke="#0b1030" stroke-width="7" fill="#0b1030">
+      <circle cx="68" cy="68" r="26"/><circle cx="97" cy="61" r="29"/><circle cx="127" cy="67" r="26"/>
+      <circle cx="148" cy="96" r="21"/><circle cx="44" cy="96" r="21"/>
+      <circle cx="50" cy="115" r="19"/><circle cx="143" cy="115" r="19"/>
+      <rect x="36" y="70" width="122" height="64" rx="20"/>
+    </g>
+    <g clip-path="url(#codex-head-shape)">
+      <rect x="0" y="0" width="192" height="208" fill="url(#codex-skin)"/>
+      <rect x="0" y="0" width="192" height="208" fill="url(#codex-volume)"/>
+      <!-- Lobe edges catch a little light where the cloud folds. -->
+      <path d="M44 76a26 26 0 0 1 22-34M95 33a29 29 0 0 1 26 12" fill="none" stroke="#c9dbff" stroke-width="2.4" stroke-linecap="round" opacity=".7"/>
+    </g>
+    <ellipse cx="80" cy="47" rx="23" ry="9" transform="rotate(-18 80 47)" fill="url(#codex-gloss)"/>
+    <circle cx="69" cy="46" r="3.4" fill="#fff"/>
+    <ellipse cx="131" cy="50" rx="10" ry="4" transform="rotate(16 131 50)" fill="url(#codex-gloss)" opacity=".65"/>
+    <!-- Screen face. -->
+    <rect x="58" y="74" width="90" height="58" rx="16" fill="#0e1440"/>
+    <rect x="62" y="78" width="82" height="50" rx="12.5" fill="url(#codex-screen)"/>
+    <rect x="62" y="78" width="82" height="50" rx="12.5" fill="url(#codex-screen-sheen)"/>
+    <g class="codex-eyes">
+      <g filter="url(#codex-glow)" opacity=".8" stroke="#6eeaff" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round" fill="none">
+        <path d="M80 92l13 10-13 10"/><path d="M117 111h17"/>
+      </g>
+      <g stroke="#c2fcff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none">
+        <path d="M80 92l13 10-13 10"/><path d="M117 111h17"/>
+      </g>
+    </g>
+    <!-- While waving, the arm is drawn in front of the head. -->
+    <g class="codex-wave-front" opacity="0">
+      <g class="codex-wave-arm">
+        <ellipse cx="136" cy="161" rx="12" ry="17" transform="rotate(-24 136 161)" fill="#0b1030" stroke="#0b1030" stroke-width="7"/>
+        <ellipse cx="136" cy="161" rx="12" ry="17" transform="rotate(-24 136 161)" fill="url(#codex-skin)"/>
+        <ellipse cx="133" cy="152" rx="3.5" ry="6" transform="rotate(-24 133 152)" fill="#fff" opacity=".35"/>
+      </g>
+    </g>
+  </g>
+</svg>

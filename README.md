@@ -31,9 +31,9 @@ DeLM lets agents work in parallel in your existing Codex or Claude Code workflow
 DeLM uses your existing host account and starts agents only when you ask.
 
 <p align="center">
-  <a href="video-demo/renders/delm-demo.mp4"><img src="video-demo/renders/poster.png" alt="Watch DeLM for Codex: agents building and sharing their work" width="800"></a>
+  <a href="video-demo/renders/delm-demo.mp4"><img src="video-demo/renders/poster.png" alt="Watch DeLM for Claude Code and Codex: agents building and sharing their work" width="800"></a>
   <br>
-  <a href="video-demo/renders/delm-demo.mp4">Watch the 56-second Codex demo</a>
+  <a href="video-demo/renders/delm-demo.mp4">Watch the 55-second demo</a>
 </p>
 
 ## Install on macOS
