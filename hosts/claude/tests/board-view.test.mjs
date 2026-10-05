@@ -99,7 +99,8 @@ function fixture(options = {}) {
   const view = createBoardView((name, matcher, handler) => {
     hooks.push({name, matcher: typeof matcher === 'function' ? null : matcher,
       handler: typeof matcher === 'function' ? matcher : handler});
-  }, options.native ? {} : {
+  }, options.native ? {retryFinish: options.retryFinish} : {
+    retryFinish: options.retryFinish,
     lookup: async ($, id) => { lookups.push(id); return options.lookup ? options.lookup($, id) : run; },
   });
   async function call(name, event = {}, next = async () => ({}), nativeEvent = name) {
@@ -141,6 +142,69 @@ test('begin opens synchronously without taking prompt focus or starting an obser
   assert.deepEqual(f.commands, []);
   assert.match(text(f.render()), /Preparing/);
   pending.resolve({isPlaced: true}); await flush(); f.stop();
+});
+
+test('explicit finishing retry delegates once and ordinary board observation stays passive', async () => {
+  const pending = deferred(), retries = [];
+  const f = fixture({run: runRecord({failure: 'Shutdown pending', canRetryFinish: true, phase: 'recovery_required'}),
+    retryFinish: async session => { retries.push(session); await pending.promise; }});
+  await f.view.status(f.host, SESSION); await f.emit(snapshot());
+  f.view.observe(f.host, runRecord({failure: 'Shutdown pending', canRetryFinish: true, phase: 'recovery_required'}));
+  assert.deepEqual(retries, []);
+  f.press('board-retry-finish'); await flush();
+  f.press('board-retry-finish'); await flush();
+  assert.deepEqual(retries, [SESSION]);
+  assert.match(text(f.render()), /Retrying finishing/);
+  pending.resolve(); await flush();
+  assert.deepEqual(f.forbidden, []); f.stop();
+});
+
+test('observed run retry uses its host-owned closure without forwarding native API context', async () => {
+  const run = runRecord({failure: 'Shutdown pending', canRetryFinish: true, phase: 'recovery_required'});
+  const f = fixture({native: true});
+  const calls = [];
+  observeBoard(run, (...args) => { calls.push(args); });
+  observeBoard({...run, session: 'another-conversation'}, () => { throw new Error('Wrong conversation action'); });
+  await f.view.status(f.host, SESSION); await f.emit(snapshot());
+  f.press('board-retry-finish'); await flush();
+  assert.deepEqual(calls, [[]]);
+  const button = nodes(f.render()).find(node => node.key === 'board-retry-finish');
+  f.select('another-conversation'); button.onPress(); await flush();
+  assert.deepEqual(calls, [[]]);
+  assert.deepEqual(f.forbidden, []); f.stop();
+});
+
+test('contribution dependencies outside the overview load by exact identity', async () => {
+  const f = fixture({read: async argv => {
+    assert.deepEqual(argv.slice(7), ['--collection', 'shared', '--item-id', '72']);
+    return viewReply(snapshot({shared: {items: [{id: 72, kind: 'publication', worker: 2, title: 'Parser contract'}], total: 30}}));
+  }});
+  await f.view.status(f.host, SESSION);
+  await f.emit(snapshot({tasks: {items: [{id: 88, task_number: 3, title: 'Parser', state: 'claimed', owner: 1, dependencies: [72]}], total: 1}}));
+  f.press('task-88'); f.press('task-publication-72'); await flush();
+  assert.match(text(f.render()), /Shared context detail/); assert.match(text(f.render()), /Parser contract/);
+  assert.deepEqual(f.forbidden, []); f.stop();
+});
+
+test('durable board updates cannot erase host attention and a successful retry clears it', async () => {
+  const f = fixture({retryFinish: async () => {}});
+  await f.view.status(f.host, SESSION); await f.emit(snapshot());
+  f.view.observe(f.host, runRecord({failure: 'Shutdown pending', phase: 'recovery_required',
+    canRetryFinish: true, conversationAvailable: true}));
+  await f.emit(snapshot({source: {controller_sequence: 2, board_sequence: 1}}));
+  assert.match(text(f.render()), /Needs attention/); assert.match(text(f.render()), /Shutdown pending/);
+  assert.match(text(f.render()), /You can continue chatting here/);
+  f.view.observe(f.host, runRecord({failure: null, phase: 'finishing', canRetryFinish: false}));
+  await f.emit(snapshot({status: 'finishing', source: {controller_sequence: 3, board_sequence: 1}}));
+  assert.match(text(f.render()), /Finishing/); assert.doesNotMatch(text(f.render()), /Shutdown pending|Retry finishing/);
+  f.stop();
+});
+
+test('read-only board registrations never offer an unavailable finishing action', async () => {
+  const f = fixture({run: runRecord({failure: 'Shutdown pending', canRetryFinish: true})});
+  await f.view.status(f.host, SESSION); await f.emit(snapshot());
+  assert.doesNotMatch(text(f.render()), /Retry finishing/);
+  f.stop();
 });
 
 test('status lookup is passive and observer arguments exclude control credentials', async () => {

@@ -51,6 +51,8 @@ struct Start {
     project: PathBuf,
     session_id: String,
     task: String,
+    host_version: Option<String>,
+    package_root: Option<PathBuf>,
 }
 
 async fn line(input: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<Vec<u8>>> {
@@ -150,7 +152,7 @@ async fn serve() -> Result<()> {
     let mut controller =
         controller::Controller::new(&start.project, start.session_id, start.task, native_host)?;
     if let Err(error) = controller.handle(
-        json!({"op":"transport","token_digest":format!("{:x}",Sha256::digest(token.as_bytes()))}),
+        json!({"op":"transport","token_digest":format!("{:x}",Sha256::digest(token.as_bytes())),"host_version":start.host_version,"package_root":start.package_root}),
     ) {
         controller.abort_before_handoff("Could not establish native control ownership")?;
         return Err(error);
@@ -175,17 +177,20 @@ async fn serve() -> Result<()> {
     loop {
         tokio::select! {
             _ = termination.recv() => {
-                let _ = controller.handle(json!({"op":"cancel","reason":"Claude unloaded its DeLM bridge; native worker shutdown is unconfirmed"}));
+                let _ = controller.handle(json!({"op":"interrupt","reason":"Claude unloaded its DeLM bridge; native worker shutdown is unconfirmed"}));
                 break;
             }
             _ = heartbeat.tick() => {
                 if !native_host.is_running()? {
-                    let _ = controller.handle(json!({"op":"cancel","reason":"The native Claude host exited"}));
+                    let _ = controller.handle(json!({"op":"interrupt","reason":"The native Claude host exited"}));
                     break;
                 }
                 if !deadline_sent && tokio::time::Instant::now() >= deadline {
                     deadline_sent = true;
-                    let result = controller.handle(json!({"op":"cancel","reason":"DeLM's execution allowance expired"}))?;
+                    // An execution deadline ends unfinished work. A selected
+                    // result is already finishing, so retain its delivery intent
+                    // while native shutdown is reconciled.
+                    let result = controller.handle(json!({"op":"interrupt","reason":"DeLM's execution allowance expired"}))?;
                     let _ = print(&json!({"type":"action","result":result})).await;
                 }
             }

@@ -10,6 +10,11 @@ function actions($) {
   return {
     details: () => update({kind: 'details'}), back: () => update({kind: 'overview'}),
     select: (kind, id) => update({kind, id}), page: () => {},
+    retryFinish: () => {
+      // Presentation-only transition: never contact the runtime or launch work.
+      state = {...state, canRetryFinish: false, snapshot: {...state.snapshot, status: 'finishing', attention: null}};
+      $.ui.invalidate('ui.render');
+    },
     hide: async () => { visible = false; await $.ui.close({id: 'delm'}); $.ui.invalidate('ui.render'); },
     show: async () => { visible = true; await $.ui.open({id: 'delm', title: 'DeLM', rows: 24, columns: 54}); $.ui.invalidate('ui.render'); },
   };
@@ -17,15 +22,16 @@ function actions($) {
 
 export function register(on) {
   on('session.start', async ($, e, next) => {
-    for (const name of ['board-preview', 'board-details', 'board-hide', 'board-complete', 'board-stopped', 'board-preparing', 'board-unicode', 'board-attention']) {
+    for (const name of ['board-preview', 'board-details', 'board-hide', 'board-complete', 'board-stopped', 'board-preparing', 'board-unicode', 'board-attention', 'board-recovery']) {
       await $.command.register({name, description: 'Local DeLM UI fixture with sample data', immediate: true});
     }
     return next(e);
   });
-  for (const name of ['board-preview', 'board-details', 'board-hide', 'board-complete', 'board-stopped', 'board-preparing', 'board-unicode', 'board-attention']) {
+  for (const name of ['board-preview', 'board-details', 'board-hide', 'board-complete', 'board-stopped', 'board-preparing', 'board-unicode', 'board-attention', 'board-recovery']) {
     on('command.run', {command: name}, async $ => {
       const nextCase = cases[name.replace('board-', '')] ? name.replace('board-', '') : 'working';
-      state = {snapshot: cases[nextCase], screen: {kind: name === 'board-details' || ['complete', 'stopped', 'attention'].includes(nextCase) ? 'details' : 'overview'}};
+      state = {snapshot: cases[nextCase], canRetryFinish: nextCase === 'recovery', conversationAvailable: nextCase === 'recovery',
+        screen: {kind: name === 'board-details' || ['complete', 'stopped', 'attention'].includes(nextCase) ? 'details' : 'overview'}};
       if (name === 'board-hide') await actions($).hide();
       else await actions($).show();
       return {text: 'Local preview · sample data · no model call.'};

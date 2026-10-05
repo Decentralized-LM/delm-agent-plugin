@@ -29,6 +29,7 @@ fn fixture(host: &str) -> (tempfile::TempDir, PathBuf) {
     .unwrap();
     fs::write(run.join("workspace/delivery/result.json"), json!({"delivered":true,
             "cleanup_complete":true,"verification_required":false,"changed_paths":["source-secret.ts"],
+            "artifacts_declared":true,"artifacts":["private-video.mp4"],"undelivered_outputs":["private-build/output"],
             "conflicts":[],"project":"/private/project-secret","recovery":"/secret/recovery"}).to_string()).unwrap();
     fs::write(
         run.join("shutdown-report.json"),
@@ -77,16 +78,45 @@ fn report_exports_only_allowlisted_values_for_both_hosts() {
             "SECRET_OUTPUT",
             "SECRET_SOURCE",
             "source-secret.ts",
+            "private-video.mp4",
+            "private-build/output",
             "/secret/recovery",
             "/private/project-secret",
         ] {
             assert!(!encoded.contains(secret), "export leaked {secret}");
         }
         assert_eq!(report["host"], host);
+        assert_eq!(report["delivery"]["artifacts_declared"], true);
+        assert_eq!(report["delivery"]["artifact_count"], 1);
+        assert_eq!(report["delivery"]["undelivered_output_count"], 1);
         assert_eq!(report["timing"]["phases"]["preparation"], 20);
         assert_eq!(report["delivery"]["changed_file_count"], 1);
         assert_eq!(report["timing"]["closed_worker_overlap_ms"], Value::Null);
     }
+}
+
+#[test]
+fn lifecycle_reports_original_metadata_without_exporting_arbitrary_errors() {
+    let (_fixture, run) = fixture("claude");
+    let path = run.join("claude.json");
+    let mut state = read_json(&path).unwrap().unwrap();
+    state["runtime_version"] = json!("0.1.0");
+    state["host_version"] = json!("2.1.289 (Claude Code)");
+    state["revision"] = json!(3);
+    state["finalization"] = json!({"generation":4,"revision":3,"intent":"deliver","started":true,"attempt":2,"shutdown_ack":"unconfirmed","reason":"completed_candidate","error":"PRIVATE_OUTPUT"});
+    fs::write(&path, state.to_string()).unwrap();
+    let report = report_at(&run).unwrap();
+    assert_eq!(report["run_identity"]["host_version"], "2.1.289");
+    assert_eq!(report["run_identity"]["runtime_version"], "0.1.0");
+    assert_eq!(report["lifecycle"]["intent"], "deliver");
+    assert_eq!(report["lifecycle"]["attempt"], 2);
+    assert!(!report.to_string().contains("PRIVATE_OUTPUT"));
+    state["finalization"]["reason"] = json!("PRIVATE_REASON");
+    state["host_version"] = json!("PRIVATE_VERSION");
+    fs::write(&path, state.to_string()).unwrap();
+    let report = report_at(&run).unwrap();
+    assert_eq!(report["run_identity"]["host_version"], Value::Null);
+    assert_eq!(report["lifecycle"]["reason"], Value::Null);
 }
 #[test]
 fn timing_separates_overlap_waiting_and_unobserved_phases() {

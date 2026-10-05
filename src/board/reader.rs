@@ -220,14 +220,14 @@ pub(crate) fn snapshot(run: &Path, selected: Option<&str>, requested: Page) -> R
     } else {
         "CASE state WHEN 'claimed' THEN 0 WHEN 'available' THEN 1 ELSE 2 END,id"
     };
-    let mut query = tx.prepare(&format!("SELECT id,owner,state,updated,substr(body,1,1048577) FROM tasks WHERE id<=?1 AND {} ORDER BY {order} LIMIT ?3 OFFSET ?4",item_filter(tasks_page)))?;
+    let mut query = tx.prepare(&format!("SELECT id,owner,state,updated,substr(body,1,1048577),task_number FROM (SELECT tasks.*,ROW_NUMBER() OVER(ORDER BY id) AS task_number FROM tasks) WHERE id<=?1 AND {} ORDER BY {order} LIMIT ?3 OFFSET ?4",item_filter(tasks_page)))?;
     let tasks = query.query_map(params![ceiling, tasks_page.item_id, tasks_page.limit, tasks_page.offset], |r|
-        Ok((r.get::<_,u64>(0)?,r.get::<_,Option<usize>>(1)?,r.get::<_,String>(2)?,r.get::<_,u64>(3)?,r.get::<_,String>(4)?)))?
+        Ok((r.get::<_,u64>(0)?,r.get::<_,Option<usize>>(1)?,r.get::<_,String>(2)?,r.get::<_,u64>(3)?,r.get::<_,String>(4)?,r.get::<_,u64>(5)?)))?
         .map(|row| -> Result<Value> {
-            let (id,owner,state,version,raw) = row?;
+            let (id,owner,state,version,raw,task_number) = row?;
             let b = body(&raw)?;
             let dependencies = b["dependencies"].as_array().map(|items| items.iter().filter_map(Value::as_u64).take(64).collect::<Vec<_>>()).unwrap_or_default();
-            Ok(json!({"id":id,"title":clean(&b["title"],256),"description":clean(&b["description"],2048),
+            Ok(json!({"id":id,"task_number":task_number,"title":clean(&b["title"],256),"description":clean(&b["description"],2048),
                 "owner":owner,"state":text(&state,32),"version":version,"dependencies":dependencies,
                 "kind":clean(&b["kind"],32),"interface":clean(&b["interface"],2048),
                 "done_when":clean(&b["done_when"],1024),"handoff":clean(&b["handoff"],2048)}))
@@ -618,6 +618,11 @@ mod tests {
         let current = task(&mut board, 12);
         let overview = snapshot(root.path(), None, Page::default()).unwrap();
         assert_eq!(overview["tasks"]["items"][0]["id"], current);
+        assert_eq!(overview["tasks"]["items"][0]["task_number"], 13);
+        assert!(
+            current > 13,
+            "Task numbers must not expose event sequence gaps"
+        );
         assert_eq!(overview["tasks"]["total"], 13);
         let history = snapshot(root.path(), Some("tasks"), Page::default()).unwrap();
         assert_eq!(history["tasks"]["items"][0]["state"], "done");

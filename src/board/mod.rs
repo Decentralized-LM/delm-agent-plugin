@@ -5,6 +5,7 @@
 //! COW objects and are read only through explicit expansion or import.
 
 mod checks;
+mod discovery;
 mod files;
 pub(crate) mod reader;
 
@@ -372,7 +373,7 @@ impl Board {
 
     fn call_locked(&mut self, worker: usize, name: &str, args: &Value) -> Result<Value> {
         self.workers[worker - 1].verify()?;
-        let mutation = name != "delm_expand"
+        let mutation = !matches!(name, "delm_expand" | "delm_list")
             && (name != "delm_status"
                 || ["state", "summary", "dependency", "finding"]
                     .iter()
@@ -381,6 +382,7 @@ impl Board {
             let result = match name {
                 "delm_status" => json!({"worker": worker}),
                 "delm_expand" => self.expand(worker, args)?,
+                "delm_list" => discovery::list(&self.db, worker, args)?,
                 _ => bail!("unknown coordination tool: {name}"),
             };
             return Ok(json!({"result": result, "board": self.view()?}));
@@ -566,6 +568,11 @@ impl Board {
                 .context("unknown task")?;
             let mut body: Value = serde_json::from_str(&body)?;
             body["task_id"] = json!(id);
+            body["task_number"] = json!(self.db.query_row(
+                "SELECT COUNT(*) FROM tasks WHERE id<=?",
+                [id],
+                |r| r.get::<_, u64>(0)
+            )?);
             body["owner"] = json!(owner);
             body["state"] = json!(state);
             body["version"] = json!(version);
@@ -1065,8 +1072,13 @@ fn complete(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> 
             );
         }
     }
-    let body = json!({"outcome": outcome, "summary": string(args, "summary", 4096)?, "checks": checks(args)?, "shared_checks": args.get("shared_checks").cloned().unwrap_or_else(||json!([])), "dependency": dependency,
+    let mut body = json!({"outcome": outcome, "summary": string(args, "summary", 4096)?, "checks": checks(args)?, "shared_checks": args.get("shared_checks").cloned().unwrap_or_else(||json!([])), "dependency": dependency,
         "declaration_only": true,"expected_revision":revision});
+    // Omission means accounting was not supplied; [] explicitly declares that
+    // source changes alone satisfy the request. Delivery preserves this fact.
+    if args.get("artifacts").is_some() {
+        body["artifacts"] = json!(paths(args, "artifacts", false)?);
+    }
     let seq = event(tx, worker, "declaration", &body)?;
     let state = match outcome {
         "waiting" => "waiting",
@@ -1121,10 +1133,10 @@ fn view(db: &Connection) -> Result<Value> {
     let sequence: i64 =
         db.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))?;
     let mut tasks_query = db.prepare(
-        "SELECT id,author,owner,state,body,updated FROM tasks ORDER BY (state='done'),updated DESC LIMIT ?",
+        "SELECT id,author,owner,state,body,updated,task_number FROM (SELECT tasks.*,ROW_NUMBER() OVER(ORDER BY id) AS task_number FROM tasks) ORDER BY (state='done'),updated DESC LIMIT ?",
     )?;
-    let tasks = tasks_query.query_map([VIEW_LIMIT], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, usize>(1)?,r.get::<_, Option<usize>>(2)?,r.get::<_, String>(3)?,r.get::<_, String>(4)?,r.get::<_, i64>(5)?)))?
-        .map(|row| -> Result<Value> { let (id,author,owner,state,body,version) = row?; let body: Value=serde_json::from_str(&body)?; Ok(json!({"task_id":id,"author":author,"owner":owner,"state":state,"version":version,"kind":body.get("kind").and_then(Value::as_str).unwrap_or("implementation"),"handoff":body["handoff"],"checkpoint":body["checkpoint"],"title":body["title"],"description":compact(&body["description"],256),"interface":compact(&body["interface"],256),"dependencies":body["dependencies"]})) }).collect::<Result<Vec<_>>>()?;
+    let tasks = tasks_query.query_map([VIEW_LIMIT], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, usize>(1)?,r.get::<_, Option<usize>>(2)?,r.get::<_, String>(3)?,r.get::<_, String>(4)?,r.get::<_, i64>(5)?,r.get::<_,u64>(6)?)))?
+        .map(|row| -> Result<Value> { let (id,author,owner,state,body,version,task_number) = row?; let body: Value=serde_json::from_str(&body)?; Ok(json!({"task_id":id,"task_number":task_number,"author":author,"owner":owner,"state":state,"version":version,"kind":body.get("kind").and_then(Value::as_str).unwrap_or("implementation"),"handoff":body["handoff"],"checkpoint":body["checkpoint"],"title":body["title"],"description":compact(&body["description"],256),"interface":compact(&body["interface"],256),"dependencies":body["dependencies"]})) }).collect::<Result<Vec<_>>>()?;
     let mut workers_query =
         db.prepare("SELECT worker,state,summary,dependency,updated FROM workers ORDER BY worker")?;
     let workers=workers_query.query_map([], |r| Ok(json!({"worker":r.get::<_,usize>(0)?,"state":r.get::<_,String>(1)?,"summary":r.get::<_,String>(2)?,"dependency":r.get::<_,Option<String>>(3)?,"sequence":r.get::<_,i64>(4)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
@@ -1156,7 +1168,8 @@ fn view(db: &Connection) -> Result<Value> {
             Ok(json!({"receipt_id":id,"worker":worker,"request_revision":revision,"summary":body["summary"],"passed":body["passed"],"inputs_unchanged":body["inputs_unchanged"],"reusable":body["reusable"],"command":body["native"]["command"]})) })
         .collect::<Result<Vec<_>>>()?;
     Ok(
-        json!({"sequence":sequence,"request_revision":revision,"workers":workers,"tasks":tasks,"publications":publications,"findings":findings,"check_receipts":check_receipts,"view_limit":VIEW_LIMIT}),
+        json!({"sequence":sequence,"request_revision":revision,"workers":workers,"tasks":tasks,"publications":publications,"findings":findings,"check_receipts":check_receipts,"view_limit":VIEW_LIMIT,
+            "collections":discovery::counts(db)?}),
     )
 }
 
@@ -1238,7 +1251,10 @@ fn dependencies(db: &Connection, args: &Value) -> Result<Vec<i64>> {
             [id],
             |r| r.get(0),
         )?;
-        ensure!(exists, "unknown dependency publication {id}");
+        ensure!(
+            exists,
+            "unknown dependency publication {id}; use publication_id values returned by delm_publish or delm_list(collection=publications), not task IDs or task numbers; omit dependencies until a contribution exists"
+        );
         result.push(id);
     }
     Ok(result)
@@ -1280,6 +1296,16 @@ fn select_files(publication: &Value, args: &Value) -> Result<Vec<Value>> {
 /// DynamicToolSpec values sent to the installed native app-server.
 pub fn tool_definitions() -> Vec<Value> {
     let text = json!({"type":"string"});
+    let bounded_text = |limit: usize, required: bool| {
+        json!({"type":"string","minLength":usize::from(required),"maxLength":limit,
+        "description":format!("At most {limit} UTF-8 bytes. Keep this field concise; publish detailed content as a file.")})
+    };
+    let title = bounded_text(256, true);
+    let description = bounded_text(2048, true);
+    let interface = bounded_text(2048, false);
+    let task_note = bounded_text(1024, false);
+    let publication_ids = json!({"type":"array","maxItems":128,"items":{"type":"integer","minimum":1},
+        "description":"Existing publication_id integers returned by delm_publish or delm_list(collection=publications). These are shared code contributions, not task IDs, task numbers, or future prerequisites. Omit or use [] until a contribution exists."});
     let strings = json!({"type":"array","items":{"type":"string"}});
     let ids = json!({"type":"array","items":{"type":"integer","minimum":1}});
     let mut definitions = Vec::new();
@@ -1288,14 +1314,20 @@ pub fn tool_definitions() -> Vec<Value> {
     };
     define(
         "delm_status",
-        "Read compact board. Optionally update your status or append a useful finding; updates require a unique idempotency_key. Waiting names a concrete dependency.",
+        "Read compact board, including collection totals. Use delm_list only when you need records beyond the compact view. Optionally update your status or append a useful finding; updates require a unique idempotency_key. Waiting names a concrete dependency.",
         json!({"idempotency_key":text,"state":{"enum":["working","waiting","blocked"]},"summary":text,"dependency":text,"finding":text}),
         &[],
     );
     define(
+        "delm_list",
+        "Discover a bounded page of tasks, publications, findings, or check receipts, ordered by stable ID. Use the returned cursor to continue. Optional task_state and owner filters find current work; restart without a cursor if task ownership changed. This is read-only; it does not claim work or append context. Use delm_expand for a selected record's full details.",
+        json!({"collection":{"enum":["tasks","publications","findings","checks"]},"limit":{"type":"integer","minimum":1,"maximum":24},"cursor":{"type":"string","maxLength":1024},"task_state":{"enum":["available","claimed","done"]},"owner":{"enum":["self","peer"]}}),
+        &["collection"],
+    );
+    define(
         "delm_task_create",
-        "Expose a useful independent contribution. Use integration for temporary ownership of assembling the one shared result, or verification for a scoped check; only one integration task can be claimed at a time.",
-        json!({"idempotency_key":text,"title":text,"description":text,"kind":{"enum":["implementation","verification","integration"]},"interface":text,"dependencies":ids,"earliest_contribution":text,"done_when":text}),
+        "Expose a useful independent contribution. UTF-8 byte limits: title 256; description/interface 2048 each; earliest_contribution/done_when 1024 each. dependencies must be existing publication_id values from delm_publish or delm_list(collection=publications), never task numbers. Use integration for temporary ownership of assembling the shared result, or verification for a scoped check; one integration task may be claimed at a time.",
+        json!({"idempotency_key":text,"title":title,"description":description,"kind":{"enum":["implementation","verification","integration"]},"interface":interface,"dependencies":publication_ids,"earliest_contribution":task_note,"done_when":task_note}),
         &["idempotency_key", "title", "description"],
     );
     define(
@@ -1312,8 +1344,8 @@ pub fn tool_definitions() -> Vec<Value> {
     );
     define(
         "delm_task_update",
-        "Update the boundary, interface or remaining work of your claimed task. Use its current board version.",
-        json!({"idempotency_key":text,"task_id":{"type":"integer","minimum":1},"expected_version":{"type":"integer","minimum":1},"title":text,"description":text,"interface":text,"dependencies":ids,"earliest_contribution":text,"done_when":text}),
+        "Update the boundary, interface or remaining work of your claimed task using its current board version. UTF-8 byte limits: title 256; description/interface 2048 each; earliest_contribution/done_when 1024 each. dependencies must be existing publication_id values from delm_publish or delm_list(collection=publications), never task numbers.",
+        json!({"idempotency_key":text,"task_id":{"type":"integer","minimum":1},"expected_version":{"type":"integer","minimum":1},"title":title,"description":description,"interface":interface,"dependencies":publication_ids,"earliest_contribution":task_note,"done_when":task_note}),
         &["idempotency_key", "task_id", "expected_version"],
     );
     define(
@@ -1322,7 +1354,7 @@ pub fn tool_definitions() -> Vec<Value> {
         json!({"idempotency_key":text,"task_id":{"type":"integer","minimum":1},"expected_version":{"type":"integer","minimum":1},"summary":text,"publication_id":{"type":"integer","minimum":1}}),
         &["idempotency_key", "task_id", "expected_version", "summary"],
     );
-    let task_schema = json!({"type":"object","properties":{"title":text,"description":text,"kind":{"enum":["implementation","verification","integration"]},"interface":text,"dependencies":ids,"earliest_contribution":text,"done_when":text},"required":["title","description"],"additionalProperties":false});
+    let task_schema = json!({"type":"object","properties":{"title":title,"description":description,"kind":{"enum":["implementation","verification","integration"]},"interface":interface,"dependencies":publication_ids,"earliest_contribution":task_note,"done_when":task_note},"required":["title","description"],"additionalProperties":false});
     define(
         "delm_task_split",
         "Keep a smaller remaining portion and atomically expose independent work to your peer. remaining and tasks use the task-create fields; remaining keeps the current task kind.",
@@ -1350,7 +1382,7 @@ pub fn tool_definitions() -> Vec<Value> {
     define(
         "delm_publish",
         "Freeze selected project-relative files or deletions as an immutable contribution. Publish useful partial work early; paths may be empty for an interface or finding. Large artifacts use large_artifact=true (4 GiB limit, otherwise 64 MiB).",
-        json!({"idempotency_key":text,"summary":text,"paths":strings,"dependencies":ids,"interfaces":text,"unfinished":text,"checks":{"type":"array","items":{}},"large_artifact":{"type":"boolean"}}),
+        json!({"idempotency_key":text,"summary":text,"paths":strings,"dependencies":publication_ids,"interfaces":text,"unfinished":text,"checks":{"type":"array","items":{}},"large_artifact":{"type":"boolean"}}),
         &["idempotency_key", "summary", "paths"],
     );
     define(
@@ -1367,8 +1399,8 @@ pub fn tool_definitions() -> Vec<Value> {
     );
     define(
         "delm_complete",
-        "Declare the one assembled result outcome with current board request_revision as expected_revision. checks are your native command IDs; shared_checks are validated receipt IDs from either peer whose scoped inputs still match. Then end your turn. Complete means the full result is ready. Waiting requires dependency task:<id> or worker:<other worker>; it cannot name your own work.",
-        json!({"idempotency_key":text,"expected_revision":{"type":"integer","minimum":1},"outcome":{"enum":["complete","partial","blocked","waiting"]},"summary":text,"checks":{"type":"array","items":{}},"shared_checks":ids,"dependency":{"type":"string","description":"For waiting, task:<positive task ID> or worker:<1|2>; use the other worker, not yourself."}}),
+        "Declare the one assembled result outcome with current board request_revision as expected_revision. artifacts lists every requested generated output file or directory, including Git-ignored outputs, relative to your private project; exclude dependency, cache and credential paths. Use [] explicitly for source-only work. Omitting artifacts leaves output accounting unconfirmed. checks are your native command IDs; shared_checks are validated receipt IDs from either peer whose scoped inputs still match. Then end your turn. Complete means the full result is ready. Waiting requires dependency task:<id> or worker:<other worker>; it cannot name your own work.",
+        json!({"idempotency_key":text,"expected_revision":{"type":"integer","minimum":1},"outcome":{"enum":["complete","partial","blocked","waiting"]},"summary":text,"checks":{"type":"array","items":{}},"shared_checks":ids,"artifacts":strings,"dependency":{"type":"string","description":"For waiting, task:<positive task ID> or worker:<1|2>; use the other worker, not yourself."}}),
         &["idempotency_key", "expected_revision", "outcome", "summary"],
     );
     definitions

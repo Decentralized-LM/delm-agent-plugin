@@ -1,6 +1,7 @@
 """Install/remove only this native plugin through the existing stock Codex CLI."""
 
 import argparse
+from maintenance import assert_maintenance_safe
 import contextlib
 import hashlib
 import json
@@ -141,6 +142,11 @@ class Installation:
                          "codex_home": str(self.codex_home), "plugin_id": PLUGIN_ID}
 
     def native(self, *args):
+        # Staging may take minutes after the initial preflight. Recheck at
+        # activation/removal so a run started during that interval is protected.
+        if args and (args[0] in {"add", "remove"} or
+                     args[0] == "marketplace" and len(args) > 1 and args[1] in {"add", "remove"}):
+            assert_maintenance_safe("codex")
         result = subprocess.run([self.codex, "plugin", *args, "--json"], cwd=self.cwd,
                                 env=dict(os.environ, CODEX_HOME=str(self.codex_home)),
                                 text=True, capture_output=True)
@@ -181,6 +187,7 @@ class Installation:
                 raise RuntimeError(f"Installed plugin files changed; preserving them at {root}.")
 
     def install(self, build=True):
+        assert_maintenance_safe("codex")
         receipt = self.receipt()
         marketplace = self.marketplace()
         if self.installed(marketplace) and (not receipt or receipt.get("removed")):
@@ -217,6 +224,7 @@ class Installation:
         if receipt is None or receipt.get("removed"):
             print("No active installation owned by this checkout; nothing changed.")
             return
+        assert_maintenance_safe("codex")
         marketplace = self.marketplace()
         self.check_cached_files(receipt)
         # Native removal is idempotent and works even if the marketplace disappeared.
@@ -233,6 +241,7 @@ class Installation:
         if not receipt or receipt.get("removed"):
             print("No active local installation owned by this checkout; nothing changed.")
             return
+        assert_maintenance_safe("codex")
         public = self.native("list", "--marketplace", "delm")["installed"]
         if not any(entry["pluginId"] == "delm@delm" for entry in public):
             raise RuntimeError("Install delm@delm before retiring delm@delm-local.")
@@ -240,6 +249,7 @@ class Installation:
         cache = self.codex_home / "plugins/cache" / MARKETPLACE / "delm"
         archive = None
         if cache.exists():
+            assert_maintenance_safe("codex")
             # Preserve every version and any user modifications atomically before
             # Codex's remove command deletes its cache. No receipt hash match is
             # required here: preserving modified artifacts is the point.

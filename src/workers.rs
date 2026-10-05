@@ -1191,6 +1191,61 @@ pub fn worker_config(
     )
 }
 
+/// Completion inspection uses native read authority, not the narrower scopes
+/// used for peer file exchange. Owned project/storage paths remain excluded as
+/// external interpreter dependencies even under an unrestricted native profile.
+pub fn result_policy(
+    request: &StartRequest,
+    run_dir: &Path,
+) -> Result<crate::workspace::ResultPolicy> {
+    let filesystem = &request.policy["file_system"];
+    let mut roots = Vec::new();
+    let mut denied = vec![request.project.canonicalize()?, run_dir.canonicalize()?];
+    if filesystem["kind"] == "unrestricted" {
+        roots.push(PathBuf::from("/"));
+    } else {
+        ensure!(
+            filesystem["kind"] == "restricted",
+            "Unknown native runtime read policy"
+        );
+        for entry in filesystem["entries"]
+            .as_array()
+            .context("Native filesystem entries are absent")?
+        {
+            let path = match entry["path"]["type"].as_str() {
+                Some("path") => Some(PathBuf::from(
+                    entry["path"]["path"]
+                        .as_str()
+                        .context("Missing permission path")?,
+                )),
+                Some("special") => match entry["path"]["value"]["kind"].as_str() {
+                    Some("root") => Some(PathBuf::from("/")),
+                    Some("project_roots") => Some(request.project.clone()),
+                    Some("minimal" | "tmpdir" | "slash_tmp") => None,
+                    _ => bail!("Unsupported native runtime read scope"),
+                },
+                _ => bail!("Native runtime inspection needs an adapter for this filesystem rule"),
+            };
+            if let Some(path) = path {
+                ensure!(
+                    path.is_absolute(),
+                    "Runtime permission path must be absolute"
+                );
+                match entry["access"].as_str() {
+                    Some("read" | "write") => roots.push(path),
+                    Some("deny") => denied.push(path),
+                    _ => bail!("Unknown native runtime access"),
+                }
+            }
+        }
+    }
+    Ok(crate::workspace::ResultPolicy {
+        native_python_runtime: false,
+        readonly_runtime_roots: roots,
+        denied_roots: denied,
+    })
+}
+
 /// Build a native fork without replacing the parent's permission profile or
 /// reducing its capabilities. Coordination is a native MCP extension supplied by
 /// the runtime; thread/fork has no dynamicTools parameter.

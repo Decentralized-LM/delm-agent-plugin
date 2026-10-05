@@ -146,12 +146,31 @@ fn task_event(worker: &mut Worker, index: usize, tool: &str, body: &Value) -> Op
 
 #[derive(Serialize, Deserialize)]
 struct Saved {
+    #[serde(default)]
+    runtime_version: String,
+    #[serde(default)]
+    retained_artifacts: std::collections::BTreeSet<String>,
     request: StartRequest,
     workspace: PreparedWorkspace,
     workers: [Worker; 2],
     revision: u64,
     expires: u64,
     status: String,
+}
+
+fn requested_artifacts(saved: &Saved) -> Vec<String> {
+    saved
+        .workers
+        .iter()
+        .filter_map(|worker| worker.outcome.as_ref())
+        .filter_map(|outcome| outcome.get("artifacts").and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .chain(saved.retained_artifacts.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 pub async fn serve(
@@ -267,7 +286,10 @@ async fn serve_inner(
             }
         };
         if !admitted {
-            let recovery = workspace::preserve_partial_and_cleanup(&saved.workspace)?;
+            let recovery = workspace::preserve_partial_and_cleanup_with_artifacts(
+                &saved.workspace,
+                &requested_artifacts(&saved),
+            )?;
             saved.status = "stopped".into();
             atomic_json(&run_dir.join("run.json"), &saved)?;
             let mut stopped = Event::new(
@@ -428,11 +450,7 @@ async fn serve_inner(
                 candidate.verify(&saved.workspace.workers[winner])?;
                 atomic_json(&run_dir.join("completion.json"), &candidate)?;
                 // No owned writer remains before delivery and workspace cleanup.
-                workspace::deliver_result(
-                    &saved.workspace,
-                    winner,
-                    &saved.workers[winner].result_policy,
-                )
+                candidate.deliver(&saved.workspace, winner)
             })();
             journal.observe("phase", &json!({"phase":"delivery_and_cleanup","boundary":"end","success":delivery.is_ok()}))?;
             match delivery {
@@ -472,13 +490,23 @@ async fn serve_inner(
                     .and_then(Value::as_str)
                     .unwrap_or("Changes have been delivered to your project."),
             );
-            if !delivery.delivered {
+            if !delivery.undelivered_outputs.is_empty() && delivery.conflicts.is_empty() {
+                event.message = format!(
+                    "Source changes were applied, but additional generated outputs need review: {}. They are saved in the recovery bundle; output delivery is incomplete.",
+                    delivery.undelivered_outputs.join(", ")
+                );
+            } else if !delivery.delivered {
                 event.message = format!(
                     "Delivery needs conflict resolution for: {}. Your edits and the proposed changes are preserved.",
                     delivery.conflicts.join(", ")
                 );
             } else if delivery.verification_required {
                 event.message.push_str(" Changes are in your project. Run the necessary local setup or focused check for the merged/relocated result before reporting it ready.");
+            }
+            if delivery.delivered && !delivery.undelivered_outputs.is_empty() {
+                event.message.push_str(
+                    " Additional generated files were saved for review in the recovery bundle.",
+                );
             }
             event.path = Some(delivery.project.clone());
             if let Some(recovery) = &delivery.recovery {
@@ -502,7 +530,10 @@ async fn serve_inner(
                 &json!({"phase":"recovery_and_cleanup","boundary":"start"}),
             )?;
             let recovery = if writers_stopped {
-                workspace::preserve_partial_and_cleanup(&saved.workspace)
+                workspace::preserve_partial_and_cleanup_with_artifacts(
+                    &saved.workspace,
+                    &requested_artifacts(&saved),
+                )
             } else {
                 Err(anyhow::anyhow!(
                     "Worker shutdown or result delivery needs recovery"
@@ -571,7 +602,10 @@ fn startup_failure(
 }
 
 fn cleanup_before_workers(saved: &mut Saved, output: &mpsc::UnboundedSender<Event>) -> Result<()> {
-    let recovery = workspace::preserve_partial_and_cleanup(&saved.workspace)?;
+    let recovery = workspace::preserve_partial_and_cleanup_with_artifacts(
+        &saved.workspace,
+        &requested_artifacts(saved),
+    )?;
     saved.status = "stopped".into();
     atomic_json(&saved.workspace.run_dir.join("run.json"), saved)?;
     let mut event = Event::new(
@@ -724,6 +758,8 @@ async fn prepare_capture(
         }
     };
     let mut saved = Saved {
+        runtime_version: env!("CARGO_PKG_VERSION").into(),
+        retained_artifacts: Default::default(),
         request,
         workspace,
         workers: Default::default(),
@@ -966,22 +1002,8 @@ async fn drive(
             index + 1,
         )?;
         board.set_worker_policy(index + 1, &config)?;
-        let scopes = config["permissions"][format!("delm_worker_{}", index + 1)]["filesystem"]
-            .as_object()
-            .context("Worker filesystem policy missing")?;
-        saved.workers[index].result_policy = workspace::ResultPolicy {
-            native_python_runtime: false,
-            readonly_runtime_roots: scopes
-                .iter()
-                .filter(|(path, access)| path.starts_with('/') && access.as_str() == Some("read"))
-                .map(|(path, _)| PathBuf::from(path))
-                .collect(),
-            denied_roots: scopes
-                .iter()
-                .filter(|(path, access)| path.starts_with('/') && access.as_str() == Some("deny"))
-                .map(|(path, _)| PathBuf::from(path))
-                .collect(),
-        };
+        saved.workers[index].result_policy =
+            crate::workers::result_policy(&saved.request, &saved.workspace.run_dir)?;
         let instructions = format!(
             "{}\n\nYou are worker {}.\n\nThe original project path is {}. Interpret references beneath that path as the corresponding relative paths in your private working directory; never open the original path.",
             include_str!("../../plugin/worker.md"),
@@ -1273,7 +1295,7 @@ async fn drive(
                                         atomic_json(&saved.workspace.run_dir.join("run.json"),saved)?;
                                         let declaration = outcome.as_ref().context("Completion declaration missing")?;
                                         let shared = board.shared_checks(index+1,declaration,saved.revision)?;
-                                        let candidate = completion::Completion::capture_with_shared(&saved.workspace.workers[index],declaration,&saved.workers[index].checks,saved.revision,&saved.workers[index].result_policy,shared)?;
+                                        let candidate = completion::Completion::capture_with_shared(&saved.workspace.workers[index],declaration,&saved.workers[index].checks,saved.revision,&saved.workers[index].result_policy,shared,&saved.workspace.baseline_manifest)?;
                                         pending_candidate = Some((index,candidate));
                                     }
                                 }
@@ -1394,6 +1416,14 @@ async fn dispatch_tool(
             saved.workers[index].wait_cursor = board.wait_cursor(&args)?;
         }
         saved.workers[index].outcome = Some(args.clone());
+        if let Some(artifacts) = args["artifacts"].as_array() {
+            saved.retained_artifacts.extend(
+                artifacts
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
     }
     if success && let Some(event) = task_event(&mut saved.workers[index], index, tool, &body) {
         let _ = output.send(event);

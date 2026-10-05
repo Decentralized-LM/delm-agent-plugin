@@ -27,8 +27,8 @@ test('overview uses confirmed ownership and contribution imports without raw int
   assert.match(output, /Claimed · Agent 2/); assert.match(output, /Available/);
   assert.match(output, /CSV result shape/); assert.match(output, /Imported by Agent 2/);
   assert.doesNotMatch(output, /local-preview|schema.ts|observed_at|sequence/);
-  press(tree, 'task-3'); press(tree, 'shared-publication-1'); press(tree, 'board-hide');
-  assert.deepEqual(f.events, [['select', 'task', '3'], ['select', 'contribution', 'publication-1'], ['hide']]);
+  press(tree, 'task-3'); press(tree, 'shared-5'); press(tree, 'board-hide');
+  assert.deepEqual(f.events, [['select', 'task', '3'], ['select', 'contribution', '5'], ['hide']]);
 });
 
 test('preparation and unknown agent observations do not invent work', () => {
@@ -61,6 +61,23 @@ test('delivery, required verification, recovery and cleanup remain separate fact
   assert.doesNotMatch(cancelled, /Resume|Changes applied to your project/);
   const conflict = text(fixture({snapshot: {...complete, outcome: {conflicts: ['src/app.js'], retained_workspace_path: '/retained'}}, screen: {kind: 'details'}}).render());
   assert.match(conflict, /Delivery needs attention/); assert.match(conflict, /retained/); assert.doesNotMatch(conflict, /workspaces removed/);
+});
+
+test('preserved additional outputs never appear as completed delivery or an empty conflict', () => {
+  const snapshot = {...complete, status: 'delivery_conflict', outcome: {delivered: false, cleanup_complete: true,
+    verification_required: true, conflicts: [], recovery_path: '/saved/output-bundle',
+    artifacts: ['renders/declared.mp4'], undelivered_outputs: ['exports/extra.pdf'],
+    undelivered_outputs_total: 1, excluded_paths: [{path: '.env', reason: 'recognized credential; not exported'}]}};
+  const output = text(fixture({snapshot, screen: {kind: 'details'}}).render());
+  assert.match(output, /Output delivery incomplete/); assert.match(output, /exports\/extra.pdf/);
+  assert.match(output, /Source changes may already be applied/); assert.match(output, /saved\/output-bundle/);
+  assert.match(output, /Excluded paths/);
+  assert.doesNotMatch(output, /Changes applied to your project\.|Delivered generated outputs|conflict/i);
+  const declared = {...snapshot, status: 'delivered', outcome: {...snapshot.outcome, artifacts_declared: true, delivered: true}};
+  const delivered = text(fixture({snapshot: declared, screen: {kind: 'details'}}).render());
+  assert.match(delivered, /Additional files saved for review/); assert.match(delivered, /Changes applied to your project/);
+  assert.match(delivered, /Delivered generated outputs/);
+  assert.doesNotMatch(delivered, /Output delivery incomplete|Source changes may already be applied|outputs need recovery/);
 });
 
 test('recorded checks distinguish pass and reuse validity from task completion', () => {
@@ -143,13 +160,57 @@ test('six-row native panes keep both summaries and controls in the visible viewp
   assert.match(text(f.render()), /Updates disconnected/);
 });
 
-test('a running native process without a turn is ready, not invented activity', () => {
-  const state = {snapshot: working, nativeAgents: [{slot: 1, id: 'native-a', status: 'running', turn: null}], selectedAgentId: 'native-a'};
+test('before durable observation, a native process without a turn is ready', () => {
+  const state = {snapshot: {...working, source: undefined}, nativeAgents: [{slot: 1, id: 'native-a', status: 'running', turn: null}], selectedAgentId: 'native-a'};
   const output = text(fixture(state).render());
   assert.match(output, /Agent 1 · Ready/); assert.match(output, /Viewing Agent 1/);
   assert.doesNotMatch(output, /Agent 1 · Working/);
   state.nativeAgents[0].turn = 'observed-turn';
   assert.match(text(fixture(state).render()), /Agent 1 · Working/);
+});
+
+test('a stale host cache cannot replace newer durable execution facts', () => {
+  const nativeAgents = [{slot: 1, status: 'running', turn: null}];
+  assert.match(text(fixture({snapshot: working, nativeAgents}).render()), /Agent 1 · Working/);
+  const ready = structuredClone(working); ready.agents[0].native_state = 'ready';
+  nativeAgents[0].turn = 'an-old-turn';
+  assert.match(text(fixture({snapshot: ready, nativeAgents}).render()), /Agent 1 · Ready/);
+  const unknown = structuredClone(working);
+  unknown.agents[0].native_state = 'unknown'; unknown.agents[0].task_ids = [];
+  assert.match(text(fixture({snapshot: unknown, nativeAgents}).render()), /Agent 1 · Status unavailable/);
+});
+
+test('task numbers remain human-sized while identity and contribution dependencies stay exact', () => {
+  const item = {id: 88, task_number: 3, title: 'Parser', state: 'claimed', owner: 1,
+    kind: 'implementation', interface: 'parse(text)', done_when: 'Returns rows', handoff: 'Continue CSV support', dependencies: [72]};
+  const f = fixture({snapshot: {...working, tasks: {items: [item], total: 1}}, screen: {kind: 'task', id: 88}});
+  const output = text(f.render());
+  assert.match(output, /#3 Parser/); assert.match(output, /Board task ID 88/);
+  assert.match(output, /Interface\nparse\(text\)/); assert.match(output, /Completion condition\nReturns rows/);
+  assert.match(output, /Handoff\nContinue CSV support/); assert.match(output, /Shared contributions used\nContribution 72/);
+  assert.doesNotMatch(output, /Depends on #72/);
+  press(f.render(), 'task-publication-72');
+  assert.deepEqual(f.events, [['select', 'contribution', 72]]);
+});
+
+test('finishing retry is visible only for an explicitly retryable unfinished result', () => {
+  const f = fixture({snapshot: working, phase: 'recovery_required', attention: 'Shutdown confirmation pending',
+    canRetryFinish: true, conversationAvailable: true});
+  const output = text(f.render());
+  assert.match(output, /Needs attention/); assert.match(output, /Retry finishing/);
+  assert.match(output, /You can continue chatting here/);
+  assert.doesNotMatch(text(fixture({snapshot: complete, canRetryFinish: true}).render()), /Retry finishing/);
+  for (const width of [12, 20, 24, 30]) {
+    for (const retryingFinish of [false, true]) {
+      const tree = fixture({snapshot: working, phase: 'recovery_required', canRetryFinish: true, retryingFinish},
+        {bodyColumns: width, scroll: {bodyRows: 6}}).render();
+      const controls = tree.props.children.at(-1);
+      const cells = nodes(controls).filter(node => node.type !== 'Box')
+        .reduce((sum, node) => sum + cellWidth(node.props.label ?? node.props.children), 0);
+      assert.ok(cells <= width, `${cells} control cells exceed ${width}`);
+      assert.ok(tree.props.children.length <= 6);
+    }
+  }
 });
 
 test('detail pagination preserves loading feedback and offers previous and retry controls', () => {

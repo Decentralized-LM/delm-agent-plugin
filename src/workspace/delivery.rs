@@ -27,6 +27,16 @@ pub struct DeliveryReport {
     pub conflicts: Vec<String>,
     pub recovery: Option<PathBuf>,
     pub cleanup_complete: bool,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+    /// An explicit [] is a source-only output contract. Additional ignored
+    /// files are retained for review without making that contract incomplete.
+    #[serde(default)]
+    pub artifacts_declared: bool,
+    #[serde(default)]
+    pub undelivered_outputs: Vec<String>,
+    #[serde(default)]
+    pub excluded_paths: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,96 +117,6 @@ fn cleanup_all(prepared: &PreparedWorkspace, ownership: &Ownership) -> Result<()
     }
     open_dir(&workspace)?.sync_all()?;
     Ok(())
-}
-
-/// Capture only source inputs. Git-ignored outputs and newly created dependency
-/// trees are excluded; baseline source remains included even if ignore rules
-/// change. An intentionally tracked dependency remains an ordinary source file.
-fn source_manifest(prepared: &PreparedWorkspace, worker: &Path) -> Result<(Manifest, Vec<String>)> {
-    let mut all = manifest_inventory(worker)?;
-    let tracked = git_names(worker, &["ls-files", "--cached", "-z"])?;
-    let selected = git_names(
-        worker,
-        &[
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-    )?;
-    let directories: BTreeSet<_> = all
-        .files
-        .iter()
-        .filter(|(_, e)| e.kind == FileKind::Directory)
-        .map(|(p, _)| p.clone())
-        .collect();
-    let ignored = git::ignored_directories(worker, worker, &directories)?;
-    let environments = environment_roots(&all);
-    let is_dependency = |path: &str| {
-        path.split('/').any(|part| part == "node_modules")
-            || environments
-                .iter()
-                .any(|env| path == env || path.starts_with(&format!("{env}/")))
-    };
-    let selected: BTreeSet<_> = all
-        .files
-        .iter()
-        .filter(|(path, entry)| {
-            prepared.baseline_manifest.files.contains_key(*path)
-                || tracked.contains(*path)
-                || (!is_dependency(path)
-                    && !prepared.baseline_manifest.exclusions.contains_key(*path)
-                    && (selected.contains(*path)
-                        || (entry.kind == FileKind::Directory && !ignored.contains(*path))))
-        })
-        .map(|(p, _)| p.clone())
-        .collect();
-    let mut selected = selected;
-    for path in selected.clone() {
-        for parent in Path::new(&path)
-            .ancestors()
-            .skip(1)
-            .filter(|p| !p.as_os_str().is_empty())
-        {
-            selected.insert(parent.to_str().context("non-UTF-8 source path")?.to_owned());
-        }
-    }
-    let mut omitted = BTreeSet::new();
-    for path in all.files.keys().filter(|path| !selected.contains(*path)) {
-        let parts: Vec<_> = path.split('/').collect();
-        if let Some(index) = parts.iter().position(|part| *part == "node_modules") {
-            omitted.insert(parts[..=index].join("/"));
-        }
-        for environment in &environments {
-            if path == environment || path.starts_with(&format!("{environment}/")) {
-                omitted.insert(environment.clone());
-            }
-        }
-    }
-    all.files.retain(|p, _| selected.contains(p));
-    validate_links(&all.files)?;
-    Ok((all, omitted.into_iter().collect()))
-}
-
-fn git_names(worker: &Path, args: &[&str]) -> Result<BTreeSet<String>> {
-    git::run(worker, worker, args)?
-        .split(|byte| *byte == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| {
-            let p = std::str::from_utf8(p)?.to_owned();
-            components(&p, false)?;
-            Ok(p)
-        })
-        .collect()
-}
-
-fn environment_roots(manifest: &Manifest) -> Vec<String> {
-    manifest
-        .files
-        .keys()
-        .filter_map(|p| p.strip_suffix("/pyvenv.cfg").map(str::to_owned))
-        .collect()
 }
 
 fn parent_at(root: &File, relative: &str) -> Result<(File, OsString)> {
@@ -420,6 +340,34 @@ pub fn deliver_result(
     _policy: &ResultPolicy,
 ) -> Result<DeliveryReport> {
     ensure!(worker < 2, "unknown result worker");
+    if prepared
+        .run_dir
+        .join("workspace/delivery/result.json")
+        .is_file()
+    {
+        return deliver_internal(prepared, worker, None);
+    }
+    let accepted = ResultSelection::new(&prepared.baseline_manifest, Vec::new())?
+        .capture(&prepared.workers[worker])?;
+    deliver_internal(prepared, worker, Some(&accepted))
+}
+
+/// Deliver exactly the accepted source and requested-artifact manifest. The
+/// caller supplies shutdown proof; this operation independently checks bytes.
+pub fn deliver_accepted_result(
+    prepared: &PreparedWorkspace,
+    worker: usize,
+    accepted: &AcceptedResult,
+) -> Result<DeliveryReport> {
+    ensure!(worker < 2, "unknown result worker");
+    deliver_internal(prepared, worker, Some(accepted))
+}
+
+fn deliver_internal(
+    prepared: &PreparedWorkspace,
+    worker: usize,
+    accepted: Option<&AcceptedResult>,
+) -> Result<DeliveryReport> {
     let ownership = owned(prepared)?;
     ensure!(
         ownership.original_identity == Some(identity(&prepared.original)?),
@@ -433,6 +381,38 @@ pub fn deliver_result(
             report.project == prepared.original,
             "delivery report project mismatch"
         );
+        let journal: Journal = serde_json::from_slice(&fs::read(directory.join("journal.json"))?)?;
+        ensure!(
+            journal.version == 1
+                && journal.worker == worker
+                && journal.project == prepared.original
+                && journal.project_identity == identity(&prepared.original)?,
+            "Delivery journal does not identify this worker and project"
+        );
+        if report.conflicts.is_empty() {
+            ensure!(journal.complete, "Delivery has no durable completion proof");
+        }
+        ensure!(
+            if report.conflicts.is_empty() {
+                report.changed_paths
+                    == journal
+                        .changes
+                        .iter()
+                        .map(|change| change.path.clone())
+                        .collect::<Vec<_>>()
+            } else {
+                report.changed_paths.is_empty()
+            },
+            "Delivery report does not match its saved journal"
+        );
+        if !report.delivered || !report.undelivered_outputs.is_empty() {
+            inspect_recovery(
+                report
+                    .recovery
+                    .as_deref()
+                    .context("Incomplete delivery has no recovery bundle")?,
+            )?;
+        }
         cleanup_all(prepared, &ownership)?;
         if report.delivered {
             clean_staging(&directory)?;
@@ -447,8 +427,19 @@ pub fn deliver_result(
             directory.display()
         );
     }
-    let (candidate, environment_directories_omitted) =
-        source_manifest(prepared, &prepared.workers[worker])?;
+    let accepted = accepted.context("Accepted result is missing")?;
+    let mut expected = ResultSelection::new(
+        &prepared.baseline_manifest,
+        accepted.selection.artifacts.clone(),
+    )?;
+    expected.artifacts_declared = accepted.selection.artifacts_declared;
+    ensure!(
+        accepted.selection == expected,
+        "Accepted result belongs to a different baseline"
+    );
+    let accepted = accepted.verify(&prepared.workers[worker])?;
+    let candidate = &accepted.manifest;
+    let environment_directories_omitted = accepted.environment_directories_omitted.clone();
     private_directory(&directory)?;
     let root = open_dir(&prepared.original)?;
     let changed: BTreeSet<_> = prepared
@@ -561,7 +552,7 @@ pub fn deliver_result(
     if !conflicts.is_empty() {
         conflicts.sort();
         conflicts.dedup();
-        let recovery = preserve_partial(prepared)?;
+        let recovery = preserve_partial(prepared, &accepted.selection.artifacts)?;
         let mut report = DeliveryReport {
             project: prepared.original.clone(),
             delivered: false,
@@ -573,6 +564,10 @@ pub fn deliver_result(
             conflicts,
             recovery: Some(recovery),
             cleanup_complete: false,
+            artifacts: accepted.artifact_files.clone(),
+            artifacts_declared: accepted.selection.artifacts_declared,
+            undelivered_outputs: accepted.undelivered_outputs.clone(),
+            excluded_paths: accepted.excluded_paths.clone(),
         };
         write_json(&report_path, &report)?;
         cleanup_all(prepared, &ownership)?;
@@ -647,9 +642,17 @@ pub fn deliver_result(
         .filter(|c| environment_manifest(&c.path))
         .map(|c| c.path.clone())
         .collect();
+    // An undeclared custom output is never destroyed just because Git ignores
+    // it. Preserve it for review. An explicit artifact declaration determines
+    // whether the accepted output contract is complete without these extras.
+    let output_recovery = if accepted.undelivered_outputs.is_empty() {
+        None
+    } else {
+        Some(preserve_partial(prepared, &accepted.selection.artifacts)?)
+    };
     let mut report = DeliveryReport {
         project: prepared.original.clone(),
-        delivered: true,
+        delivered: accepted.selection.artifacts_declared || accepted.undelivered_outputs.is_empty(),
         changed_paths: journal.changes.iter().map(|c| c.path.clone()).collect(),
         verification_required: !merged_paths.is_empty()
             || !environment_files_changed.is_empty()
@@ -658,12 +661,18 @@ pub fn deliver_result(
         environment_files_changed,
         environment_directories_omitted,
         conflicts: Vec::new(),
-        recovery: journal
-            .changes
-            .iter()
-            .any(|change| change.before.is_some())
-            .then(|| directory.clone()),
+        recovery: output_recovery.or_else(|| {
+            journal
+                .changes
+                .iter()
+                .any(|change| change.before.is_some())
+                .then(|| directory.clone())
+        }),
         cleanup_complete: false,
+        artifacts: accepted.artifact_files,
+        artifacts_declared: accepted.selection.artifacts_declared,
+        undelivered_outputs: accepted.undelivered_outputs,
+        excluded_paths: accepted.excluded_paths,
     };
     write_json(&report_path, &report)?;
     cleanup_all(prepared, &ownership)?;
@@ -853,23 +862,71 @@ struct RecoveryDelta {
     changes: BTreeMap<String, (Option<FileEntry>, Option<FileEntry>)>,
 }
 
-fn preserve_partial(prepared: &PreparedWorkspace) -> Result<PathBuf> {
+fn preserve_partial(prepared: &PreparedWorkspace, artifacts: &[String]) -> Result<PathBuf> {
+    for path in artifacts {
+        components(path, false)?;
+    }
     let destination = prepared.run_dir.join("workspace/recovery");
     if destination.join("complete.json").is_file() {
+        inspect_recovery(&destination)?;
         return Ok(destination);
     }
     if !destination.exists() {
         private_directory(&destination)?;
     }
     let mut deltas = Vec::new();
+    let mut excluded = BTreeMap::new();
+    let baseline_paths = prepared.baseline_manifest.files.keys().cloned().collect();
     for (worker, path) in prepared.workers.iter().enumerate() {
         if !path.exists() {
             continue;
         }
         // Recovery may include broken links. Store their targets as inert
         // manifest data rather than creating links in the recovery package.
-        let after = manifest_inventory(path)?;
-        let environments = environment_roots(&after);
+        let root = open_dir(path)?;
+        let names = output::git_names(path, &["ls-files", "--cached", "--others", "-z"])?;
+        let environments = output::environment_roots(&root, &names)?;
+        let tracked = output::git_names(path, &["ls-files", "--cached", "-z"])?;
+        let source = output::git_names(
+            path,
+            &[
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+        )?;
+        let skip = |relative: &str| {
+            let baseline = output::contains_within(&baseline_paths, relative);
+            let tracked = output::contains_within(&tracked, relative);
+            let source = output::contains_within(&source, relative);
+            let artifact = artifacts.iter().any(|scope| {
+                relative == scope
+                    || relative.starts_with(&format!("{scope}/"))
+                    || scope.starts_with(&format!("{relative}/"))
+            });
+            !baseline
+                && !tracked
+                && (environments
+                    .iter()
+                    .any(|env| relative == env || relative.starts_with(&format!("{env}/")))
+                    || (!artifact
+                        && !source
+                        && output::disposable(relative)
+                        && !relative.ends_with(".log")))
+        };
+        let scan = inventory_filtered(&root, u64::MAX, deadline(), false, Some(&skip))?;
+        let after = Manifest {
+            files: scan
+                .entries
+                .into_iter()
+                .filter(|(p, _)| !p.is_empty())
+                .map(|(p, (_, e))| (p, e))
+                .collect(),
+            ..Manifest::default()
+        };
+        let mut credential_roots: Vec<String> = Vec::new();
         let mut changes = BTreeMap::new();
         for relative in prepared
             .baseline_manifest
@@ -880,19 +937,22 @@ fn preserve_partial(prepared: &PreparedWorkspace) -> Result<PathBuf> {
         {
             let before = prepared.baseline_manifest.files.get(relative);
             let result = after.files.get(relative);
-            if before == result {
+            if let Some(entry) = result
+                && (credential_roots
+                    .iter()
+                    .any(|scope| relative == scope || relative.starts_with(&format!("{scope}/")))
+                    || prepare::recognized_credential(&root, relative, entry)?)
+            {
+                if entry.kind == FileKind::Directory {
+                    credential_roots.push(relative.clone());
+                }
+                excluded.insert(
+                    format!("worker-{}/{relative}", worker + 1),
+                    "recognized credential; not exported",
+                );
                 continue;
             }
-            // Dependencies are reconstructible; source deltas and their exact
-            // base bytes are the recoverable work. Keep ignored custom assets.
-            if before.is_none()
-                && (relative
-                    .split('/')
-                    .any(|part| part == "node_modules" || part == "__pycache__")
-                    || environments
-                        .iter()
-                        .any(|env| relative == env || relative.starts_with(&format!("{env}/"))))
-            {
+            if before == result {
                 continue;
             }
             for (source, value) in [(&prepared.baseline, before), (path, result)] {
@@ -902,8 +962,14 @@ fn preserve_partial(prepared: &PreparedWorkspace) -> Result<PathBuf> {
                     if !blob.exists() {
                         stage_entry(source, relative, value, &blob)?;
                     }
+                    let mut file = OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NOFOLLOW)
+                        .open(&blob)?;
+                    let mut digest = Sha256::new();
+                    std::io::copy(&mut file, &mut digest)?;
                     ensure!(
-                        Some(format!("{:x}", Sha256::digest(fs::read(&blob)?))) == value.sha256,
+                        Some(format!("{:x}", digest.finalize())) == value.sha256,
                         "recovery blob changed"
                     );
                 }
@@ -915,7 +981,7 @@ fn preserve_partial(prepared: &PreparedWorkspace) -> Result<PathBuf> {
     write_json(
         &destination.join("complete.json"),
         &serde_json::json!({
-            "version":1, "original":prepared.original, "workers":deltas,
+            "version":1, "original":prepared.original, "workers":deltas, "excluded_paths":excluded,
             "format":"File bytes are SHA-256 named blobs. Manifests record modes, deletions, and inert symlink targets. No Git index changes are applied.",
             "delivery_journal": prepared.run_dir.join("workspace/delivery/journal.json")
         }),
@@ -926,8 +992,17 @@ fn preserve_partial(prepared: &PreparedWorkspace) -> Result<PathBuf> {
 /// Preserve useful partial source changes and then remove every owned worker
 /// tree and baseline. The caller must already have stopped all writers.
 pub fn preserve_partial_and_cleanup(prepared: &PreparedWorkspace) -> Result<RecoveryReport> {
+    preserve_partial_and_cleanup_with_artifacts(prepared, &[])
+}
+
+/// Preserve explicitly requested artifact scopes even when their paths resemble
+/// operational caches. Call only after every owned writer has stopped.
+pub fn preserve_partial_and_cleanup_with_artifacts(
+    prepared: &PreparedWorkspace,
+    artifacts: &[String],
+) -> Result<RecoveryReport> {
     let ownership = owned(prepared)?;
-    let recovery = preserve_partial(prepared)?;
+    let recovery = preserve_partial(prepared, artifacts)?;
     cleanup_all(prepared, &ownership)?;
     Ok(RecoveryReport {
         recovery,

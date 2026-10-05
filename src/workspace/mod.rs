@@ -511,6 +511,16 @@ fn acl_digest(file: &File) -> Result<String> {
 }
 
 fn inventory(root: &File, limit: u64, until: Instant, include_git: bool) -> Result<Inventory> {
+    inventory_filtered(root, limit, until, include_git, None)
+}
+
+fn inventory_filtered(
+    root: &File,
+    limit: u64,
+    until: Instant,
+    include_git: bool,
+    skip: Option<&dyn Fn(&str) -> bool>,
+) -> Result<Inventory> {
     let mut result = Inventory {
         entries: BTreeMap::new(),
         bytes: 0,
@@ -523,9 +533,19 @@ fn inventory(root: &File, limit: u64, until: Instant, include_git: bool) -> Resu
         result.bytes < limit,
         "repository is at least the size limit of {limit} bytes"
     );
-    scan_dir(root, "", device, limit, until, include_git, &mut result)?;
+    scan_dir(
+        root,
+        "",
+        device,
+        limit,
+        until,
+        include_git,
+        skip,
+        &mut result,
+    )?;
     Ok(result)
 }
+#[allow(clippy::too_many_arguments)]
 fn scan_dir(
     dir: &File,
     prefix: &str,
@@ -533,6 +553,7 @@ fn scan_dir(
     limit: u64,
     until: Instant,
     include_git: bool,
+    skip: Option<&dyn Fn(&str) -> bool>,
     result: &mut Inventory,
 ) -> Result<()> {
     ensure!(
@@ -553,6 +574,9 @@ fn scan_dir(
         } else {
             format!("{prefix}/{text}")
         };
+        if skip.is_some_and(|filter| filter(&relative)) {
+            continue;
+        }
         let cname = cstr(&name)?;
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         ensure!(
@@ -655,7 +679,16 @@ fn scan_dir(
             "repository exceeds entry bound"
         );
         if kind == FileKind::Directory {
-            scan_dir(&file, &relative, device, limit, until, include_git, result)?;
+            scan_dir(
+                &file,
+                &relative,
+                device,
+                limit,
+                until,
+                include_git,
+                skip,
+                result,
+            )?;
         }
     }
     ensure!(
@@ -757,10 +790,17 @@ fn validate_links_except(
 
 mod delivery;
 mod git;
+mod output;
 mod prepare;
+mod recovery;
 mod result;
-pub use delivery::{DeliveryReport, RecoveryReport, deliver_result, preserve_partial_and_cleanup};
+pub use delivery::{
+    DeliveryReport, RecoveryReport, deliver_accepted_result, deliver_result,
+    preserve_partial_and_cleanup, preserve_partial_and_cleanup_with_artifacts,
+};
+pub use output::{AcceptedResult, ResultSelection};
 pub use prepare::{prepare, retain_result, retain_result_with_policy};
+pub use recovery::{RecoveryExport, RecoveryInspection, export_recovery, inspect_recovery};
 pub use result::{ResultPolicy, RuntimeLink, manifest_for_result};
 
 #[cfg(test)]

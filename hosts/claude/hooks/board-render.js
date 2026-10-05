@@ -7,6 +7,7 @@ const PHASES = {
   error: 'Needs attention', attention: 'Needs attention', unknown: 'Status unavailable',
   prepared: 'Starting agents', awaiting_shutdown: 'Finishing', verifying_shutdown: 'Finishing',
   delivered: 'Changes applied', delivery_conflict: 'Delivery needs attention', recovery_required: 'Needs attention',
+  delivery_incomplete: 'Output delivery incomplete',
   startup_failed: 'Could not start', preparation_failed: 'Could not prepare',
 };
 const segmenter = typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, {granularity: 'grapheme'}) : null;
@@ -81,7 +82,11 @@ export function normalizeBoard(input = {}) {
     const native = input.nativeAgents?.find(item => (item.slot != null && item.slot === agent.slot)
       || (item.id != null && item.id === agent.native_agent_id));
     const observed = agent.nativeState ?? agent.native_state ?? 'unknown';
-    const authoritative = snapshot.finished || ['stopped', 'waiting', 'blocked', 'waiting_for_dependency'].includes(observed);
+    // A persisted runtime snapshot is ordered and includes admitted turns. The
+    // host cache is useful during startup, but has no comparable sequence and
+    // must never downgrade a newer durable observation to an old idle state.
+    const authoritative = Boolean(snapshot.source) || snapshot.finished
+      || ['stopped', 'waiting', 'blocked', 'waiting_for_dependency'].includes(observed);
     return {
     ...agent, id: agent.id ?? agent.worker_id ?? agent.slot ?? String(index + 1),
     name: `Agent ${agent.slot ?? String(agent.id ?? agent.worker_id ?? '').match(/(\d+)$/)?.[1] ?? index + 1}`,
@@ -108,11 +113,15 @@ export function normalizeBoard(input = {}) {
     freshness: snapshot.freshness || {}, phase: input.phase || snapshot.phase || snapshot.status || 'preparing',
     runId: snapshot.runId ?? snapshot.run_id, requestRevision: snapshot.requestRevision ?? snapshot.request_revision ?? snapshot.revision,
     attention: snapshot.attention || input.attention, disconnected: input.disconnected || snapshot.freshness?.disconnected,
-    selectedAgentName: selectedAgent?.name};
+    selectedAgentName: selectedAgent?.name,
+    canRetryFinish: Boolean(input.canRetryFinish && !snapshot.finished), retryingFinish: Boolean(input.retryingFinish),
+    conversationAvailable: Boolean(input.conversationAvailable)};
 }
 
 export function phaseLabel(view) {
   const outcome = view.outcome || {};
+  if ((outcome.undelivered_outputs_total > 0 || outcome.undelivered_outputs?.length)
+      && !(outcome.artifacts_declared && outcome.delivered)) return 'Output delivery incomplete';
   if (outcome.verificationRequired || outcome.verification_required) return 'Local verification required';
   if (outcome.conflict || outcome.delivery_conflict || outcome.conflicts?.length) return 'Delivery needs attention';
   if (view.phase === 'stopped' && outcome.recovery_saved) return 'Stopped · changes saved';
@@ -120,6 +129,7 @@ export function phaseLabel(view) {
 }
 
 function taskNumber(id) { return String(id).startsWith('#') ? String(id) : `#${id}`; }
+function taskLabel(task) { return taskNumber(task.task_number ?? task.id); }
 
 function taskState(task, view) {
   const owner = agentName(task.owner, view.agents);
@@ -131,7 +141,7 @@ function agentState(agent) {
   const native = {running: 'Working', working: 'Working', active: 'Working', starting: 'Starting',
     waiting: 'Waiting', blocked: 'Waiting', ready: 'Ready', waiting_for_dependency: 'Waiting', waiting_for_user: 'Waiting for you',
     completed: 'Turn complete', stopped: 'Stopped', ended: 'Turn complete', failed: 'Needs attention'}[agent.nativeState];
-  return native || (agent.taskIds?.length ? 'Claimed' : 'Not started');
+  return native || (agent.taskIds?.length ? 'Claimed' : 'Status unavailable');
 }
 
 function compactSummary(view) {
@@ -152,7 +162,10 @@ export function boardSummary(state) {
   const view = normalizeBoard(state);
   const lines = [`DeLM · ${compactSummary(view)}`];
   if (view.attention) lines.push(cleanText(view.attention));
-  for (const agent of view.agents) lines.push(`${agent.name} · ${agentState(agent)}${agent.taskIds?.length ? ` · ${agent.taskIds.map(taskNumber).join(', ')}` : ''}`);
+  for (const agent of view.agents) lines.push(`${agent.name} · ${agentState(agent)}${agent.taskIds?.length ? ` · ${agent.taskIds.map(id => {
+    const task = view.tasks.items.find(item => String(item.id) === String(id));
+    return task ? taskLabel(task) : `Task ID ${id}`;
+  }).join(', ')}` : ''}`);
   if (view.outcome.verificationRequired || view.outcome.verification_required) lines.push('See the final handoff for local verification.');
   return lines.join('\n');
 }
@@ -173,8 +186,10 @@ function helpers(components, e, actions) {
     button(back ? 'board-back' : 'board-details', back ? 'Back' : 'Details', back ? actions.back : actions.details),
     ...(inner < 22 ? [] : [text('   ')]), button('board-hide', 'Hide board', actions.hide),
   ]);
+  const retryFinish = view => button('board-retry-finish', view.retryingFinish ? 'Retrying finishing…' : 'Retry finishing',
+    view.retryingFinish ? undefined : actions.retryFinish);
   return {Box, Text, Button, width, inner, padding, bodyRows: Number(e.props?.scroll?.bodyRows) || 24,
-    text, line, row, column, button, heading, blank, controls};
+    text, line, row, column, button, heading, blank, controls, retryFinish};
 }
 
 function statusLines(h, view) {
@@ -183,12 +198,14 @@ function statusLines(h, view) {
   if (view.disconnected) lines.push(h.line('Updates disconnected · showing last known state', {dimColor: true}));
   else if (view.freshness.unavailableSources?.length || view.freshness.unavailable_sources?.length || view.freshness.unavailable?.length) lines.push(h.line('Some updates are temporarily unavailable', {dimColor: true}));
   if (view.attention) lines.push(h.text(view.attention));
+  if (view.conversationAvailable && view.attention) lines.push(h.line('You can continue chatting here.', {dimColor: true}));
+  if (view.canRetryFinish) lines.push(h.retryFinish(view));
   return lines;
 }
 
 function taskRow(h, task, view, actions) {
   return h.column([
-    h.button(`task-${task.id}`, `${taskNumber(task.id)}  ${task.title}`, () => actions.select?.('task', task.id)),
+    h.button(`task-${task.id}`, `${taskLabel(task)}  ${task.title}`, () => actions.select?.('task', task.id)),
     h.line(`    ${taskState(task, view)}`, {dimColor: true}),
   ], {key: `task-row-${task.id}`});
 }
@@ -225,7 +242,7 @@ function tinyOverview(h, view, actions) {
   if (rows >= 6 && view.agents.length <= 2) {
     for (const agent of view.agents) {
       const task = view.tasks.items.find(item => agent.taskIds.map(String).includes(String(item.id)));
-      children.push(h.line(`${agent.name} · ${agentState(agent)}${task ? ` · ${taskNumber(task.id)} ${task.title}` : ''}`));
+      children.push(h.line(`${agent.name} · ${agentState(agent)}${task ? ` · ${taskLabel(task)} ${task.title}` : ''}`));
     }
     if (!view.agents.length) children.push(h.line('Waiting for agents to start', {dimColor: true}));
   } else if (rows >= 5) children.push(h.line(view.agents.length
@@ -241,7 +258,9 @@ function tinyOverview(h, view, actions) {
     children.push(h.button('view-all-tasks', `Task queue · ${tasks}`, () => actions.select?.('tasks', null)),
       h.button('view-all-shared', `Shared context · ${shared}`, () => actions.select?.('shared', null)));
   } else if (rows >= 3) children.push(h.button('view-all-tasks', `Task queue · ${tasks}`, () => actions.select?.('tasks', null)));
-  if (rows >= 2) children.push(h.controls(false));
+  if (rows >= 2) children.push(view.canRetryFinish
+    ? h.row([h.retryFinish(view), ...(h.inner >= (view.retryingFinish ? 28 : 24)
+      ? [h.text('  '), h.button('board-details', 'Details', actions.details)] : [])]) : h.controls(false));
   else children[0] = h.button('board-details', `DeLM · ${phase} · Details`, actions.details);
   return children;
 }
@@ -252,19 +271,19 @@ function shortOverview(h, view, actions) {
   if (spacious) children.push(h.blank(), h.heading('Agents'));
   for (const agent of view.agents) {
     const task = view.tasks.items.find(item => agent.taskIds.map(String).includes(String(item.id)));
-    children.push(h.line(`${agent.name} · ${agentState(agent)}${task ? ` · ${taskNumber(task.id)} ${task.title}` : ''}`));
+    children.push(h.line(`${agent.name} · ${agentState(agent)}${task ? ` · ${taskLabel(task)} ${task.title}` : ''}`));
   }
   if (!view.agents.length) children.push(h.line('Waiting for agents to start', {dimColor: true}));
   const slots = Math.max(1, Math.min(4, h.bodyRows - children.length - (spacious ? 7 : 4)));
   const ordered = [...view.tasks.items.filter(task => !['done', 'completed'].includes(task.state)),
     ...view.tasks.items.filter(task => ['done', 'completed'].includes(task.state))];
   const tasks = ordered.slice(0, slots);
-  const taskHeading = view.tasks.total > tasks.length ? `Task queue · ${tasks.length} of ${view.tasks.total} · View all` : 'Task queue';
+  const taskHeading = view.tasks.total > tasks.length ? `Task queue · ${tasks.length} of ${view.tasks.total} · View all` : `Task queue · ${view.tasks.total}`;
   if (spacious) children.push(h.blank());
   children.push(h.button('view-all-tasks', taskHeading, () => actions.select?.('tasks', null)));
   if (!tasks.length) children.push(h.line(emptyCollection(view, 'tasks'), {dimColor: true}));
   for (const task of tasks) {
-    const tail = ` · ${taskState(task, view)}`, prefix = `${taskNumber(task.id)} `;
+    const tail = ` · ${taskState(task, view)}`, prefix = `${taskLabel(task)} `;
     const title = fitText(task.title, Math.max(1, h.inner - cellWidth(prefix + tail)));
     children.push(h.button(`task-${task.id}`, `${prefix}${title}${tail}`, () => actions.select?.('task', task.id)));
   }
@@ -291,12 +310,12 @@ function overview(h, view, actions) {
   for (const agent of view.agents) {
     const current = view.tasks.items.find(task => agent.taskIds.map(String).includes(String(task.id)));
     children.push(h.line(`${agent.name} · ${agentState(agent)}`, {bold: true}));
-    if (current) children.push(h.line(`${taskNumber(current.id)} ${current.title}`, {dimColor: true}));
+    if (current) children.push(h.line(`${taskLabel(current)} ${current.title}`, {dimColor: true}));
     else if (agent.dependency) children.push(h.line(agent.dependency, {dimColor: true}));
     else if (agent.status && typeof agent.status === 'string') children.push(h.line(`Reported: ${agent.status}`, {dimColor: true}));
     if (current && agent.dependency && ['waiting', 'blocked', 'waiting_for_dependency'].includes(agent.nativeState)) children.push(h.line(agent.dependency, {dimColor: true}));
   }
-  children.push(h.blank(), h.heading('Task queue'));
+  children.push(h.blank(), h.heading(`Task queue · ${view.tasks.total}`));
   const tasks = [...view.tasks.items.filter(task => !['done', 'completed'].includes(task.state)),
     ...view.tasks.items.filter(task => ['done', 'completed'].includes(task.state))].slice(0, 4);
   if (!tasks.length) children.push(h.line(emptyCollection(view, 'tasks'), {dimColor: true}));
@@ -312,15 +331,37 @@ function overview(h, view, actions) {
 
 function outcomeLines(h, outcome) {
   const children = [];
+  const additionalReview = outcome.artifacts_declared && outcome.delivered;
   if (outcome.delivered || outcome.deliveryApplied || outcome.delivery_applied) children.push(h.text('Changes applied to your project.'));
+  if (outcome.undelivered_outputs_total > 0 || outcome.undelivered_outputs?.length) {
+    children.push(h.text(additionalReview ? 'Additional files saved for review.'
+      : 'Some generated outputs were preserved for recovery and were not delivered to your project.'),
+      ...(outcome.undelivered_outputs || []).map(path => h.text(path, {dimColor: true})));
+    if (outcome.undelivered_outputs_total > outcome.undelivered_outputs?.length) children.push(h.text(
+      `${outcome.undelivered_outputs_total} ${additionalReview ? 'additional files saved in total' : 'outputs need recovery in total'}.`, {dimColor: true}));
+  }
+  if (outcome.artifacts?.length) {
+    children.push(h.heading(outcome.delivered ? 'Delivered generated outputs' : 'Selected generated outputs'),
+      ...outcome.artifacts.map(path => h.text(path, {dimColor: true})));
+    if (outcome.artifacts_total > outcome.artifacts.length) children.push(h.text(`${outcome.artifacts_total} generated outputs in total.`, {dimColor: true}));
+  }
   if (outcome.verificationRequired || outcome.verification_required) children.push(h.text('Local verification required. See Claude’s final handoff for the outcome.'));
   if (outcome.cleanupComplete || outcome.cleanup_complete) children.push(h.text('Temporary workspaces removed.'));
-  if (outcome.recoveryPath || outcome.recovery_path) children.push(h.text('Unfinished changes saved for recovery. They were not automatically applied to your project.'), h.text(outcome.recoveryPath || outcome.recovery_path, {dimColor: true}));
+  if (outcome.recoveryPath || outcome.recovery_path) children.push(h.text(
+    outcome.undelivered_outputs_total > 0 || outcome.undelivered_outputs?.length
+      ? additionalReview ? 'Review the additional files in this saved bundle.' : 'Additional outputs saved for recovery. Source changes may already be applied.'
+      : 'Unfinished changes saved for recovery. They were not automatically applied to your project.'),
+    h.text(outcome.recoveryPath || outcome.recovery_path, {dimColor: true}));
   if (outcome.retainedPath || outcome.retained_path || outcome.retained_workspace_path) children.push(h.text('Temporary workspaces retained because safe cleanup was not confirmed.'), h.text(outcome.retainedPath || outcome.retained_path || outcome.retained_workspace_path, {dimColor: true}));
   if (outcome.error || outcome.reason) children.push(h.text(outcome.error || outcome.reason));
   if (outcome.conflict || outcome.delivery_conflict || outcome.conflicts?.length) {
     children.push(h.text('Delivery needs attention. See the final handoff before applying changes.'), ...(outcome.conflicts || []).map(path => h.text(path, {dimColor: true})));
     if (outcome.conflicts_total > outcome.conflicts?.length) children.push(h.text(`Showing ${outcome.conflicts.length} of ${outcome.conflicts_total} conflicts.`, {dimColor: true}));
+  }
+  if (Array.isArray(outcome.excluded_paths) && outcome.excluded_paths.length) {
+    children.push(h.heading('Excluded paths'),
+      ...outcome.excluded_paths.map(item => h.text(`${item.path} · ${item.reason}`, {dimColor: true})));
+    if (outcome.excluded_paths_total > outcome.excluded_paths.length) children.push(h.text(`${outcome.excluded_paths_total} exclusions in total.`, {dimColor: true}));
   }
   return children.length ? children : [h.text('No final result yet.', {dimColor: true})];
 }
@@ -338,11 +379,21 @@ function detail(h, view, screen, actions) {
     children.push(h.heading('Task detail'));
     if (!task) children.push(h.text('This task is not available in the current snapshot.', {dimColor: true}));
     else {
-      children.push(h.text(`${taskNumber(task.id)} ${task.title}`, {bold: true}), h.text(taskState(task, view)), h.blank());
+      children.push(h.text(`${taskLabel(task)} ${task.title}`, {bold: true}), h.text(taskState(task, view)), h.blank());
       if (task.description || task.body) children.push(h.text(task.description || task.body));
-      if (task.dependencies?.length) children.push(h.text(`Depends on ${task.dependencies.map(taskNumber).join(', ')}`));
+      const labels = {implementation: 'Implementation', verification: 'Verification', integration: 'Integration'};
+      if (task.kind) children.push(h.text(`Type: ${labels[task.kind] || cleanText(task.kind)}`, {dimColor: true}));
+      for (const [field, label] of [['interface', 'Interface'], ['done_when', 'Completion condition'], ['handoff', 'Handoff']]) {
+        if (task[field]) children.push(h.blank(), h.heading(label), h.text(task[field]));
+      }
+      if (task.dependencies?.length) {
+        children.push(h.blank(), h.heading('Shared contributions used'));
+        for (const id of task.dependencies) children.push(h.button(`task-publication-${id}`, `Contribution ${id}`,
+          () => actions.select?.('contribution', id)));
+      }
       if (task.state === 'done' || task.state === 'completed') children.push(h.text('Marked done by the agent. Recorded checks are listed separately.', {dimColor: true}));
       if (task.version != null) children.push(h.text(`Task version ${task.version}`, {dimColor: true}));
+      if (task.task_number != null && String(task.task_number) !== String(task.id)) children.push(h.text(`Board task ID ${task.id}`, {dimColor: true}));
     }
   } else if (kind === 'contribution' || (kind === 'shared' && screen.id != null)) {
     const entry = (screen.item ? normalizeBoard({shared: [screen.item]}).shared.items[0] : null)

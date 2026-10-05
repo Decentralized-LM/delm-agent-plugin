@@ -32,6 +32,8 @@ This mode seeds a private, disposable SQLite board and lifecycle record. The shi
 
 Pass `--runtime .build/plugin-claude/bin/delm` to capture the staged release executable instead of `target/debug/delm`. Add `--exercise-controls` to preserve an unsent prompt while testing native focus, navigation, close, and reopen. At very small terminal sizes, the first selectable control can be a collection link rather than a task row.
 
+`/board-recovery` shows an unfinished result awaiting shutdown confirmation, including the production Retry finishing control and continued-conversation message. Its fixture action changes only sample presentation state; it cannot recover or modify a real run. The control sequence also captures Page Down and Page Up in a detail view to check native scrolling.
+
 Use `--columns 90 --rows 34` for a narrow fullscreen terminal, `--classic` for the classic renderer, and `--theme light` for light theme. The default sequence opens the board, opens details, hides it, reopens it, and shows a result that still requires local verification. Use `--commands /board-preparing,/board-preview,/board-stopped` to inspect preparation and recovery.
 
 For long Unicode titles and constrained heights, use `--columns 80 --rows 24 --commands /board-unicode,/board-complete,/board-stopped,/board-attention`. The native pane scrolls when its viewport cannot show the complete board.

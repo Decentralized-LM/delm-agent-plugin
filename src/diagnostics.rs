@@ -245,6 +245,9 @@ fn delivery_summary(value: &Value) -> Value {
         "verification_required":value["verification_required"].as_bool(),
         "changed_file_count":count("changed_paths"), "merged_file_count":count("merged_paths"),
         "conflict_count":count("conflicts"),
+        "artifact_count":count("artifacts"),
+        "artifacts_declared":value["artifacts_declared"].as_bool(),
+        "undelivered_output_count":count("undelivered_outputs"),
         "environment_manifest_count":count("environment_files_changed"),
         "omitted_environment_count":count("environment_directories_omitted"),
         "recovery_retained":value.get("recovery").map(Value::is_string)})
@@ -716,6 +719,47 @@ fn retained_timing(saved: &Value) -> Value {
     safe
 }
 
+fn version_number(value: &Value) -> Value {
+    let Some(value) = value.as_str().filter(|s| s.len() <= 128) else {
+        return Value::Null;
+    };
+    value
+        .split_whitespace()
+        .find(|part| {
+            let pieces = part.split('.').collect::<Vec<_>>();
+            pieces.len() == 3
+                && pieces.iter().all(|piece| {
+                    !piece.is_empty()
+                        && piece.len() <= 10
+                        && piece.bytes().all(|b| b.is_ascii_digit())
+                })
+        })
+        .map(|s| json!(s))
+        .unwrap_or(Value::Null)
+}
+
+fn lifecycle_summary(state: &Value) -> Value {
+    let phase = &state["finalization"];
+    let choice = |key: &str, choices: &[&str]| {
+        phase[key]
+            .as_str()
+            .filter(|value| choices.contains(value))
+            .map(|s| json!(s))
+            .unwrap_or(Value::Null)
+    };
+    json!({
+        "request_revision":state["revision"].as_u64(),
+        "finished":state["finished"].as_bool(),
+        "generation":phase["generation"].as_u64(),
+        "revision":phase["revision"].as_u64(),
+        "intent":choice("intent", &["deliver", "cancel"]),
+        "started":phase["started"].as_bool(),
+        "attempt":phase["attempt"].as_u64(),
+        "shutdown_ack":choice("shutdown_ack", &["pending", "confirmed", "unconfirmed"]),
+        "reason":choice("reason", &["completed_candidate", "user_cancelled", "no_active_workers", "deadline", "host_exited", "bridge_unloaded", "conversation_ended", "launch_failed", "transport_failed", "cancelled"])
+    })
+}
+
 fn report_at(path: &Path) -> Result<Value> {
     let info = inspect(path)?;
     let timing = timings(path)?;
@@ -730,6 +774,9 @@ fn report_at(path: &Path) -> Result<Value> {
     Ok(
         json!({"schema_version":1,"report_runtime_version":env!("CARGO_PKG_VERSION"),
         "run_id":info.id,"host":info.host,"status":info.status,
+        "run_identity":{"runtime_version":version_number(&info.state["runtime_version"]),
+            "host_version":version_number(if info.host == "codex" { &info.state["request"]["auth_settings"]["host_version"] } else { &info.state["host_version"] })},
+        "lifecycle":lifecycle_summary(&info.state),
         "storage":{"logical_bytes":info.bytes,"meaning":"Logical file sizes; APFS shared blocks and reclaimable physical space are not measured."},
         "delivery":delivery_summary(&info.delivery),"timing":timing,"scoped_checks":checks,
         "cleanup_blockers":info.cleanup_blockers,
@@ -756,6 +803,48 @@ pub fn report(id: &str, output: Option<&Path>) -> Result<()> {
     } else {
         std::io::stdout().write_all(&bytes)?;
     }
+    Ok(())
+}
+
+pub fn recover(id: &str, worker: Option<usize>, output: Option<&Path>) -> Result<()> {
+    let run = selected_run(id)?;
+    owned_directory(&run.join("workspace"))?;
+    let bundle = run.join("workspace/recovery");
+    owned_directory(&bundle).context("This run has no completed partial-change recovery bundle. Preserve its remaining workspaces and inspect its delivery journal through the support guide")?;
+    let claude = read_json(&run.join("claude.json"))?;
+    let codex = read_json(&run.join("run.json"))?;
+    ensure!(
+        !(claude.is_some() && codex.is_some()),
+        "Conflicting host records; preserve this run for recovery"
+    );
+    let state = claude
+        .or(codex)
+        .context("Missing run identity; preserve the recovery bundle")?;
+    let original = state
+        .pointer("/workspace/original")
+        .and_then(Value::as_str)
+        .or_else(|| state["project"].as_str())
+        .context("Original project identity is missing; preserve the recovery bundle")?;
+    let inspection = crate::workspace::inspect_recovery(&bundle)?;
+    ensure!(
+        Path::new(original).is_absolute() && inspection.original == Path::new(original),
+        "Recovery bundle belongs to a different project; no files were exported"
+    );
+    let value = if let (Some(worker), Some(output)) = (worker, output) {
+        let output = if output.is_absolute() {
+            output.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(output)
+        };
+        serde_json::to_value(crate::workspace::export_recovery(&bundle, &output, worker)?)?
+    } else {
+        ensure!(
+            worker.is_none() && output.is_none(),
+            "Export requires both --worker and --output"
+        );
+        serde_json::to_value(inspection)?
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
 

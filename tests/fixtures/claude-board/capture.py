@@ -107,6 +107,8 @@ def capture(args):
                 ("focus", b"\x18\t"),
                 ("select-task", b"\t"),
                 ("task-detail", b"\r"),
+                ("page-down", b"\x1b[6~"),
+                ("page-up", b"\x1b[5~"),
                 ("back", b"\r"),
                 ("hide", b"\x18x"),
                 ("compact-focus", b"\x18\t"),

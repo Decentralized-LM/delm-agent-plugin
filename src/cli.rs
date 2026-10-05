@@ -42,6 +42,17 @@ pub enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Inspect saved partial changes, or export one worker's changes to a new folder.
+    Recover {
+        #[arg(long)]
+        run_id: String,
+        /// Export this worker's saved changes; requires --output.
+        #[arg(long, requires = "output", value_parser = clap::value_parser!(u8).range(1..=2))]
+        worker: Option<u8>,
+        /// New folder outside the project. Existing files are never overwritten.
+        #[arg(long, requires = "worker")]
+        output: Option<PathBuf>,
+    },
     /// Preview or remove verbose diagnostics from a successfully delivered run.
     Clean {
         #[arg(long)]
@@ -327,6 +338,11 @@ pub async fn execute(command: Command) -> Result<()> {
             crate::diagnostics::report(&run_id, output.as_deref())
         }
         Command::Clean { run_id, confirm } => crate::diagnostics::clean(&run_id, confirm),
+        Command::Recover {
+            run_id,
+            worker,
+            output,
+        } => crate::diagnostics::recover(&run_id, worker.map(usize::from), output.as_deref()),
         Command::Claude { command } => crate::claude::execute(command).await,
         Command::Respond {
             run_id,

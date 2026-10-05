@@ -533,3 +533,66 @@ fn nested_worker_launch_is_rejected_before_auth_or_model_work() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("already a DeLM worker"));
     assert!(result.stdout.is_empty());
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn result_inspection_uses_native_authority_and_keeps_source_links_contained() {
+    use delm::{
+        workers::result_policy,
+        workspace::{Manifest, ResultSelection, manifest_for_result},
+    };
+    let mut fixture = Fixture::new();
+    let external = fixture._temp.path().canonicalize().unwrap().join("runtime");
+    fs::create_dir(&external).unwrap();
+    let interpreter = external.join("python3");
+    fs::write(&interpreter, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&fixture.project)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::create_dir_all(fixture.project.join(".venv/bin")).unwrap();
+    fs::write(
+        fixture.project.join(".venv/pyvenv.cfg"),
+        format!(
+            "home = {}\ninclude-system-site-packages = false\nversion = 3.12.0\n",
+            external.display()
+        ),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&interpreter, fixture.project.join(".venv/bin/python3")).unwrap();
+    fs::write(fixture.project.join("source.py"), "print('source')\n").unwrap();
+    fixture.request.policy["file_system"] = json!({"kind":"unrestricted"});
+    let allowed = result_policy(&fixture.request, &fixture.run).unwrap();
+    assert_eq!(allowed.readonly_runtime_roots, [PathBuf::from("/")]);
+    assert!(!allowed.native_python_runtime);
+    assert!(allowed.denied_roots.contains(&fixture.request.project));
+    assert!(allowed.denied_roots.contains(&fixture.run));
+    assert!(manifest_for_result(&fixture.project, &allowed).is_ok());
+    fixture.request.policy["file_system"] = json!({"kind":"restricted", "entries":[
+        {"path":{"type":"special","value":{"kind":"root"}},"access":"read"},
+        {"path":{"type":"path","path":external},"access":"deny"}
+    ]});
+    let denied = result_policy(&fixture.request, &fixture.run).unwrap();
+    assert!(manifest_for_result(&fixture.project, &denied).is_err());
+    // Current completion omits the reconstructible environment entirely, so no
+    // external interpreter read is necessary for the accepted delivery set.
+    let accepted = ResultSelection::new(&Manifest::default(), vec![])
+        .unwrap()
+        .capture(&fixture.project)
+        .unwrap();
+    assert!(accepted.manifest.files.contains_key("source.py"));
+    assert_eq!(accepted.environment_directories_omitted, [".venv"]);
+    std::os::unix::fs::symlink(&interpreter, fixture.project.join("source-alias")).unwrap();
+    assert!(manifest_for_result(&fixture.project, &allowed).is_err());
+    assert!(
+        ResultSelection::new(&Manifest::default(), vec![])
+            .unwrap()
+            .capture(&fixture.project)
+            .is_err()
+    );
+}

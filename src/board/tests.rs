@@ -57,6 +57,273 @@ fn publish(board: &mut Board, worker: usize, key: &str, paths: &[&str]) -> i64 {
 }
 
 #[test]
+fn task_tools_explain_size_limits_and_reject_task_ids_as_publication_dependencies() {
+    let definitions = tool_definitions();
+    for name in ["delm_task_create", "delm_task_update", "delm_task_split"] {
+        let tool = definitions
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap();
+        let fields = if name == "delm_task_split" {
+            &tool["inputSchema"]["properties"]["tasks"]["items"]["properties"]
+        } else {
+            &tool["inputSchema"]["properties"]
+        };
+        for (field, bound) in [
+            ("title", 256),
+            ("description", 2048),
+            ("interface", 2048),
+            ("earliest_contribution", 1024),
+            ("done_when", 1024),
+        ] {
+            assert_eq!(fields[field]["maxLength"], bound);
+            assert!(
+                fields[field]["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("UTF-8 bytes")
+            );
+        }
+        assert!(
+            fields["dependencies"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("not task IDs")
+        );
+    }
+    let fixture = Fixture::new();
+    let mut board = fixture.board();
+    let task = create_task(&mut board, 1, "first-task", "implementation");
+    let mut args = json!({"idempotency_key":"second-task","title":"Reusable parser", "description":"Contribute the parser interface", "interface":"é".repeat(1024), "dependencies":[task]});
+    let error = board
+        .call(1, "delm_task_create", args.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("not task IDs"));
+    assert!(error.contains("delm_list(collection=publications)"));
+    assert_eq!(board.view().unwrap()["collections"]["tasks"]["total"], 1);
+    let publication = publish(&mut board, 2, "parser-interface", &[]);
+    args["dependencies"] = json!([publication]);
+    args["interface"] = json!("é".repeat(1025));
+    let error = board
+        .call(1, "delm_task_create", args.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("interface must be a string of at most 2048 bytes"));
+    args["interface"] = json!("é".repeat(1024));
+    board.call(1, "delm_task_create", args).unwrap();
+    assert_eq!(board.view().unwrap()["collections"]["tasks"]["total"], 2);
+}
+
+#[test]
+fn discovery_reaches_old_tasks_without_changing_claims_or_including_later_creations() {
+    let fixture = Fixture::new();
+    let mut board = fixture.board();
+    let mut ids = Vec::new();
+    for n in 0..40 {
+        ids.push(create_task(
+            &mut board,
+            1,
+            &format!("task-{n}"),
+            "implementation",
+        ));
+        board
+            .call(
+                2,
+                "delm_status",
+                json!({"idempotency_key":format!("status-{n}"),"summary":"Inspecting"}),
+            )
+            .unwrap();
+    }
+    let before = board.view().unwrap();
+    assert_eq!(before["tasks"].as_array().unwrap().len(), 24);
+    assert_eq!(
+        before["collections"]["tasks"],
+        json!({"total":40,"shown":24,"has_more":true})
+    );
+    let mut page = board
+        .call(2, "delm_list", json!({"collection":"tasks","limit":7}))
+        .unwrap()["result"]
+        .clone();
+    assert_eq!(
+        before,
+        board.view().unwrap(),
+        "Discovery must not append events or claim work"
+    );
+    assert_eq!(page["items"][0]["task_id"], ids[0]);
+    assert_eq!(page["items"][1]["task_number"], 2);
+    assert_ne!(
+        page["items"][1]["task_id"], 2,
+        "Intervening events make IDs sparse"
+    );
+    let later = create_task(&mut board, 2, "new-after-first-page", "implementation");
+    let mut seen = Vec::new();
+    loop {
+        assert_eq!(page["total"], 40);
+        seen.extend(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["task_id"].as_i64().unwrap()),
+        );
+        if page["next_cursor"].is_null() {
+            break;
+        }
+        page = board
+            .call(
+                2,
+                "delm_list",
+                json!({"collection":"tasks","limit":7,"cursor":page["next_cursor"]}),
+            )
+            .unwrap()["result"]
+            .clone();
+        assert_eq!(page["new_events_available"], true);
+    }
+    assert_eq!(seen, ids);
+    assert!(!seen.contains(&later));
+    let fresh = board
+        .call(2, "delm_list", json!({"collection":"tasks"}))
+        .unwrap();
+    assert_eq!(fresh["result"]["total"], 41);
+}
+
+#[test]
+fn filtered_discovery_refreshes_when_ownership_changes_and_cursors_cannot_cross_queries() {
+    let fixture = Fixture::new();
+    let mut board = fixture.board();
+    let ids = (0..5)
+        .map(|n| create_task(&mut board, 1, &format!("task-{n}"), "implementation"))
+        .collect::<Vec<_>>();
+    let page = board
+        .call(
+            1,
+            "delm_list",
+            json!({"collection":"tasks","task_state":"available","limit":2}),
+        )
+        .unwrap()["result"]
+        .clone();
+    let claim = claim_task(&mut board, 2, "claim-last", ids[4]);
+    let error=board.call(1,"delm_list",json!({"collection":"tasks","task_state":"available","limit":2,"cursor":page["next_cursor"]})).unwrap_err();
+    assert!(error.to_string().contains("ownership changed"));
+    let claimed = board
+        .call(
+            1,
+            "delm_list",
+            json!({"collection":"tasks","task_state":"claimed","owner":"peer"}),
+        )
+        .unwrap();
+    assert_eq!(claimed["result"]["total"], 1);
+    assert_eq!(claimed["result"]["items"][0]["task_id"], ids[4]);
+    let fresh = board
+        .call(1, "delm_list", json!({"collection":"tasks","limit":2}))
+        .unwrap()["result"]
+        .clone();
+    assert!(
+        board
+            .call(
+                1,
+                "delm_list",
+                json!({"collection":"findings","cursor":fresh["next_cursor"]})
+            )
+            .is_err()
+    );
+    assert!(
+        board
+            .call(
+                1,
+                "delm_list",
+                json!({"collection":"tasks","owner":"peer","cursor":fresh["next_cursor"]})
+            )
+            .is_err()
+    );
+    board.set_revision(2).unwrap();
+    assert!(
+        board
+            .call(
+                1,
+                "delm_list",
+                json!({"collection":"tasks","cursor":fresh["next_cursor"]})
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("request changed")
+    );
+    assert_eq!(
+        board.view().unwrap()["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["task_id"] == ids[4])
+            .unwrap()["version"],
+        claim
+    );
+}
+
+#[test]
+fn discovery_pages_all_explicit_sharing_and_receipts_with_bounded_summaries() {
+    let fixture = Fixture::new();
+    fixture.seed("main.js", b"ready");
+    let mut board = fixture.board();
+    for n in 0..27 {
+        publish(&mut board, 1, &format!("publication-{n}"), &[]);
+        board.call(2,"delm_status",json!({"idempotency_key":format!("finding-{n}"),"finding":format!("Useful finding {n}")})).unwrap();
+        let begun=board.begin_check(1,json!({"idempotency_key":format!("begin-{n}"),"summary":format!("Focused check {n}"),"paths":["main.js"]}),||100).unwrap();
+        board.finish_check(1,json!({"idempotency_key":format!("finish-{n}"),"snapshot_id":begun["result"]["snapshot_id"],"command_id":"test-command"}),&native_check(&fixture.workers[0],101,0)).unwrap();
+    }
+    for collection in ["publications", "findings", "checks"] {
+        let before = board.view().unwrap();
+        assert_eq!(before["collections"][collection]["total"], 27);
+        let first = board
+            .call(2, "delm_list", json!({"collection":collection,"limit":24}))
+            .unwrap()["result"]
+            .clone();
+        let second = board
+            .call(
+                2,
+                "delm_list",
+                json!({"collection":collection,"limit":24,"cursor":first["next_cursor"]}),
+            )
+            .unwrap()["result"]
+            .clone();
+        assert_eq!(first["items"].as_array().unwrap().len(), 24);
+        assert_eq!(second["items"].as_array().unwrap().len(), 3);
+        assert!(second["next_cursor"].is_null());
+        assert_eq!(before, board.view().unwrap());
+        if collection == "checks" {
+            assert_eq!(first["items"][0]["reuse_requires_validation"], true);
+        }
+    }
+    for args in [
+        json!({"collection":"tasks","limit":25}),
+        json!({"collection":"tasks","limit":0}),
+        json!({"collection":"findings","task_state":"available"}),
+        json!({"collection":"tasks","cursor":"not-json"}),
+    ] {
+        assert!(board.call(1, "delm_list", args).is_err());
+    }
+}
+
+#[test]
+fn completion_artifact_selection_is_retained_and_cannot_name_external_paths() {
+    let fixture = Fixture::new();
+    let mut board = fixture.board();
+    let declaration = json!({"idempotency_key":"result","expected_revision":1,"outcome":"complete","summary":"Rendered requested output","artifacts":["renders/demo.mp4","exports"]});
+    let result = board.call(1, "delm_complete", declaration).unwrap();
+    assert_eq!(
+        result["result"]["artifacts"],
+        json!(["renders/demo.mp4", "exports"])
+    );
+    let omitted = board.call(1, "delm_complete", json!({"idempotency_key":"unaccounted","expected_revision":1,"outcome":"complete","summary":"No artifact declaration"})).unwrap();
+    assert!(omitted["result"].get("artifacts").is_none());
+    let source_only = board.call(1, "delm_complete", json!({"idempotency_key":"source-only","expected_revision":1,"outcome":"complete","summary":"Only source changes requested","artifacts":[]})).unwrap();
+    assert_eq!(source_only["result"]["artifacts"], json!([]));
+    for path in ["../outside", "/tmp/output", "renders/../secret"] {
+        assert!(board.call(1,"delm_complete",json!({"idempotency_key":format!("bad-{path}"),"expected_revision":1,"outcome":"complete","summary":"Invalid","artifacts":[path]})).is_err());
+    }
+}
+
+#[test]
 fn concurrent_claims_have_exactly_one_owner_and_replay_survives_reopen() {
     let fixture = Fixture::new();
     let mut board = fixture.board();

@@ -8,9 +8,15 @@ const runs = new Map();
 const restores = new Map();
 const starts = new Set();
 const generations = new Map();
+const restoreAttempts = new Set();
 const STORE_PREFIX = 'native-run:';
+function ownsConversation(run) {
+  return Boolean(run && !run.finished && !run.ending && run.phase === 'working'
+    && !run.failure && !run.stopping && !run.finalization && !run.cancelRequested);
+}
 function updateBoard($, run) {
-  try { observeBoard(run); } catch { /* Presentation cannot fail a control operation. */ }
+  run.conversationAvailable = !ownsConversation(run);
+  try { observeBoard(run, () => retryFinish($, run.session)); } catch { /* Presentation cannot fail a control operation. */ }
 }
 
 function snapshot(run) {
@@ -18,12 +24,19 @@ function snapshot(run) {
     ready: run.ready, session: run.session, revision: run.revision,
     agents: run.agents, descendants: run.descendants, background: run.background,
     finished: run.finished, final: run.final, ending: Boolean(run.ending), failure: run.failure || null,
+    phase: run.phase, finalization: run.finalization, canRetryFinish: Boolean(run.canRetryFinish),
+    controls: run.controls || [],
+    completionPending: run.completionPending || {},
+    cancelRequested: Boolean(run.cancelRequested),
+    conversationAvailable: !ownsConversation(run),
   };
 }
 
 async function persist($, run) {
   const value = snapshot(run);
-  run.writes = run.writes.then(() => $.store.set(STORE_PREFIX + run.session, value));
+  // Preserve write ordering without permanently inheriting a transient failure.
+  // Each caller still observes its own write failure before admitting more work.
+  run.writes = run.writes.catch(() => {}).then(() => $.store.set(STORE_PREFIX + run.session, value));
   await run.writes;
   updateBoard($, run);
 }
@@ -41,6 +54,19 @@ async function currentRun($, restoreInterrupted = true) {
   return restoring;
 }
 
+function restoreInBackground($) {
+  void (async () => {
+    const session = await $.session.id();
+    if (restoreAttempts.has(session)) return;
+    restoreAttempts.add(session);
+    try { await currentRun($); }
+    catch (error) {
+      $.ui.log('DeLM recovery needs attention: ' + String(error.message || error)
+        + '. You can continue chatting normally; no unfinished workspace was removed.');
+    }
+  })().catch(() => {});
+}
+
 async function eventRun($, agentId) {
   if (agentId) {
     for (const run of runs.values()) if (owned(run, agentId)) return run;
@@ -51,6 +77,8 @@ async function eventRun($, agentId) {
 async function restore($, session) {
   const stored = await $.store.get(STORE_PREFIX + session);
   if (!stored || await $.session.id() !== session) return null;
+  const known = runs.get(session);
+  if (known && (!known.ending || known.finished)) return known;
   if (stored.session !== session) throw new Error('DeLM found a run record for another conversation.');
   if (stored.finished) {
     const run = {...stored, writes: Promise.resolve()};
@@ -87,10 +115,13 @@ async function request($, run, op, fields = {}, timeoutMs = 120000) {
 
 async function reportFailure($, run, error) {
   run.failure = String(error?.message || error);
+  run.phase = 'recovery_required';
+  run.canRetryFinish = run.finalization?.intent === 'deliver' && !run.finished && !run.cancelRequested;
   for (const gate of Object.values(run.deliveries || {})) gate.reject(new Error(run.failure));
   run.deliveries = {};
   if (await current($, run)) $.ui.log('DeLM needs attention: ' + run.failure);
-  await persist($, run);
+  try { await persist($, run); }
+  catch { updateBoard($, run); }
 }
 
 async function drain($, run, stream, initial) {
@@ -126,9 +157,11 @@ async function start($, task, session) {
   if (await $.session.id() !== session) throw new Error('The conversation changed before preparation. Retry /delm:run here.');
   const project = await $.session.cwd();
   const prompt = await $.fs.read($.plugin.root + '/hooks/worker.md');
+  let hostVersion = null;
+  try { hostVersion = (await $.session.version()).version; } catch { /* Optional diagnostic metadata. */ }
   const stream = $.process.spawn({
     argv: [$.plugin.root + '/bin/delm', 'claude', 'serve'],
-    input: JSON.stringify({project, session_id: session, task}) + '\n',
+    input: JSON.stringify({project, session_id: session, task, host_version: hostVersion, package_root: $.plugin.root}) + '\n',
   });
   let buffer = '';
   let stderr = '';
@@ -148,6 +181,8 @@ async function start($, task, session) {
       ready, session, prompt, task, revision: ready.revision, agents: {}, descendants: {},
       background: {}, bindings: [], deliveries: {}, updating: null, launches: 0, awaitingLaunch: true,
       launchTurn: null, finished: false, final: null, ending: false,
+      phase: 'working', finalization: null, canRetryFinish: false, settlement: null,
+      retryTimer: null, retryCount: 0, proofVersion: 0,
       writes: Promise.resolve(), stopping: false,
       stream, stderr, failure: null,
     };
@@ -168,9 +203,14 @@ async function start($, task, session) {
   }
 }
 
-async function submitControl($, run, message) {
+async function submitControl($, run, message, detail = {kind: 'final'}) {
   if (!await current($, run) || (run.finished && !run.final)) return;
+  const control = {text: message, ...detail, admitted: false, turn: null};
+  run.controls ||= [];
+  run.controls.push(control);
+  if (run.controls.length > 32) run.controls.splice(0, run.controls.length - 32);
   try {
+    await persist($, run);
     await $.prompt.submit({text: message});
   } catch (error) {
     await reportFailure($, run, error);
@@ -213,8 +253,35 @@ async function resume($, run, action) {
 }
 
 async function submitResume($, run, agentId, message, control) {
-  if (run.agents[agentId]?.pending?.message !== message) return;
-  await submitControl($, run, control);
+  if (!ownsConversation(run) || run.agents[agentId]?.pending?.message !== message
+      || run.agents[agentId]?.pending?.revision !== run.revision) return;
+  if (hasPendingCompletion(run)) {
+    (run.heldResumes ||= {})[agentId] = {message, control};
+    return;
+  }
+  await submitControl($, run, control, {
+    kind: 'resume', agentId, message, revision: run.agents[agentId].pending.revision,
+  });
+}
+
+function obsoleteControl(run, control) {
+  return control?.kind === 'resume' && (!ownsConversation(run)
+    || control.revision !== run.revision
+    || run.agents[control.agentId]?.pending?.message !== control.message
+    || run.agents[control.agentId]?.pending?.revision !== control.revision);
+}
+
+function hasPendingCompletion(run) {
+  return Object.values(run.completionPending || {}).some(value => value.revision === run.revision);
+}
+
+function releaseHeldResumes($, run) {
+  if (!ownsConversation(run) || hasPendingCompletion(run)) return;
+  const held = run.heldResumes || {};
+  run.heldResumes = {};
+  for (const [id, value] of Object.entries(held)) {
+    $.clock.after(0, () => submitResume($, run, id, value.message, value.control));
+  }
 }
 
 async function actions($, run, list) {
@@ -222,12 +289,37 @@ async function actions($, run, list) {
     if (!await current($, run)) continue;
     if (action.id && run.lastAction === action.id) continue;
     if (action.type === 'candidate' || action.type === 'stop') {
-      if (!run.stopping) {
-        run.stopping = true;
-        $.clock.after(30, () => settle($, run));
+      const finalization = action.finalization;
+      if (!finalization || !Number.isSafeInteger(finalization.generation)
+          || !Number.isSafeInteger(finalization.revision)
+          || !['deliver', 'cancel'].includes(finalization.intent)) {
+        throw new Error('DeLM received an incompatible finalization contract. Preserve this run for recovery.');
       }
+      if (finalization.revision < run.revision
+          || finalization.generation < (run.finalization?.generation || 0)) continue;
+      run.retryTimer?.cancel(); run.retryTimer = null;
+      run.finalization = finalization;
+      run.stopping = true;
+      run.phase = finalization.intent === 'deliver' ? 'finishing' : 'stopping';
+      run.canRetryFinish = false;
+      run.retryCount = 0;
+      await persist($, run);
+      scheduleSettle($, run, 30);
+    } else if (action.type === 'completion_intent') {
+      if (!run.agents[action.agent_id] || action.revision !== run.revision) continue;
+      run.completionPending ||= {};
+      if (action.pending) {
+        run.completionPending[action.agent_id] = {revision: action.revision, turn: action.turn_id};
+      } else if (run.completionPending[action.agent_id]?.turn === action.turn_id) {
+        delete run.completionPending[action.agent_id];
+      }
+      await persist($, run);
+      if (!action.pending) releaseHeldResumes($, run);
     } else if (action.type === 'context') {
+      await run.updating;
       if (run.stopping || run.finished) continue;
+      if (!Number.isSafeInteger(action.revision) || action.revision < run.revision) continue;
+      run.revision = action.revision;
       const worker = run.agents[action.agent_id];
       if (!worker) throw new Error('DeLM requested an unknown native peer.');
       if (action.revision < (worker.pending?.revision || 1)
@@ -251,11 +343,20 @@ async function actions($, run, list) {
         await persist($, run);
       }
     } else if (action.type === 'resume') {
+      await run.updating;
       if (run.stopping || run.finished) continue;
+      if (!Number.isSafeInteger(action.revision) || action.revision < run.revision) continue;
+      run.revision = action.revision;
       await resume($, run, action);
     } else if (action.type === 'final') {
+      if (run.finished) continue;
       run.finished = true;
       run.final = action;
+      run.phase = action.status;
+      run.stopping = false;
+      run.canRetryFinish = false;
+      run.failure = null;
+      run.retryTimer?.cancel(); run.retryTimer = null;
       await persist($, run);
       const verification = action.delivery?.verification_required
         ? 'The delivery requires a focused check in the original project. Perform only the necessary environment setup and checks for the delivered or reconciled files, then state the outcome. Do not repeat unaffected checks.'
@@ -270,33 +371,42 @@ async function actions($, run, list) {
   }
 }
 
-async function stopTask($, run, id) {
+async function stopTask($, run, id, address = id) {
   if (!await current($, run)) throw new Error('Return to the owning conversation before stopping its DeLM peers.');
-  const result = await $.tool.call({tool: 'TaskStop', task_id: id});
-  return !result.isError && !result.deny && result.result?.task_id === id;
+  const result = await $.tool.call({tool: 'TaskStop', task_id: address});
+  return !result.isError && !result.deny && [id, address].includes(result.result?.task_id);
 }
 
 async function stopOwned($, run) {
   if (!await current($, run)) throw new Error('Return to the owning conversation before recovering its DeLM peers.');
+  // Stop known shell children before parents. Stopping an agent first can
+  // cascade to its shell, retiring the native task before TaskStop can return
+  // that shell's acknowledgment.
+  for (const [id, task] of Object.entries(run.background)) {
+    if (task.stopped) continue;
+    const acknowledged = await stopTask($, run, id);
+    if (!acknowledged && !task.stopped) {
+      throw new Error('Native shutdown is not confirmed for background task ' + id + '. Its workspace is preserved.');
+    }
+    task.stopped = true;
+  }
   let native = await $.agent.list();
-  for (const [id, worker] of Object.entries({...run.agents, ...run.descendants})) {
+  // Descendant agent loops can themselves own children; stop deepest first.
+  const depth = id => {
+    let value = 0, parent = run.descendants[id]?.parent;
+    const seen = new Set([id]);
+    while (parent && !seen.has(parent)) { seen.add(parent); value++; parent = run.descendants[parent]?.parent; }
+    return value;
+  };
+  for (const [id, worker] of Object.entries({...run.agents, ...run.descendants}).sort(([a], [b]) => depth(b) - depth(a))) {
     const observed = native.find(agent => agent.id === id);
     if (observed && completeState(observed.status)) {
       worker.status = observed.status;
-    } else if (observed && await stopTask($, run, id)) {
+    } else if (observed && await stopTask($, run, id, observed.teammateId || id)) {
       worker.status = 'killed';
     } else if (!completeState(worker.status)) {
       throw new Error('Native shutdown is not confirmed for agent ' + id + '. Its workspace is preserved.');
     }
-  }
-  // A completed background shell is proved by a later native SubagentStop snapshot;
-  // otherwise require TaskStop's structured acknowledgment for that exact task.
-  for (const [id, task] of Object.entries(run.background)) {
-    if (task.stopped) continue;
-    if (!await stopTask($, run, id)) {
-      throw new Error('Native shutdown is not confirmed for background task ' + id + '. Its workspace is preserved.');
-    }
-    task.stopped = true;
   }
   // TaskStop and turn.complete can precede the native task registry's final
   // transition. Observe that transition rather than treating an acknowledgment
@@ -318,26 +428,109 @@ async function stopOwned($, run) {
   return Object.entries(run.agents).map(([id, worker]) => ({id, status: worker.status}));
 }
 
-async function settle($, run) {
-  try {
-    if (!await current($, run)) return;
-    const agents = await stopOwned($, run);
-    await request($, run, 'settle', {agents, background_tasks_stopped: true});
-  } catch (error) {
-    run.stopping = false;
-    await reportFailure($, run, error);
+function sameFinalization(run, fence) {
+  return !run.finished && run.finalization?.generation === fence?.generation
+    && run.finalization?.revision === fence?.revision && run.finalization?.intent === fence?.intent;
+}
+
+function scheduleSettle($, run, delay = 0) {
+  if (!run.finalization || run.finished || run.ending || run.retryTimer) return;
+  const fence = {...run.finalization};
+  run.retryTimer = $.clock.after(delay, async () => {
+    run.retryTimer = null;
+    if (sameFinalization(run, fence)) await settle($, run, fence);
+  });
+}
+
+async function settle($, run, fence = run.finalization) {
+  if (!fence || !sameFinalization(run, fence) || !await current($, run)) return;
+  if (run.settlement) { await run.settlement; return; }
+  const proofVersion = run.proofVersion || 0;
+  run.settlement = (async () => {
+    try {
+      // This RPC is the admission boundary. A newer update that won first
+      // invalidates this generation before any native task is stopped.
+      const result = await request($, run, 'begin_settle', {generation: fence.generation, revision: fence.revision});
+      if (!sameFinalization(run, fence) || !await current($, run)) return;
+      if (run.cancelRequested && result.finalization.intent !== 'cancel') {
+        const cancelled = await request($, run, 'cancel', {reason: 'User requested /delm-stop'});
+        await actions($, run, cancelled.actions || []);
+        return;
+      }
+      run.finalization = result.finalization;
+      run.canRetryFinish = false;
+      run.failure = null;
+      run.phase = fence.intent === 'deliver' ? 'finishing' : 'stopping';
+      await persist($, run);
+      const agents = await stopOwned($, run);
+      if (!sameFinalization(run, fence) || !await current($, run)) return;
+      const final = await request($, run, 'settle', {
+        generation: fence.generation, revision: fence.revision, agents, background_tasks_stopped: true,
+      });
+      // Recovery can reconnect to a live bridge whose original stream reader
+      // disappeared. Applying final actions is idempotent across both routes.
+      if (run.restored) await actions($, run, final.actions || []);
+    } catch (error) {
+      if (!sameFinalization(run, fence)) return;
+      try {
+        await request($, run, 'settlement_failed', {generation: fence.generation, revision: fence.revision});
+      } catch { /* A missing bridge retains its candidate for authenticated recovery. */ }
+      await reportFailure($, run, error);
+    }
+  })();
+  try { await run.settlement; }
+  finally {
+    run.settlement = null;
+    if (!run.finished && run.finalization) {
+      if (!sameFinalization(run, fence)) scheduleSettle($, run);
+      else if (run.failure && ((run.proofVersion || 0) > proofVersion || (run.retryCount || 0) < 2)) {
+        run.retryCount = (run.retryCount || 0) + 1;
+        scheduleSettle($, run, 250 * run.retryCount);
+      }
+    }
   }
 }
 
-async function recover($, stored) {
+async function retryFinish($, session) {
+  const run = await currentRun($);
+  if (!run || run.session !== session || run.finished || !run.canRetryFinish
+      || run.cancelRequested || run.finalization?.intent !== 'deliver') throw new Error('No completed result is awaiting delivery in this conversation.');
+  run.retryTimer?.cancel(); run.retryTimer = null;
+  run.retryCount = 0;
+  if (run.settlement) await run.settlement;
+  if (!await current($, run) || run.finished || run.finalization?.intent !== 'deliver') return;
+  const recovered = await recover($, snapshot(run));
+  if (!recovered.finished && recovered.failure) throw new Error(recovered.failure);
+}
+
+async function recover($, stored, requestedIntent = null) {
   const run = {
     ...stored, ready: validateReady(stored.ready), writes: Promise.resolve(),
     bindings: [], deliveries: {}, updating: null, launches: 2, awaitingLaunch: false, failure: null, stopping: true, ending: false,
+    phase: 'recovery_required', restored: true, settlement: null, retryTimer: null, retryCount: 0, proofVersion: 0,
   };
+  run.cancelRequested = Boolean(stored.cancelRequested || requestedIntent === 'cancel');
   runs.set(run.session, run);
+  if (run.cancelRequested) {
+    try { await persist($, run); }
+    catch { /* The authenticated runtime cancellation below is also durable. */ }
+  }
+  let live;
+  try { live = await request($, run, 'status', {}, 2000); } catch { /* An exited bridge uses durable recovery below. */ }
+  if (live?.run) {
+    run.finalization = live.run.finalization;
+    if (live.finished && live.final) { await actions($, run, [live.final]); return run; }
+    if (!run.finalization || (run.cancelRequested && run.finalization.intent !== 'cancel')) {
+      const stopped = await request($, run, 'cancel', {reason: run.cancelRequested ? 'User requested /delm-stop' : 'Conversation recovery requested'});
+      await actions($, run, stopped.actions || []);
+    }
+    await settle($, run);
+    return run;
+  }
   const agents = await stopOwned($, run);
   const result = await $.process.run([run.ready.executable, 'claude', 'recover', '--run-id', run.ready.run_id], {
-    stdin: JSON.stringify({token: run.ready.token, session_id: run.session, agents, background_tasks_stopped: true}) + '\n',
+    stdin: JSON.stringify({token: run.ready.token, session_id: run.session, agents, background_tasks_stopped: true,
+      intent: run.cancelRequested ? 'cancel' : requestedIntent || run.finalization?.intent || 'auto'}) + '\n',
     timeoutMs: 120000,
   });
   if (result.exitCode !== 0 || result.isStdoutTruncated || result.isStderrTruncated) {
@@ -346,6 +539,8 @@ async function recover($, stored) {
   const recovered = JSON.parse(result.stdout);
   run.finished = true;
   run.final = recovered;
+  run.phase = recovered.status;
+  run.canRetryFinish = false;
   await persist($, run);
   if (await current($, run)) $.ui.log('DeLM recovered the interrupted run. ' + (recovered.message || 'Saved work remains available in the run record.'));
   return run;
@@ -353,6 +548,18 @@ async function recover($, stored) {
 
 function owned(run, id) {
   return id && (run?.agents[id] || run?.descendants[id]);
+}
+
+async function waitForOwnBinding(run, agentId) {
+  for (;;) {
+    const own = run.bindings.find(value => value.agentId === agentId);
+    if (own) { await own.promise; return; }
+    // A child can enter its first step before agent.spawn returns its identity.
+    // Wait only until that identity is known, never for the other peer's setup.
+    const pending = run.bindings.filter(value => !value.done);
+    if (!pending.length) return;
+    await Promise.race(pending.map(value => value.promise));
+  }
 }
 
 function* stoppedStep(event, answer) {
@@ -366,7 +573,7 @@ export function register(on) {
   on('session.start', async ($, e, next) => {
     await $.command.register({name: 'delm-status', description: 'Show the DeLM board', immediate: true});
     await $.command.register({name: 'delm-stop', description: 'Stop DeLM and save unfinished changes', immediate: true});
-    await currentRun($);
+    restoreInBackground($);
     return next(e);
   });
 
@@ -377,32 +584,65 @@ export function register(on) {
     starts.add(session);
     try {
       const known = await currentRun($);
-      if (known && !known.finished) return {text: 'DeLM is already active in this conversation. Send a follow-up, or use /delm-stop first.'};
+      if (known && !known.finished) return {text: ownsConversation(known)
+        ? 'DeLM is already working in this conversation. Send a follow-up, or use /delm-stop first.'
+        : 'The previous DeLM run needs finishing or recovery before another run can start. You can use Claude normally here. Open /delm-status for its recovery state, or use /delm-stop to save unfinished changes.'};
       const run = await start($, e.args.trim(), session);
       return next({...e, args: nativeLaunchContext(run.task, run.prompt)});
     } catch (error) {
+      const run = runs.get(session);
+      if (run && !run.finished) await reportFailure($, run, error);
       return {text: 'DeLM could not start: ' + String(error.message || error), exitCode: 1};
     } finally { starts.delete(session); }
   });
 
   on('command.run', {command: 'delm-stop'}, async ($) => {
-    const active = await currentRun($);
+    let active;
+    try {
+      active = await currentRun($, false);
+      if (!active) {
+        const session = await $.session.id();
+        const stored = await $.store.get(STORE_PREFIX + session);
+        if (stored && stored.session !== session) throw new Error('DeLM found a run record for another conversation.');
+        active = await currentRun($, false);
+        if (!active && stored && !stored.finished) {
+          const recovered = await recover($, {...stored, cancelRequested: true}, 'cancel');
+          return {text: recovered.finished ? 'DeLM stopped and recovered the interrupted run.'
+            : 'DeLM could not yet confirm shutdown. Its work is preserved, and you can continue chatting normally.'};
+        }
+      }
+    }
+    catch (error) { return {text: 'DeLM recovery needs attention: ' + String(error.message || error) + '. You can continue chatting normally.'}; }
     if (!active || active.finished) return {text: 'No DeLM run is active in this session.'};
     try {
+      active.cancelRequested = true;
       active.stopping = true;
+      active.phase = 'stopping';
+      active.canRetryFinish = false;
+      active.retryTimer?.cancel(); active.retryTimer = null;
+      if (active.finalization) active.finalization = {...active.finalization, intent:'cancel'};
       updateBoard($, active);
-      await request($, active, 'cancel', {reason: 'User requested /delm-stop'});
-      $.clock.after(0, () => settle($, active));
+      try { await persist($, active); }
+      catch { /* Still record the explicit stop in the authoritative runtime. */ }
+      const result = await request($, active, 'cancel', {reason: 'User requested /delm-stop'});
+      await actions($, active, result.actions || []);
+      scheduleSettle($, active);
       return {text: 'Stopping DeLM and preserving unfinished work.'};
     } catch (error) {
-      try { await recover($, snapshot(active)); return {text: 'DeLM stopped and recovered the interrupted run.'}; }
+      try {
+        const recovered = await recover($, snapshot(active), 'cancel');
+        return {text: recovered.finished ? 'DeLM stopped and recovered the interrupted run.'
+          : 'DeLM could not yet confirm shutdown. Its work is preserved, and you can continue chatting normally.'};
+      }
       catch (recoveryError) { return {text: 'DeLM requires recovery: ' + String(recoveryError.message || recoveryError)}; }
     }
   });
 
   on('turn.start', async ($, e, next) => {
-    const active = await currentRun($);
+    const active = await currentRun($, false);
     if (active) active.mainTurn = e.turnId;
+    const control = active?.controls?.find(value => value.admitted && !value.turn && value.text === e.text);
+    if (control) control.turn = e.turnId;
     if (active?.awaitingLaunch) {
       active.awaitingLaunch = false;
       active.launchTurn = e.turnId;
@@ -412,7 +652,8 @@ export function register(on) {
 
   on('agent.spawn', async ($, e, next) => {
     const run = await eventRun($, e.parentAgentId);
-    if (run && !run.finished && (!await current($, run) || (owned(run, e.parentAgentId) && run.stopping))) {
+    if (run && ((!run.finished && !await current($, run))
+        || (owned(run, e.parentAgentId) && !ownsConversation(run)))) {
       return {deny: 'DeLM cannot launch work while its conversation is ending or recovering.'};
     }
     if (!run || run.finished) return next(e);
@@ -432,10 +673,12 @@ export function register(on) {
     const slot = ++run.launches;
     let release;
     const gate = new Promise(resolve => { release = resolve; });
-    run.bindings.push(gate);
+    const binding = {promise: gate, agentId: null, done: false};
+    run.bindings.push(binding);
     try {
       const result = await next({...e, cwd: run.ready.workers[slot - 1].cwd, background: true});
       if (!result.agentId) throw new Error(result.deny || 'Claude did not return a native peer identity.');
+      binding.agentId = result.agentId;
       run.agents[result.agentId] = {slot, status: 'running', turn: null,
         deliveredRevision: run.ready.revision, resumeRevision: run.ready.revision,
         acknowledgedRevision: 0, pending: null, lastUpdate: null};
@@ -449,7 +692,7 @@ export function register(on) {
       await reportFailure($, run, error);
       try { await request($, run, 'cancel', {reason: 'Native peer launch failed'}); } catch { /* Durable recovery retains the workspace. */ }
       return {deny: 'DeLM could not bind the native peer: ' + String(error.message || error)};
-    } finally { release(); }
+    } finally { binding.done = true; release(); }
   });
 
   on('turn.step', async function* ($, e, next) {
@@ -457,23 +700,33 @@ export function register(on) {
     const captured = [...runs.values()].find(value => owned(value, e.agentId));
     const capturedRevision = captured?.agents[e.agentId]?.deliveredRevision ?? 1;
     const run = await eventRun($, e.agentId);
+    if (run && !e.agentId) {
+      const control = run.controls?.find(value => value.turn === e.turnId);
+      if (obsoleteControl(run, control)) return yield* stoppedStep(e, '');
+      if (control?.kind === 'resume' && hasPendingCompletion(run)) {
+        (run.heldResumes ||= {})[control.agentId] = {message: control.message, control: control.text};
+        return yield* stoppedStep(e, '');
+      }
+    }
     if (run && !run.finished && !await current($, run)) {
       return yield* stoppedStep(e, 'DeLM stopped this peer because its conversation ended.');
     }
-    if (run && owned(run, e.agentId) && run.stopping) {
+    if (run && owned(run, e.agentId) && !ownsConversation(run)) {
       return yield* stoppedStep(e, 'DeLM stopped this peer while its run is settling or recovering.');
     }
     if (run && owned(run, e.agentId) && run.failure) {
       return yield* stoppedStep(e, 'DeLM paused this peer: ' + run.failure);
     }
-    if (run && !e.agentId) {
+    if (ownsConversation(run) && !e.agentId) {
       await run.updating;
-      if (run.inputFailure) return yield* stoppedStep(e, run.inputFailure);
     }
     // Claude captures this request's messages before invoking turn.step hooks.
     // An update stored while this hook waits belongs to a later native request.
     if (run && !run.finished && e.agentId) {
-      await Promise.all(run.bindings);
+      await waitForOwnBinding(run, e.agentId);
+      if (owned(run, e.agentId) && !ownsConversation(run)) {
+        return yield* stoppedStep(e, 'DeLM stopped this peer while its run is settling or recovering.');
+      }
       const worker = run.agents[e.agentId];
       if (worker) {
         try {
@@ -489,6 +742,7 @@ export function register(on) {
           worker.acknowledgedRevision = worker.deliveredRevision;
           worker.turn = e.turnId;
           worker.status = 'running';
+          updateBoard($, run);
         } catch (error) {
           await reportFailure($, run, error);
           return yield* stoppedStep(e, 'DeLM paused this peer because its native coordination state is unavailable.');
@@ -508,6 +762,7 @@ export function register(on) {
     const run = await eventRun($, e.to);
     if (run && !run.finished && !await current($, run)) return {isDelivered: false, reason: 'This DeLM peer belongs to another or ended conversation.'};
     const pending = run?.agents[e.to]?.pending;
+    if (run && owned(run, e.to) && !ownsConversation(run)) return {isDelivered: false, reason: 'This DeLM run is not accepting worker updates. Finish or recover it through its controls.'};
     if (!run || run.finished || !pending || e.agentId || e.origin.kind !== 'model') return next(e);
     if (e.text !== pending.message) {
       return {isDelivered: false, reason: 'Send the exact DeLM task update supplied for this peer, without paraphrasing.'};
@@ -522,6 +777,7 @@ export function register(on) {
 
   on('session.receive', async ($, e, next) => {
     const run = await eventRun($, e.agentId);
+    if (run && owned(run, e.agentId) && !ownsConversation(run)) return {consumed: 'This DeLM run is not accepting worker updates.'};
     if (run && !run.finished && !await current($, run)) return {consumed: 'This DeLM conversation has ended.'};
     const pending = run?.agents[e.agentId]?.pending;
     const result = await next(e);
@@ -535,7 +791,7 @@ export function register(on) {
 
   on('tool.call', async ($, e, next) => {
     const run = await eventRun($, e.agentId);
-    if (run && !run.finished && owned(run, e.agentId) && (!await current($, run) || run.stopping)) {
+    if (run && owned(run, e.agentId) && (!await current($, run) || !ownsConversation(run))) {
       return {deny: 'This DeLM conversation has ended. Return to it and use /delm-stop to recover.'};
     }
     const worker = run?.agents[e.agentId];
@@ -573,7 +829,7 @@ export function register(on) {
       nativeResult = result;
       const outcome = commandOutcome(result);
       if (outcome.background_task_id) {
-        run.background[outcome.background_task_id] = {agent: e.agentId, stopped: false};
+        run.background[outcome.background_task_id] = {agent: e.agentId, toolUseId: e.tool_use_id, stopped: false};
         await persist($, run);
       }
       if (worker && outcome.result_ref !== null) {
@@ -592,11 +848,39 @@ export function register(on) {
   on('classic.SubagentStop', async ($, e, next) => {
     const run = await eventRun($, e.agent_id);
     if (run && owned(run, e.agent_id) && Array.isArray(e.background_tasks)) {
+      let changed = false;
       const running = new Set(e.background_tasks.map(task => task.id));
       for (const [id, task] of Object.entries(run.background)) {
-        if (task.agent === e.agent_id && !running.has(id)) task.stopped = true;
+        if (task.agent === e.agent_id && !running.has(id) && !task.stopped) {
+          task.stopped = true; changed = true;
+        }
       }
       await persist($, run);
+      if (changed) {
+        run.proofVersion = (run.proofVersion || 0) + 1;
+        scheduleSettle($, run);
+      }
+    }
+    return next(e);
+  });
+
+  on('ui.render', {component: 'UserMessage'}, async ($, e, next) => {
+    // Native read-only notification fields, independent of the DeLM board.
+    // Text, a missing task, and another plugin's message prove nothing.
+    const notification = e.props?.task;
+    if (e.props?.origin?.kind === 'task-notification' && notification?.id
+        && ['completed', 'failed', 'killed'].includes(notification.status)) {
+      const run = await currentRun($, false);
+      const task = run?.background?.[notification.id];
+      if (task && !task.stopped && (!notification.toolUseId || notification.toolUseId === task.toolUseId)) {
+        task.stopped = true;
+        task.proof = {source: 'native-task-notification', status: notification.status};
+        run.proofVersion = (run.proofVersion || 0) + 1;
+        $.clock.after(0, async () => {
+          try { await persist($, run); scheduleSettle($, run); }
+          catch (error) { await reportFailure($, run, error); }
+        });
+      }
     }
     return next(e);
   });
@@ -625,6 +909,7 @@ export function register(on) {
             });
           }
           worker.turn = null;
+          updateBoard($, run);
           if (e.reason === 'answer' && !e.isAborted && !run.stopping && worker.lastUpdate
               && worker.lastUpdate.revision > worker.acknowledgedRevision) {
             await resume($, run, {agent_id: e.agentId, ...worker.lastUpdate});
@@ -636,8 +921,29 @@ export function register(on) {
   });
 
   on('prompt.submit', async ($, e, next) => {
-    const run = await currentRun($);
-    if (!run || run.finished || e.origin.kind === 'plugin' || e.text.startsWith('/')) return next(e);
+    const run = await currentRun($, false);
+    if (!run) restoreInBackground($);
+    if (run && e.origin.kind === 'plugin' && e.origin.name === $.plugin.name) {
+      const control = run.controls?.find(value => !value.admitted && value.text === e.text);
+      if (control) {
+        if (obsoleteControl(run, control)) return {drop: 'DeLM no longer needs this worker control.'};
+        if (control.kind === 'resume' && hasPendingCompletion(run)) {
+          (run.heldResumes ||= {})[control.agentId] = {message: control.message, control: control.text};
+          // Retire this admission so a later event-driven retry has its own
+          // record; no parent model call is needed while completion is pending.
+          control.admitted = true;
+          control.turn = 'held';
+          return {drop: 'DeLM is waiting for a native completion already in progress.'};
+        }
+        control.admitted = true;
+        await persist($, run);
+        return next(e);
+      }
+    }
+    // The run owns execution resources until cleanup, but owns conversation
+    // input only while actively working. Failed/restored runs must not trap
+    // ordinary Claude prompts behind a dead bridge or a stop request.
+    if (!ownsConversation(run) || e.origin.kind === 'plugin' || e.text.startsWith('/')) return next(e);
     if (!['composer', 'bridge', 'sdk'].includes(e.origin.kind)) return next(e);
     try { followupText(e); }
     catch (error) { return {drop: String(error.message || error)}; }
@@ -646,10 +952,11 @@ export function register(on) {
     run.updating = new Promise(resolve => { release = resolve; });
     const control = 'DeLM is forwarding this update to its native peers. Keep this parent a lightweight control channel; do not duplicate their implementation or checks.';
     let accepted;
+    let admitted = false;
     try {
       await previous;
+      if (!ownsConversation(run)) return next(e);
       if (!await current($, run)) return {drop: 'The conversation changed before DeLM could forward this update.'};
-      run.inputFailure = null;
       // Native and installed prompt middleware may refuse or rewrite input.
       // Forward its accepted text and additional context, never a discarded prompt.
       accepted = await next({...e, context: [...(e.context || []), control]});
@@ -657,14 +964,26 @@ export function register(on) {
       if (!await current($, run)) throw new Error('The conversation changed before this update reached DeLM.');
       const text = followupText({...e, ...accepted, context: (accepted.context || []).filter(value => value !== control)});
       await request($, run, 'update', {text});
+      admitted = true;
+      // An accepted revision won before begin_settle closed admission. Fence
+      // out the old timer and allow this revision's delivery actions through.
+      if (run.finalization && run.finalization.revision < run.revision) {
+        run.retryTimer?.cancel(); run.retryTimer = null;
+        run.finalization = null;
+        run.stopping = false;
+      }
+      run.phase = 'working';
       run.failure = null;
+      run.completionPending = {};
       await persist($, run);
+      releaseHeldResumes($, run);
       return accepted;
     } catch (error) {
-      run.inputFailure = 'DeLM could not deliver this update. ' + String(error.message || error)
-        + ' Do not claim the peers received it or implement it in the parent.';
-      await reportFailure($, run, error);
-      return accepted || {drop: run.inputFailure};
+      await reportFailure($, run, admitted
+        ? new Error('DeLM accepted this update, but could not save its control state: ' + String(error.message || error)) : error);
+      if (admitted) return accepted;
+      return {drop: 'DeLM could not confirm delivery of this update. ' + String(error.message || error)
+        + ' It will not be implemented in the parent or replayed automatically. You can continue chatting normally here; use the DeLM board to finish or recover the run.'};
     } finally {
       release();
     }
@@ -672,6 +991,7 @@ export function register(on) {
 
   on('session.end', async ($, e, next) => {
     const session = e.sessionId || await $.session.id();
+    restoreAttempts.delete(session);
     generations.set(session, (generations.get(session) || 0) + 1);
     const run = runs.get(session);
     restores.delete(session);
@@ -683,7 +1003,7 @@ export function register(on) {
       await persist($, run);
       // The host's total session.end budget is 1.5 seconds. Cancel admission
       // promptly; confirm native shutdown through recovery when returning.
-      try { await request($, run, 'cancel', {reason: 'Conversation ended: ' + e.reason}, 750); }
+      try { await request($, run, run.finalization?.intent === 'deliver' ? 'interrupt' : 'cancel', {reason: 'Conversation ended: ' + e.reason}, 750); }
       catch { /* Durable recovery keeps unfinished work and verifies shutdown. */ }
     }
     return next(e);

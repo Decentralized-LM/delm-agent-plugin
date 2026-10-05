@@ -58,7 +58,7 @@ def fixture_source(path):
     for name in ("src", "plugin"):
         shutil.copytree(SOURCE / name, path / name)
     (path / "skills/run/SKILL.md").write_text("---\nname: run\ndescription: Run an explicitly requested DeLM task.\n---\nUse the bundled runtime.\n")
-    for name in ("install_support.py", "install.sh", "uninstall.sh", "migrate.sh", "build.py", "build.sh", "dependency_notices.py", "verify_claude_native.py"):
+    for name in ("install_support.py", "maintenance.py", "install.sh", "uninstall.sh", "migrate.sh", "build.py", "build.sh", "dependency_notices.py", "verify_claude_native.py"):
         shutil.copy2(SOURCE / "scripts" / name, path / "scripts" / name)
     version = json.loads((path / ".codex-plugin/plugin.json").read_text())["version"]
     package_release.write_json(path / "hosts/claude/.claude-plugin/plugin.json", {
@@ -197,6 +197,9 @@ class InstallationPreflightTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="delm preflight ")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
+        home_patch = mock.patch.dict(os.environ, HOME=str(self.root))
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
         self.home = self.root / "codex home"
         self.home.mkdir()
         (self.home / "config.toml").write_text("# preserve config\n")
@@ -285,6 +288,9 @@ class NativeInstallationTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="delm native plugin fixtures ")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
+        home_patch = mock.patch.dict(os.environ, HOME=str(self.root))
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
         self.source = fixture_source(self.root / "source with spaces")
         self.package = fixture_package(self.source)
         self.codex_home = self.root / "isolated codex home"
@@ -334,6 +340,23 @@ class NativeInstallationTests(unittest.TestCase):
         self.assertIn("files changed", self.invoke("install", success=False).stderr)
         self.assertEqual((cached / "user-note.txt").read_text(), "keep me")
         self.assertTrue(self.installation.installed(self.installation.marketplace()))
+
+    def test_run_started_during_build_blocks_native_activation(self):
+        native_run = subprocess.run
+
+        def start_run_during_build(command, **kwargs):
+            if command == [str(self.source / "scripts/build.sh")]:
+                run = self.root / "Library/Application Support/DeLM/runs/11111111-2222-4333-8444-555555555555"
+                run.mkdir(parents=True)
+                (run / "run.json").write_text('{"status":"running"}')
+                return subprocess.CompletedProcess(command, 0)
+            return native_run(command, **kwargs)
+
+        with mock.patch.object(install_support.subprocess, "run", side_effect=start_run_during_build):
+            with self.assertRaisesRegex(RuntimeError, "active or needs recovery"):
+                self.installation.install()
+        self.assertIsNone(self.installation.marketplace())
+        self.assertIsNone(self.installation.receipt())
 
     def test_install_refuses_staged_portable_manifest_that_disables_native_hooks(self):
         (self.package / "plugin.json").write_text('{"name":"delm","version":"0.3.0"}')
@@ -497,6 +520,11 @@ class NativeInstallationTests(unittest.TestCase):
 
 class BuildTests(unittest.TestCase):
     def setUp(self):
+        home = tempfile.TemporaryDirectory(prefix="delm build test home ")
+        self.addCleanup(home.cleanup)
+        home_patch = mock.patch.dict(os.environ, HOME=home.name)
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
         validator = mock.patch.object(package_release, "validate_claude_package", side_effect=fixture_claude_validation)
         self.native_validation = validator.start()
         self.addCleanup(validator.stop)

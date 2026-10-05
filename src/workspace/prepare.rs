@@ -464,6 +464,7 @@ pub(super) fn capture(
             );
             continue;
         }
+        validate_input_format(root, path, entry)?;
         if recognized_credential(root, path, entry)? {
             selected.remove(path);
             exclusions.insert(
@@ -524,7 +525,7 @@ pub(super) fn capture(
     ))
 }
 
-fn recognized_credential(root: &File, path: &str, entry: &FileEntry) -> Result<bool> {
+pub(super) fn recognized_credential(root: &File, path: &str, entry: &FileEntry) -> Result<bool> {
     let name = Path::new(path)
         .file_name()
         .and_then(OsStr::to_str)
@@ -569,6 +570,16 @@ fn recognized_credential(root: &File, path: &str, entry: &FileEntry) -> Result<b
         {
             return Ok(true);
         }
+    }
+    Ok(false)
+}
+
+fn validate_input_format(root: &File, path: &str, entry: &FileEntry) -> Result<()> {
+    if entry.kind == FileKind::File {
+        let mut file = open_relative(root, path, false)?;
+        let mut buffer = [0u8; 8192];
+        let count = file.read(&mut buffer)?;
+        let bytes = &buffer[..count];
         ensure!(
             !bytes.starts_with(b"version https://git-lfs.github.com/spec/v1\n"),
             "unresolved LFS pointer requires an adapter: {path}"
@@ -579,7 +590,7 @@ fn recognized_credential(root: &File, path: &str, entry: &FileEntry) -> Result<b
             "database input requires a saved database adapter: {path}"
         );
     }
-    Ok(false)
+    Ok(())
 }
 
 fn clone_selected(

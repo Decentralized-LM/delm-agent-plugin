@@ -30,7 +30,9 @@ Use Claude Code 2.1.289 or later with your normal login. The plugin uses officia
 
 Click a task or shared entry for details; **Back** returns to the overview. **Hide board** closes the view while work continues. Reopen it with `/delm-status` or **Show board** in the compact status. Opening and updating the board add no model calls. Keep typing follow-ups in the normal prompt, and answer questions or permissions through Claude's normal interface. `/delm-stop` requests cancellation; the board shows **Stopping** until shutdown and saving are confirmed.
 
-The final board distinguishes applied changes, required local verification, recovery, and cleanup. When local verification is required, use Claude's final handoff for its outcome; the board does not observe the parent's later checks. If updates disconnect, the last snapshot remains marked as disconnected, which does not mean the run stopped. `/delm-status` retries the view and provides a short text summary if the pane is unavailable. Merely opening or hiding the board does not recover, resume, or cancel a run.
+The final board distinguishes applied changes, required local verification, recovery, and cleanup. When local verification is required, use Claude's final handoff for its outcome; the board does not observe the parent's later checks. If updates disconnect, the last snapshot remains marked as disconnected, which does not mean the run stopped. `/delm-status` retries the view and provides a short text summary if the pane is unavailable. Merely opening or hiding the board does not recover, resume, or cancel a run. **Retry finishing**, when offered, explicitly retries shutdown and delivery of the selected result; `/delm-stop` instead cancels and saves partial work.
+
+Ordinary prompts are forwarded to the peers only while DeLM is actively working. Finishing, stopping, failed and recovery states release the normal Claude conversation, including after a restart. You can ask Claude to investigate while the run's work and recovery controls remain preserved. An update that loses the finalization race is reported as undelivered; it is not silently replayed as a new task. Starting another DeLM run in the same project still requires resolving the previous run's ownership.
 
 Two native conversation forks inherit the current session's model, system prompt, history, and available tools. A short parent launch turn makes the Agent calls through Claude's ordinary permissions. Task updates reach both peers under their existing identities. An active peer receives the update with plugin provenance and starts a fresh native turn before acknowledging the new revision; native SendMessage resumes peers when needed. DeLM does not change the permission mode or add allow rules. Claude surfaces background-agent permission prompts in the main session through its [native Agent behavior](https://code.claude.com/docs/en/tools-reference).
 
@@ -52,13 +54,13 @@ Separate browser contexts or test data allow independent checks against the same
 
 ## Results and recovery
 
-Successful delivery writes the assembled source changes into the original project. It preserves the Git index and unrelated files. Compatible concurrent text edits are merged; overlapping changes, incompatible binary edits, and file/directory type transitions are reported as conflicts.
+Successful delivery writes the assembled source changes and declared requested artifacts into the original project. Workers declare project-relative output paths at completion, including files in ignored output directories, or explicitly declare a source-only result. The same accepted file contract is checked after shutdown and used for delivery. Additional custom output is saved for review; incidental build files do not turn an otherwise successful, fully declared result into a failure. If the worker never accounts for requested artifacts, delivery reports that uncertainty. Disposable ignored caches and dependency environments are separate from accepted outputs. Delivery preserves the Git index and unrelated files. Compatible concurrent text edits are merged; overlapping changes, incompatible binary edits, and file/directory type transitions are reported as conflicts.
 
 Dependency directories are not copied wholesale. When dependency manifests change, worker-local dependency environments are omitted, or delivery merges user edits, the result has `verification_required`. The report identifies omitted environments in `environment_directories_omitted`. The parent host must perform the necessary setup or focused check in the original project before reporting the task ready. This does not require repeating an unchanged full acceptance suite.
 
 Both worker directories and the temporary baseline are removed after confirmed shutdown and durable delivery or recovery. Cancellation saves useful partial source changes before cleanup. Conflicting or interrupted delivery retains changed-content blobs and a journal; it does not automatically overwrite the project or roll back later edits. Successful replacements also retain displaced original file inodes at the reported recovery path, preserving saves made through already-open editor descriptors. A detected concurrent change produces a recovery outcome. This is guarded per-path delivery, not a globally atomic transaction with external writers. If process ownership, storage, or cleanup cannot be confirmed, the runtime preserves what remains and reports the failure.
 
-Ask Codex to stop, or use `/delm-stop` in Claude Code, to request cancellation. Wait for confirmed shutdown before disabling, updating, or removing the plugin. Codex cancellation hooks must remain enabled and trusted to receive native events. Claude's module must remain loaded to coordinate native agent stops. Owner checks, durable recovery records, and the execution deadline provide separate protections; they do not justify removing an active run's lifecycle integration. The ordinary deadline begins after required startup.
+Ask Codex to stop, or use `/delm-stop` in Claude Code, to request cancellation. Wait for confirmed shutdown before disabling, updating, or removing the plugin. Codex cancellation hooks must remain enabled and trusted to receive native events. Claude's module must remain loaded to coordinate native agent stops. Owner checks, durable recovery records, and the execution deadline provide separate protections; they do not justify removing an active run's lifecycle integration. The execution allowance starts after project preparation: Codex includes native initialization and worker admission, while Claude includes the native launch after its ready contract. It is not a guarantee of that many minutes of model execution.
 
 Run records live under `~/Library/Application Support/DeLM/runs/`. These may contain private source, conversation inputs, native events, and recovery material. Share only the redacted evidence needed for a bug report. Temporary previews stop with the run; a new preview must run from the original project.
 
@@ -75,11 +77,24 @@ The native runtime provides local support commands for both hosts. From a source
 
 Both packages contain the same runtime; a Claude-only source build can use `./.build/plugin-claude/bin/delm`. For an installed plugin, use its current runtime executable. Codex records the retained executable as `control_executable`; Claude records it as `ready.executable` in native control state. These commands require a runtime containing the support commands; use the current build to inspect records created by older releases. These support commands do not start a model, renew a run's monitoring lease, or alter the project. `runs` shows local project paths so you can identify work; use `report`, rather than the run listing or raw state, when sharing diagnostics.
 
-The report uses an explicit export allowlist: host, run identity, delivery flags, counts, and timing measurements. It excludes project paths, source, prompts, command text, native output, credentials, and recovery contents. Output files are created with owner-only permissions; an existing file is never overwritten.
+The report uses an explicit export allowlist: host, recorded versions where available, run identity, finalization stage and reason, delivery flags, counts, and timing measurements. Missing historical fields remain unavailable; the reporting binary's version is separate from the version that ran the task. Reports exclude project paths, source, prompts, command text, native output, credentials, and recovery contents. Output files are created with owner-only permissions; an existing file is never overwritten.
 
 Timing separates preparation, worker admission, shutdown, delivery with cleanup, and recovery with cleanup where recorded. Native worker-turn overlap includes model execution, tools, and host waits; it is not a direct measure of useful work or a speedup claim. Waiting durations count completed waits, and open intervals are identified separately. Older or partial evidence leaves unavailable metrics empty. Parent work after runtime completion is outside this measurement. Recorded coordination-response sizes and repeated checks with identical commands, scoped inputs, and request revisions help identify overhead; repeated evidence alone does not establish unnecessary testing or equivalent environments.
 
 Storage sizes are logical file lengths. APFS copy-on-write sharing means they do not predict how much physical disk space deletion would recover.
+
+## Exporting saved partial changes
+
+Inspect a completed recovery bundle, then export one worker's changes into a new folder:
+
+```sh
+./.build/plugin/bin/delm recover --run-id <RUN_ID>
+./.build/plugin/bin/delm recover --run-id <RUN_ID> --worker 1 --output ../delm-recovered
+```
+
+The export verifies saved content hashes and writes `files/` for changed results, `base/` for their original versions, and `manifest.json` for deletions, file metadata and inert symlink targets. It is a set of partial changes: unchanged project files are not included. Review it against your current project before applying anything. The command never overwrites an existing destination or changes the original project. The output contains local paths and file metadata; use `report` for shareable diagnostics.
+
+An incomplete bundle is refused while its remaining workspaces stay preserved. Delivery journals can also contain displaced originals from successful or interrupted application; those are retained independently and are not presented as a completed partial-change export.
 
 ## Cleaning verbose diagnostics
 
@@ -97,6 +112,8 @@ Cleanup requires confirmed delivery, completed workspace cleanup, confirmed nati
 ## Updating and removing the plugin
 
 For a published marketplace installation, the [common installer](../packages/installer/README.md#host-selection) supports `update`, `remove`, and `status` with the same host detection and choice as installation. Pass `--host codex`, `--host claude`, or `--host both` to select explicitly. You can also use the native commands below. Update and removal are separate operations. Stop active work first.
+
+The common installer and source activation scripts refuse active or uncertain runs. A fully stopped run with no temporary workspaces and a verified recovery bundle can remain saved while you update or remove the plugin. Saved work is not deleted by maintenance. These checks are preflight checks, so do not start a new run concurrently with maintenance.
 
 ### Codex
 

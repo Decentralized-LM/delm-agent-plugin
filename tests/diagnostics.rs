@@ -1,6 +1,7 @@
 //! Support commands use isolated storage and never launch a model.
 #![cfg(target_os = "macos")]
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -96,6 +97,96 @@ impl Fixture {
         );
         serde_json::from_slice(&output.stdout).unwrap()
     }
+}
+
+#[test]
+fn recovery_cli_exports_verified_partial_changes_without_touching_project() {
+    let fixture = Fixture::new("claude");
+    let bundle = fixture.run.join("workspace/recovery");
+    fs::create_dir(&bundle).unwrap();
+    let bytes = b"saved requested output";
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    let entry = json!({"kind":"file","size":bytes.len(),"mode":0o644,"sha256":digest,
+        "link_target":null,"xattrs_sha256":"","xattrs_bytes":0,"acl_sha256":"","flags":0});
+    fs::write(bundle.join(&digest), bytes).unwrap();
+    fs::write(
+        bundle.join("complete.json"),
+        json!({"version":1,
+        "original":fixture.home.join("project").canonicalize().unwrap(),
+        "workers":[{"worker":0,"changes":{"renders/report.txt":[null,entry]}}]})
+        .to_string(),
+    )
+    .unwrap();
+    let inspection = Fixture::json(fixture.command("recover").output().unwrap());
+    assert_eq!(inspection["workers"][0]["worker"], 1);
+    assert_eq!(inspection["partial"], true);
+    assert_eq!(inspection["verified_blobs"], 1);
+    let destination = fixture.home.join("recovered");
+    let export = Fixture::json(
+        fixture
+            .command("recover")
+            .args(["--worker", "1", "--output"])
+            .arg(&destination)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(export["partial"], true);
+    assert_eq!(
+        fs::read(destination.join("files/renders/report.txt")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.home.join("project/source.js")).unwrap(),
+        "original"
+    );
+    assert!(destination.join("manifest.json").is_file());
+    assert!(
+        !fixture
+            .command("recover")
+            .args(["--worker", "1", "--output"])
+            .arg(&destination)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        !fixture
+            .command("recover")
+            .args(["--worker", "1"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let complete = fs::read(bundle.join("complete.json")).unwrap();
+    let mut mismatched: Value = serde_json::from_slice(&complete).unwrap();
+    mismatched["original"] = json!(fixture.home.join("another-project"));
+    fs::write(bundle.join("complete.json"), mismatched.to_string()).unwrap();
+    let wrong_output = fixture.home.join("wrong-export");
+    let rejected = fixture
+        .command("recover")
+        .args(["--worker", "1", "--output"])
+        .arg(&wrong_output)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("different project"));
+    assert!(!wrong_output.exists());
+    fs::write(bundle.join("complete.json"), complete).unwrap();
+    fs::write(bundle.join(&digest), "damaged").unwrap();
+    assert!(
+        !fixture
+            .command("recover")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read(destination.join("files/renders/report.txt")).unwrap(),
+        bytes
+    );
 }
 
 #[test]

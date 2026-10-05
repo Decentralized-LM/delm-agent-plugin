@@ -5,14 +5,19 @@ const STORE = 'native-board:';
 const MAX_LINE = 256 * 1024;
 const COLLECTIONS = new Set(['tasks', 'shared', 'checks']);
 const observedRuns = new Map();
+const retryFinishActions = new Map();
 const preferenceWrites = new Map();
 
-export function observeBoard(run) {
+export function observeBoard(run, retryFinish) {
+  // An explicit action closure stays in the host module's native API scope.
+  // Passing the native $ context through a dynamic callback is not supported.
+  if (retryFinish) retryFinishActions.set(run.session, retryFinish);
   // Copy only presentation facts, never the transport credentials or worker messages.
   observedRuns.set(run.session, {
     session: run.session, ready: {run_id: run.ready?.run_id}, revision: run.revision,
     agents: Object.fromEntries(nativeAgents(run).map(agent => [agent.id, agent])),
     finished: run.finished, ending: run.ending, stopping: run.stopping, failure: run.failure,
+    phase: run.phase, canRetryFinish: Boolean(run.canRetryFinish), conversationAvailable: Boolean(run.conversationAvailable),
     final: run.final ? {status: run.final.status, delivery: run.final.delivery} : null,
   });
 }
@@ -27,10 +32,12 @@ function nativeAgents(run) {
 function initialSnapshot(run, session) {
   const final = run?.final || {};
   const delivery = final.delivery || {};
+  const artifacts = Array.isArray(delivery.artifacts) ? delivery.artifacts : [];
+  const undelivered = Array.isArray(delivery.undelivered_outputs) ? delivery.undelivered_outputs : [];
   return {
     schema_version: 1, type: 'view', session_id: session, run_id: run?.ready?.run_id || null,
     revision: run?.revision || 1, status: run?.failure ? 'recovery_required'
-      : final.status || (run?.ending ? 'interrupted' : run?.stopping ? 'stopping' : 'prepared'),
+      : final.status || run?.phase || (run?.ending ? 'interrupted' : run?.stopping ? 'stopping' : 'prepared'),
     finished: Boolean(run?.finished), agents: nativeAgents(run).map(agent => ({
       slot: agent.slot, native_agent_id: agent.id,
       native_state: agent.turn && agent.status === 'running' ? 'working'
@@ -43,6 +50,11 @@ function initialSnapshot(run, session) {
       verification_required: delivery.verification_required ?? null,
       cleanup_complete: delivery.cleanup_complete ?? null,
       reason: run?.failure ? cleanText(run.failure) : null,
+      artifacts: artifacts.slice(0, 16).map(path => cleanText(path, 512)),
+      artifacts_total: artifacts.length,
+      artifacts_declared: delivery.artifacts_declared === true,
+      undelivered_outputs: undelivered.slice(0, 16).map(path => cleanText(path, 512)),
+      undelivered_outputs_total: undelivered.length,
     }, freshness: {unavailable: ['board']},
   };
 }
@@ -74,10 +86,17 @@ export function acceptsSnapshot(previous, incoming) {
     && incoming.source.board_sequence >= previous.source.board_sequence;
 }
 
-// The view owns no lifecycle operations. All failures stay in this instance.
+// Observation never mutates lifecycle. The explicit retry control delegates to
+// the host, which revalidates the current session and delivery intent.
 let active = null;
 let generation = 0;
 let lookupOverride;
+let retryFinishAction;
+function canRetry(session) { return retryFinishActions.has(session) || Boolean(retryFinishAction); }
+function retryFinishing(session) {
+  const action = retryFinishActions.get(session);
+  return action ? action() : retryFinishAction?.(session);
+}
 
 async function readRun($, session) {
   const value = lookupOverride ? await lookupOverride(null, session)
@@ -127,6 +146,8 @@ function replace(session, run) {
     session, runId: run?.ready?.run_id || null, generation: ++generation,
     snapshot: run ? initialSnapshot(run, session) : null,
     nativeAgents: nativeAgents(run), nativeRevision: 0,
+    canRetryFinish: Boolean(canRetry(session) && run?.canRetryFinish), conversationAvailable: Boolean(run?.conversationAvailable),
+    hostFailure: run?.failure ? cleanText(run.failure, 600) : null,
     screen: {kind: 'overview'}, pages: {}, pagePrevious: {}, history: [], hidden: false, paneShown: false,
     disconnected: false, attention: null, phase: run ? null : 'preparing',
     streamGeneration: 0, detailGeneration: 0, retries: 0, writes: Promise.resolve(),
@@ -197,9 +218,9 @@ function readFinal($, state) {
 function accept($, state, value) {
   if (!valid(state) || !acceptsSnapshot(state.snapshot, value)) return false;
   state.snapshot = value;
-  state.phase = null;
+  state.phase = !value.finished && state.hostFailure ? 'recovery_required' : null;
   state.disconnected = false;
-  state.attention = value.outcome?.reason || null;
+  state.attention = (!value.finished && state.hostFailure) || value.outcome?.reason || null;
   state.retries = 0;
   if (value.finished) {
     remember($, state);
@@ -261,8 +282,14 @@ function observe($, run) {
   state.runId = run.ready?.run_id || state.runId;
   state.nativeAgents = nativeAgents(run); state.nativeRevision++;
   if (!state.snapshot) state.snapshot = initialSnapshot(run, state.session);
-  if (run.stopping && !run.finished) state.phase = 'stopping';
-  if (run.failure) state.attention = cleanText(run.failure, 600);
+  state.canRetryFinish = Boolean(canRetry(state.session) && run.canRetryFinish && !run.finished);
+  state.conversationAvailable = Boolean(run.conversationAvailable);
+  state.hostFailure = run.failure ? cleanText(run.failure, 600) : null;
+  // Host observations cannot leave a stale stopping phase over a new durable
+  // revision. A current host error is still an independent attention fact.
+  state.phase = !state.snapshot?.finished && state.hostFailure ? 'recovery_required' : state.snapshot?.source ? null
+    : run.phase || (run.stopping && !run.finished ? 'stopping' : null);
+  state.attention = (!state.snapshot?.finished && state.hostFailure) || state.snapshot?.outcome?.reason || null;
   if (run.finished && !state.snapshot.finished) {
     // Keep the watcher until it reads the durable final result and coordination state.
     state.phase = run.final?.status || null;
@@ -403,6 +430,7 @@ function actions($, state) {
         view_revision: group?.view_revision ?? state.snapshot?.revision,
         view_board_sequence: group?.view_board_sequence ?? state.snapshot?.source?.board_sequence}, key);
       if (id == null && COLLECTIONS.has(collection)) ignore(page($, state, collection, 0, null, true));
+      else if (id != null && !item && COLLECTIONS.has(collection)) ignore(refresh($, state));
     },
     back: () => {
       if (!valid(state)) return;
@@ -412,6 +440,24 @@ function actions($, state) {
     },
     page: (collection, offset) => { ignore(page($, state, collection, offset)); },
     refresh: () => { if (valid(state)) ignore(refresh($, state)); },
+    retryFinish: () => {
+      if (!valid(state) || !state.canRetryFinish || state.retryingFinish || !canRetry(state.session)) return;
+      state.retryingFinish = true; invalidate($, state);
+      ignore((async () => {
+        try {
+          if (await $.session.id() !== state.session || !valid(state)) return;
+          await retryFinishing(state.session);
+          if (valid(state)) {
+            const run = await readRun($, state.session);
+            if (run && valid(state)) observe($, run);
+          }
+        } catch (error) {
+          if (valid(state)) state.attention = cleanText(error?.message || error, 600);
+        } finally {
+          if (valid(state)) { state.retryingFinish = false; invalidate($, state); }
+        }
+      })());
+    },
     hide: () => {
       if (!valid(state)) return;
       state.hidden = true; state.paneShown = false; remember($, state);
@@ -481,9 +527,9 @@ async function clearForeignView($) {
     return null;
   }
 }
-export function registerBoard(on, {lookup} = {}) {
+export function registerBoard(on, {lookup, retryFinish} = {}) {
   dispose(active); active = null; generation++;
-  observedRuns.clear(); lookupOverride = lookup;
+  observedRuns.clear(); retryFinishActions.clear(); lookupOverride = lookup; retryFinishAction = retryFinish;
   on('ui.render', {component: 'Pane', requestId: PANE}, ($, e, next) => draw($, e, next, false));
   on('ui.render', {component: 'AbovePrompt'}, ($, e, next) => draw($, e, next, true));
   on('ui.close', {id: PANE}, async ($, e, next) => {

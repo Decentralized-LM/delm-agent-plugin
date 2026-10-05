@@ -12,6 +12,7 @@ import tempfile
 import uuid
 
 from install_support import fingerprint, locked, package_files
+from maintenance import assert_maintenance_safe
 from dependency_notices import FILENAME as DEPENDENCY_NOTICES, validate as validate_dependency_notices
 
 
@@ -175,6 +176,12 @@ def build(source, prebuilt=None, host="codex", claude="claude"):
                 raise RuntimeError(f"Refusing to replace an unrelated path: {published}")
             staged.append((selected, package, published))
         # Validate every requested package before making any new package active.
+        # Codex uses a copied native cache; staging it is offline. Claude's
+        # directory installation can load this path in place, so protect that
+        # adapter before activation. Unrelated known package roots are safe.
+        for selected, package, published in staged:
+            if selected == "claude" and os.path.lexists(published):
+                assert_maintenance_safe(selected, package=published)
         for selected, package, published in staged:
             if os.path.lexists(published):
                 # Retain previous packages; they may contain qualification artifacts.

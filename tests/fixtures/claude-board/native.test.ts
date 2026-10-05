@@ -7,8 +7,8 @@ test('task and contribution buttons navigate through the native handler chain', 
   await pane.press({key: 'task-3'});
   expect(await pane.find({type: 'Text', text: 'Task detail'})).toBeDefined();
   await pane.press({key: 'board-back'});
-  expect(await pane.find({key: 'shared-publication-1'})).toBeDefined();
-  await pane.press({key: 'shared-publication-1'});
+  expect(await pane.find({key: 'shared-5'})).toBeDefined();
+  await pane.press({key: 'shared-5'});
   expect(await pane.find({type: 'Text', text: 'Shared context detail'})).toBeDefined();
   expect(await pane.find({type: 'Text', text: 'Imported by Agent 2'})).toBeDefined();
   await pane.press({key: 'board-back'});

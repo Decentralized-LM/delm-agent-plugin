@@ -62,6 +62,17 @@ struct Ticket {
     arguments: Value,
 }
 
+#[derive(Clone, Serialize)]
+struct Finalization {
+    generation: u64,
+    revision: u64,
+    intent: &'static str,
+    reason: &'static str,
+    started: bool,
+    attempt: u64,
+    shutdown_ack: &'static str,
+}
+
 pub(super) struct Controller {
     _lock: Option<RunLock>,
     workspace: PreparedWorkspace,
@@ -76,6 +87,11 @@ pub(super) struct Controller {
     services: Services,
     tickets: HashMap<String, Ticket>,
     candidate: Option<(usize, Completion)>,
+    finalization: Option<Finalization>,
+    final_result: Option<Value>,
+    host_version: Option<String>,
+    package_root: Option<PathBuf>,
+    retained_artifacts: Vec<String>,
     journal: Journal,
     stop_requested: bool,
     finished: bool,
@@ -240,6 +256,11 @@ impl Controller {
             services: Services::default(),
             tickets: HashMap::new(),
             candidate: None,
+            finalization: None,
+            final_result: None,
+            host_version: None,
+            package_root: None,
+            retained_artifacts: Vec::new(),
             journal,
             stop_requested: false,
             finished: false,
@@ -294,7 +315,7 @@ impl Controller {
         json!({"run_id":self.workspace.run_dir.file_name().unwrap_or_default().to_string_lossy(),
             "run_dir":self.workspace.run_dir,"session_id":self.session_id,"revision":self.revision,
             "workers":[{"slot":1,"cwd":self.workspace.workers[0]},{"slot":2,"cwd":self.workspace.workers[1]}],
-            "task":self.task,"status":self.status})
+            "task":self.task,"status":self.status,"finalization":self.finalization})
     }
 
     pub(super) fn finished(&self) -> bool {
@@ -353,6 +374,14 @@ impl Controller {
                     "Invalid transport token digest"
                 );
                 self.token_digest = Some(digest.to_ascii_lowercase());
+                self.host_version = request["host_version"]
+                    .as_str()
+                    .filter(|value| !value.is_empty() && value.len() <= 128)
+                    .map(str::to_owned);
+                self.package_root = request["package_root"]
+                    .as_str()
+                    .filter(|value| value.len() <= 16384 && Path::new(value).is_absolute())
+                    .map(PathBuf::from);
                 Ok(json!({"registered":true}))
             }
             "bind" => self.bind(request),
@@ -376,21 +405,95 @@ impl Controller {
                 self.candidate = None;
                 self.tickets.clear();
                 self.status = "stopping".into();
+                if self
+                    .finalization
+                    .as_ref()
+                    .is_none_or(|value| value.intent != "cancel")
+                {
+                    self.prepare_finalization(
+                        "cancel",
+                        stop_reason(text(request, "reason", 4096)?),
+                    );
+                }
                 self.journal.record(
                     "claude_cancelled",
                     &json!({"reason":text(request,"reason",4096)?}),
                 )?;
                 Ok(
-                    json!({"actions":[{"type":"stop","reason":"cancelled","agents":self.bound_agents()}]}),
+                    json!({"actions":[{"type":"stop","reason":self.finalization.as_ref().unwrap().reason,"agents":self.bound_agents(),"finalization":self.finalization}]}),
                 )
+            }
+            "interrupt" => {
+                if self.candidate.is_none() {
+                    return self
+                        .dispatch(&json!({"op":"cancel","reason":text(request,"reason",4096)?}));
+                }
+                // Bridge loss is not a user cancellation. Keep the selected
+                // result for authenticated recovery and stopped-writer checks.
+                self.tickets.clear();
+                self.status = "recovery_required".into();
+                self.journal.record(
+                    "claude_interrupted",
+                    &json!({"reason":text(request,"reason",4096)?}),
+                )?;
+                Ok(json!({"finalization":self.finalization}))
+            }
+            "begin_settle" => {
+                self.require_finalization(request)?;
+                let finalization = self.finalization.as_mut().unwrap();
+                finalization.started = true;
+                finalization.attempt = finalization.attempt.saturating_add(1);
+                finalization.shutdown_ack = "pending";
+                self.status = if finalization.intent == "deliver" {
+                    "awaiting_shutdown"
+                } else {
+                    "stopping"
+                }
+                .into();
+                Ok(json!({"finalization":self.finalization}))
+            }
+            "settlement_failed" => {
+                self.require_finalization(request)?;
+                self.finalization.as_mut().unwrap().shutdown_ack = "unconfirmed";
+                self.status = "recovery_required".into();
+                Ok(json!({"finalization":self.finalization}))
             }
             "settle" => self.settle(request),
             "status" => Ok(
                 json!({"run":self.ready(),"board":self.board.view()?,"agents":self.workers,
-                "candidate":self.candidate.as_ref().map(|(i,_)|self.workers[*i].agent_id.clone()),"finished":self.finished}),
+                "candidate":self.candidate.as_ref().map(|(i,_)|self.workers[*i].agent_id.clone()),"finished":self.finished,"final":self.final_result}),
             ),
             op => bail!("Unknown native control operation: {op}"),
         }
+    }
+
+    fn prepare_finalization(&mut self, intent: &'static str, reason: &'static str) {
+        self.finalization = Some(Finalization {
+            generation: self.sequence,
+            revision: self.revision,
+            intent,
+            reason,
+            started: false,
+            attempt: 0,
+            shutdown_ack: "pending",
+        });
+    }
+
+    fn require_finalization(&self, request: &Value) -> Result<()> {
+        let current = self
+            .finalization
+            .as_ref()
+            .context("Finalization is obsolete; refresh the run state")?;
+        ensure!(
+            request["generation"].as_u64() == Some(current.generation)
+                && request["revision"].as_u64() == Some(current.revision),
+            "Finalization is obsolete; refresh the run state"
+        );
+        ensure!(
+            self.stop_requested || self.candidate.is_some(),
+            "Run has no completed result or stop request"
+        );
+        Ok(())
     }
 
     fn bind(&mut self, r: &Value) -> Result<Value> {
@@ -614,6 +717,10 @@ impl Controller {
                 .collect::<Vec<_>>()
         );
         let mut actions = Vec::new();
+        if tool == "delm_complete" {
+            actions.push(json!({"type":"completion_intent","agent_id":self.workers[i].agent_id,
+                "turn_id":self.workers[i].turn_id,"revision":self.revision,"pending":args["outcome"] == "complete"}));
+        }
         if matches!(
             tool,
             "delm_publish"
@@ -621,6 +728,7 @@ impl Controller {
                 | "delm_task_release"
                 | "delm_task_split"
                 | "delm_task_create"
+                | "delm_complete"
         ) {
             self.wake_waiting(&mut actions,"Shared work changed. Read the board, take ready work, and reuse the new contribution.")?;
         }
@@ -706,6 +814,10 @@ impl Controller {
         let answer = r["answer"].as_str().unwrap_or("");
         self.journal.record("claude_turn_completed",&json!({"worker":i+1,"turn_id":turn,"reason":reason,"answer":answer,"revision":self.workers[i].revision}))?;
         self.journal.observe("worker_turn_finished",&json!({"worker":i+1,"turn_id":turn,"status":reason,"revision":self.workers[i].revision,"waiting":reason=="completed" && self.workers[i].revision==self.revision && self.workers[i].outcome.as_ref().is_some_and(|value|value["outcome"]=="waiting")}))?;
+        let completing = self.workers[i]
+            .outcome
+            .as_ref()
+            .is_some_and(|value| value["outcome"] == "complete");
         let mut actions = Vec::new();
         if reason != "completed" {
             self.workers[i].blocked = true;
@@ -722,13 +834,19 @@ impl Controller {
                     ensure!(!answer.trim().is_empty(),"Native completed turn has no final answer");
                     let declaration=declaration.as_ref().unwrap();
                     let shared=self.board.shared_checks(i+1,declaration,self.revision)?;
-                    let completion=Completion::capture_with_evidence(&self.workspace.workers[i],declaration,&self.workers[i].checks,self.revision,&self.workers[i].result_policy,shared)?;
+                    let completion=Completion::capture_with_evidence(&self.workspace.workers[i],declaration,&self.workers[i].checks,self.revision,&self.workers[i].result_policy,shared,&self.workspace.baseline_manifest)?;
                     atomic_json(&self.workspace.run_dir.join("completion.json"),&completion)?;
+                    if let Some(accepted) = &completion.accepted {
+                        self.retained_artifacts.extend(accepted.selection.artifacts.iter().cloned());
+                        self.retained_artifacts.sort();
+                        self.retained_artifacts.dedup();
+                    }
                     self.candidate=Some((i,completion));
+                    self.prepare_finalization("deliver", "completed_candidate");
                     self.journal.observe("phase", &json!({"phase":"shutdown","boundary":"start"}))?;
                     self.status="awaiting_shutdown".into();
                     self.tickets.clear();
-                    actions.push(json!({"type":"candidate","agent_id":self.workers[i].agent_id,"revision":self.revision}));
+                    actions.push(json!({"type":"candidate","agent_id":self.workers[i].agent_id,"revision":self.revision,"finalization":self.finalization}));
                 }
                 Some("partial")=>actions.push(self.resume(i,"Continue the concrete unfinished requirement in your declaration. Read ownership and reuse peer contributions; do not repeat completed checks.")),
                 Some("waiting")=>self.workers[i].waiting=true,
@@ -763,8 +881,15 @@ impl Controller {
                 self.journal
                     .observe("phase", &json!({"phase":"shutdown","boundary":"start"}))?;
                 self.status = "stopping".into();
-                actions.push(json!({"type":"stop","reason":"No active worker can continue","agents":self.bound_agents()}));
+                self.prepare_finalization("cancel", "no_active_workers");
+                actions.push(json!({"type":"stop","reason":"No active worker can continue","agents":self.bound_agents(),"finalization":self.finalization}));
             }
+        }
+        if completing {
+            actions.push(
+                json!({"type":"completion_intent","agent_id":self.workers[i].agent_id,
+                "turn_id":turn,"revision":self.workers[i].revision,"pending":false}),
+            );
         }
         Ok(json!({"actions":actions}))
     }
@@ -774,7 +899,17 @@ impl Controller {
         json!({"type":"resume","agent_id":self.workers[i].agent_id,"revision":self.revision,"message":message})
     }
     fn wake_waiting(&mut self, actions: &mut Vec<Value>, message: &str) -> Result<()> {
-        if self.stop_requested || self.candidate.is_some() {
+        if self.stop_requested
+            || self.candidate.is_some()
+            || self.workers.iter().any(|worker| {
+                worker.turn_id.is_some()
+                    && worker.revision == self.revision
+                    && worker
+                        .outcome
+                        .as_ref()
+                        .is_some_and(|value| value["outcome"] == "complete")
+            })
+        {
             return Ok(());
         }
         for i in 0..2 {
@@ -802,7 +937,14 @@ impl Controller {
     fn update(&mut self, r: &Value) -> Result<Value> {
         ensure!(
             !self.stop_requested,
-            "Run is already stopping; restart with the saved update after recovery"
+            "DeLM is stopping. This update was not delivered; wait for recovery before retrying it"
+        );
+        ensure!(
+            !self
+                .finalization
+                .as_ref()
+                .is_some_and(|value| value.started),
+            "DeLM is finishing delivery. This update was not delivered; retry it after finishing"
         );
         let update = text(r, "text", 128 * 1024)?;
         self.revision = self
@@ -812,6 +954,7 @@ impl Controller {
         self.task.push_str(&format!("\n\nUser update:\n{update}"));
         self.board.set_revision(self.revision)?;
         self.candidate = None;
+        self.finalization = None;
         self.tickets.clear();
         for worker in &mut self.workers {
             worker.outcome = None;
@@ -845,6 +988,11 @@ impl Controller {
     }
 
     fn settle(&mut self, r: &Value) -> Result<Value> {
+        self.require_finalization(r)?;
+        ensure!(
+            self.finalization.as_ref().unwrap().started,
+            "Native finalization has not begun"
+        );
         ensure!(
             self.stop_requested || self.candidate.is_some(),
             "Run has no completed result or stop request"
@@ -890,6 +1038,7 @@ impl Controller {
                 &known,
             )?;
             quiet = true;
+            self.finalization.as_mut().unwrap().shutdown_ack = "confirmed";
             self.journal.observe(
                 "phase",
                 &json!({"phase":"shutdown","boundary":"end","success":true}),
@@ -908,13 +1057,11 @@ impl Controller {
                     !self.stop_requested && candidate.revision == self.revision,
                     "Candidate is obsolete or cancelled"
                 );
-                candidate.verify(&self.workspace.workers[*i])?;
                 self.journal.observe(
                     "phase",
                     &json!({"phase":"delivery_and_cleanup","boundary":"start"}),
                 )?;
-                let delivery =
-                    workspace::deliver_result(&self.workspace, *i, &self.workers[*i].result_policy);
+                let delivery = candidate.deliver(&self.workspace, *i);
                 self.journal.observe("phase", &json!({"phase":"delivery_and_cleanup","boundary":"end","success":delivery.is_ok()}))?;
                 let delivery = delivery?;
                 self.status = if !delivery.delivered {
@@ -933,7 +1080,10 @@ impl Controller {
                     "phase",
                     &json!({"phase":"recovery_and_cleanup","boundary":"start"}),
                 )?;
-                let recovery = workspace::preserve_partial_and_cleanup(&self.workspace);
+                let recovery = workspace::preserve_partial_and_cleanup_with_artifacts(
+                    &self.workspace,
+                    &self.retained_artifacts,
+                );
                 self.journal.observe("phase", &json!({"phase":"recovery_and_cleanup","boundary":"end","success":recovery.is_ok()}))?;
                 let recovery = recovery?;
                 self.status = "stopped".into();
@@ -943,12 +1093,14 @@ impl Controller {
         match result {
             Ok(final_event) => {
                 self.finished = true;
+                self.final_result = Some(final_event.clone());
                 self.tickets.clear();
                 self.journal.record("claude_final", &final_event)?;
                 Ok(json!({"actions":[final_event]}))
             }
             Err(error) => {
                 if !quiet {
+                    self.finalization.as_mut().unwrap().shutdown_ack = "unconfirmed";
                     self.journal.observe(
                         "phase",
                         &json!({"phase":"shutdown","boundary":"end","success":false}),
@@ -964,12 +1116,13 @@ impl Controller {
                     // The delivery engine keeps its transaction journal and
                     // displaced bytes outside the removable worker directories.
                     // Preserve both source deltas before removing their copies.
-                    match workspace::preserve_partial_and_cleanup(&self.workspace) {
+                    match workspace::preserve_partial_and_cleanup_with_artifacts(&self.workspace, &self.retained_artifacts) {
                         Ok(recovery) => {
                             self.finished = true;
                             self.tickets.clear();
                             let final_event = json!({"type":"final","status":"recovery_required","reason":reason,
                                 "recovery":recovery,"delivery_journal":self.workspace.run_dir.join("workspace/delivery/journal.json")});
+                            self.final_result = Some(final_event.clone());
                             self.journal.record("claude_final", &final_event)?;
                             return Ok(json!({"actions":[final_event]}));
                         }
@@ -985,11 +1138,27 @@ impl Controller {
     fn persist(&self) -> Result<()> {
         atomic_json(
             &self.workspace.run_dir.join("claude.json"),
-            &json!({"version":1,"host":"claude","session_id":self.session_id,
+            &json!({"version":1,"host":"claude","runtime_version":env!("CARGO_PKG_VERSION"),"host_version":self.host_version,"package_root":self.package_root,"session_id":self.session_id,
             "workspace":self.workspace,"project":self.workspace.original,"token_digest":self.token_digest,"task":self.task,"revision":self.revision,"sequence":self.sequence,"native_host":self.native_host,
             "runtime":self.runtime,"workers":self.workers,"services":self.services.process_identities(),"candidate":self.candidate,"status":self.status,
-            "stop_requested":self.stop_requested,"finished":self.finished}),
+            "stop_requested":self.stop_requested,"finished":self.finished,"finalization":self.finalization,"final_result":self.final_result,"retained_artifacts":self.retained_artifacts}),
         )
+    }
+}
+
+fn stop_reason(reason: &str) -> &'static str {
+    match reason {
+        "User requested /delm-stop" | "User stopped" => "user_cancelled",
+        "DeLM's execution allowance expired" => "deadline",
+        "The native Claude host exited" => "host_exited",
+        "Claude unloaded its DeLM bridge; native worker shutdown is unconfirmed" => {
+            "bridge_unloaded"
+        }
+        "Native peer launch failed"
+        | "Claude did not complete the required two-peer native launch." => "launch_failed",
+        _ if reason.starts_with("Conversation") => "conversation_ended",
+        _ if reason.starts_with("Native launch output") => "transport_failed",
+        _ => "cancelled",
     }
 }
 
@@ -1032,9 +1201,9 @@ fn stamp_actions(value: &mut Value, sequence: u64, index: &mut usize) {
     }
 }
 
-/// An orphaned bridge cannot safely deliver a candidate: the native module
-/// first stops exactly its retained agent/background IDs, then this path keeps
-/// reviewable source changes and removes the two verified private workspaces.
+/// Recovery requires native ownership proof and quiet private workspaces.
+/// An explicitly retained delivery intent may deliver only the same revision
+/// and revalidated candidate; intentional cancellation only preserves changes.
 pub(super) fn recover(run_id: &str, request: &Value) -> Result<Value> {
     recover_at(&state::run_path(run_id)?, request)
 }
@@ -1082,6 +1251,21 @@ fn recover_at(run_dir: &Path, request: &Value) -> Result<Value> {
     }
     let prepared: PreparedWorkspace = serde_json::from_value(saved["workspace"].clone())
         .context("Repository preparation did not finish; preserve this run for manual recovery")?;
+    let mut artifacts: Vec<String> = serde_json::from_value(
+        saved
+            .get("retained_artifacts")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )?;
+    if !saved["candidate"].is_null() {
+        let (_, candidate): (usize, Completion) =
+            serde_json::from_value(saved["candidate"].clone())?;
+        if let Some(accepted) = candidate.accepted {
+            artifacts.extend(accepted.selection.artifacts);
+            artifacts.sort();
+            artifacts.dedup();
+        }
+    }
     ensure!(
         prepared.run_dir == run_dir
             && prepared.baseline == run_dir.join("workspace/baseline")
@@ -1098,6 +1282,11 @@ fn recover_at(run_dir: &Path, request: &Value) -> Result<Value> {
         .context("Invalid recovery run identity")?;
     let _lock = RunLock::acquire_for_recovery(&prepared.original, run_id)?;
     if saved["finished"] == true {
+        if saved["final_result"].is_object() {
+            let mut result = saved["final_result"].clone();
+            result["already_finished"] = json!(true);
+            return Ok(result);
+        }
         return Ok(
             json!({"status":saved["status"],"already_finished":true,"recovery":saved["recovery"]}),
         );
@@ -1144,7 +1333,61 @@ fn recover_at(run_dir: &Path, request: &Value) -> Result<Value> {
     let mut known = services;
     known.push(host);
     ensure_workspace_quiet(&[run_dir.join("workspace")], runtime, &known)?;
-    let recovery = workspace::preserve_partial_and_cleanup(&prepared)?;
+    let retained_delivery = saved["stop_requested"] == false
+        && saved["finalization"]["intent"] == "deliver"
+        && !saved["candidate"].is_null();
+    if request["intent"] == "deliver" || (request["intent"] == "auto" && retained_delivery) {
+        ensure!(
+            request["token"]
+                .as_str()
+                .is_some_and(|token| !token.is_empty()),
+            "Delivery recovery requires the owning native conversation"
+        );
+        ensure!(
+            saved["stop_requested"] == false && saved["finalization"]["intent"] == "deliver",
+            "This run has no retained delivery intent; preserve its unfinished work"
+        );
+        ensure!(
+            saved["workers"]
+                .as_array()
+                .is_some_and(|workers| workers.len() == 2
+                    && workers
+                        .iter()
+                        .all(|worker| worker["agent_id"].as_str().is_some())),
+            "Both native peers must be bound before recovery delivery"
+        );
+        let (worker, candidate): (usize, Completion) =
+            serde_json::from_value(saved["candidate"].clone())
+                .context("The selected result is unavailable; preserve this run for recovery")?;
+        ensure!(
+            worker < 2
+                && saved["revision"].as_u64() == Some(candidate.revision)
+                && saved["finalization"]["revision"].as_u64() == Some(candidate.revision),
+            "The selected result belongs to an obsolete request revision"
+        );
+        // Delivery reconciles its durable completed transaction first. It
+        // revalidates the candidate when applying for the first time; a retry
+        // after cleanup must not require removed worker files or replay edits.
+        let delivered = candidate.deliver(&prepared, worker);
+        let result = match delivered {
+            Ok(delivery) => {
+                json!({"type":"final","status":if !delivery.delivered {"delivery_conflict"} else if delivery.verification_required {"delivered"} else {"complete"},
+                "delivery":delivery,"summary":candidate.declaration["summary"],"checks":candidate.checks,"shared_checks":candidate.shared_checks})
+            }
+            Err(error) => {
+                let recovery =
+                    workspace::preserve_partial_and_cleanup_with_artifacts(&prepared, &artifacts)?;
+                json!({"type":"final","status":"recovery_required","reason":format!("{error:#}"),"recovery":recovery})
+            }
+        };
+        saved["status"] = result["status"].clone();
+        saved["finished"] = json!(true);
+        saved["final_result"] = result.clone();
+        saved["finalization"]["shutdown_ack"] = json!("confirmed");
+        atomic_json(&path, &saved)?;
+        return Ok(result);
+    }
+    let recovery = workspace::preserve_partial_and_cleanup_with_artifacts(&prepared, &artifacts)?;
     saved["status"] = json!("stopped");
     saved["finished"] = json!(true);
     saved["candidate"] = Value::Null;
@@ -1261,7 +1504,13 @@ mod tests {
         assert_eq!(result["actions"][0]["type"], "candidate");
     }
     fn settle(c: &mut Controller) -> Result<Value> {
-        c.handle(json!({"op":"settle","agents":[{"id":"agent-1","status":"completed"},{"id":"agent-2","status":"killed"}],"background_tasks_stopped":true}))
+        let finalization = c
+            .finalization
+            .clone()
+            .context("Missing test finalization")?;
+        c.handle(json!({"op":"begin_settle","generation":finalization.generation,"revision":finalization.revision}))?;
+        c.handle(json!({"op":"settle","generation":finalization.generation,"revision":finalization.revision,
+            "agents":[{"id":"agent-1","status":"completed"},{"id":"agent-2","status":"killed"}],"background_tasks_stopped":true}))
     }
 
     #[test]
@@ -1323,12 +1572,17 @@ mod tests {
     fn candidate_delivers_only_after_native_shutdown_and_removes_private_workspaces() {
         let (_temp, mut c) = controller();
         complete(&mut c);
+        let fence = c.finalization.clone().unwrap();
+        c.handle(
+            json!({"op":"begin_settle","generation":fence.generation,"revision":fence.revision}),
+        )
+        .unwrap();
         assert_eq!(
             fs::read_to_string(c.workspace.original.join("source.txt")).unwrap(),
             "original\n"
         );
-        assert!(c.handle(json!({"op":"settle","agents":[{"id":"agent-1","status":"completed"}],"background_tasks_stopped":true})).is_err());
-        assert!(c.handle(json!({"op":"settle","agents":[{"id":"agent-1","status":"completed"},{"id":"agent-2","status":"running"}],"background_tasks_stopped":true})).is_err());
+        assert!(c.handle(json!({"op":"settle","generation":fence.generation,"revision":fence.revision,"agents":[{"id":"agent-1","status":"completed"}],"background_tasks_stopped":true})).is_err());
+        assert!(c.handle(json!({"op":"settle","generation":fence.generation,"revision":fence.revision,"agents":[{"id":"agent-1","status":"completed"},{"id":"agent-2","status":"running"}],"background_tasks_stopped":true})).is_err());
         let result = settle(&mut c).unwrap();
         assert_eq!(result["actions"][0]["status"], "complete");
         assert!(
@@ -1368,6 +1622,143 @@ mod tests {
     }
 
     #[test]
+    fn a_new_update_invalidates_the_old_finalizer_before_shutdown_admission() {
+        let (_temp, mut c) = controller();
+        complete(&mut c);
+        let old = c.finalization.clone().unwrap();
+        let update = c
+            .handle(json!({"op":"update","text":"Add another requirement"}))
+            .unwrap();
+        assert_eq!(update["revision"], 2);
+        assert!(c.candidate.is_none());
+        assert!(c.finalization.is_none());
+        assert!(
+            c.handle(
+                json!({"op":"begin_settle","generation":old.generation,"revision":old.revision})
+            )
+            .is_err()
+        );
+        assert!(!c.stop_requested);
+        assert!(c.workspace.workers.iter().all(|root| root.exists()));
+    }
+
+    #[test]
+    fn closed_admission_rejects_updates_but_failed_shutdown_retains_retryable_delivery() {
+        let (_temp, mut c) = controller();
+        complete(&mut c);
+        let fence = c.finalization.clone().unwrap();
+        c.handle(
+            json!({"op":"begin_settle","generation":fence.generation,"revision":fence.revision}),
+        )
+        .unwrap();
+        assert!(c.handle(json!({"op":"update","text":"Too late"})).is_err());
+        assert_eq!(c.revision, 1);
+        assert!(!c.task.contains("Too late"));
+        c.handle(json!({"op":"settlement_failed","generation":fence.generation,"revision":fence.revision})).unwrap();
+        assert_eq!(c.status, "recovery_required");
+        assert_eq!(c.finalization.as_ref().unwrap().intent, "deliver");
+        assert!(!c.stop_requested);
+        assert!(c.candidate.is_some());
+        let result = settle(&mut c).unwrap();
+        assert_eq!(result["actions"][0]["status"], "complete");
+        assert_eq!(c.finalization.as_ref().unwrap().shutdown_ack, "confirmed");
+        assert_eq!(c.finalization.as_ref().unwrap().attempt, 2);
+    }
+
+    #[test]
+    fn explicit_cancellation_supersedes_a_selected_delivery_and_its_callbacks() {
+        let (_temp, mut c) = controller();
+        complete(&mut c);
+        let old = c.finalization.clone().unwrap();
+        c.handle(json!({"op":"begin_settle","generation":old.generation,"revision":old.revision}))
+            .unwrap();
+        c.handle(json!({"op":"cancel","reason":"User requested /delm-stop"}))
+            .unwrap();
+        assert!(c.candidate.is_none());
+        assert_eq!(c.finalization.as_ref().unwrap().intent, "cancel");
+        assert!(
+            c.handle(
+                json!({"op":"begin_settle","generation":old.generation,"revision":old.revision})
+            )
+            .is_err()
+        );
+        let result = settle(&mut c).unwrap();
+        assert_eq!(result["actions"][0]["status"], "stopped");
+        assert_eq!(
+            fs::read_to_string(c.workspace.original.join("source.txt")).unwrap(),
+            "original\n"
+        );
+    }
+
+    #[test]
+    fn execution_deadline_does_not_replace_selected_delivery_with_cancellation() {
+        let (_temp, mut c) = controller();
+        complete(&mut c);
+        let generation = c.finalization.as_ref().unwrap().generation;
+        for _ in 0..2 {
+            c.handle(json!({"op":"interrupt","reason":"DeLM's execution allowance expired"}))
+                .unwrap();
+            assert!(!c.stop_requested);
+            assert!(c.candidate.is_some());
+            assert_eq!(c.finalization.as_ref().unwrap().generation, generation);
+            assert_eq!(c.finalization.as_ref().unwrap().intent, "deliver");
+        }
+        assert_eq!(settle(&mut c).unwrap()["actions"][0]["status"], "complete");
+        let (_temp, mut unfinished) = controller();
+        let result = unfinished
+            .handle(json!({"op":"interrupt","reason":"DeLM's execution allowance expired"}))
+            .unwrap();
+        assert!(unfinished.stop_requested);
+        assert_eq!(result["actions"][0]["finalization"]["intent"], "cancel");
+        assert_eq!(result["actions"][0]["finalization"]["reason"], "deadline");
+    }
+
+    #[test]
+    fn interrupted_selected_candidate_is_revalidated_before_authenticated_recovery_delivery() {
+        for changed in [false, true] {
+            let (_temp, mut c) = controller();
+            complete(&mut c);
+            c.handle(json!({"op":"interrupt","reason":"The native Claude host exited"}))
+                .unwrap();
+            assert!(c.candidate.is_some());
+            assert!(!c.stop_requested);
+            let mut process = std::process::Command::new("/bin/sleep")
+                .arg("0.01")
+                .spawn()
+                .unwrap();
+            c.runtime = ProcessIdentity::capture(process.id()).unwrap();
+            process.wait().unwrap();
+            let token = "recovery-delivery-token";
+            c.token_digest = Some(format!("{:x}", Sha256::digest(token)));
+            if changed {
+                fs::write(c.workspace.workers[0].join("source.txt"), "later change\n").unwrap();
+            }
+            c.persist().unwrap();
+            let run_dir = c.workspace.run_dir.clone();
+            let project = c.workspace.original.clone();
+            drop(c);
+            let request = json!({"intent":"auto","token":token,"session_id":"session",
+                "agents":[{"id":"agent-1","status":"completed"},{"id":"agent-2","status":"killed"}],"background_tasks_stopped":true});
+            let result = recover_at(&run_dir, &request).unwrap();
+            assert_eq!(
+                result["status"],
+                if changed {
+                    "recovery_required"
+                } else {
+                    "complete"
+                }
+            );
+            assert_eq!(
+                fs::read_to_string(project.join("source.txt")).unwrap(),
+                if changed { "original\n" } else { "finished\n" }
+            );
+            let repeated = recover_at(&run_dir, &request).unwrap();
+            assert_eq!(repeated["already_finished"], true);
+            assert_eq!(repeated["status"], result["status"]);
+        }
+    }
+
+    #[test]
     fn cancellation_preserves_partial_sources_and_cleans_only_after_native_stop() {
         let (_temp, mut c) = controller();
         fs::write(
@@ -1387,6 +1778,80 @@ mod tests {
         assert!(recovery.exists());
         assert!(c.workspace.workers.iter().all(|path| !path.exists()));
         assert!(!c.workspace.original.join("partial.txt").exists());
+    }
+
+    #[test]
+    fn cancelled_candidate_retains_declared_outputs_even_under_ignored_cache_paths() {
+        let (temp, mut c) = controller();
+        fs::write(c.workspace.workers[0].join(".gitignore"), ".cache/\n").unwrap();
+        fs::create_dir(c.workspace.workers[0].join(".cache")).unwrap();
+        fs::write(
+            c.workspace.workers[0].join(".cache/requested.pdf"),
+            "requested output",
+        )
+        .unwrap();
+        tool(
+            &mut c,
+            1,
+            "complete-artifact",
+            "delm_complete",
+            json!({
+                "idempotency_key":"complete-artifact", "expected_revision":1, "outcome":"complete",
+                "summary":"Created requested output", "checks":[], "artifacts":[".cache/requested.pdf"]
+            }),
+        );
+        c.handle(json!({"op":"turn_end","agent_id":"agent-1","turn_id":"turn-1","reason":"completed","answer":"Created the requested output."})).unwrap();
+        assert_eq!(c.retained_artifacts, [".cache/requested.pdf"]);
+        c.handle(json!({"op":"cancel","reason":"User requested /delm-stop"}))
+            .unwrap();
+        assert!(c.candidate.is_none());
+        let result = settle(&mut c).unwrap();
+        let recovery = Path::new(
+            result["actions"][0]["recovery"]["recovery"]
+                .as_str()
+                .unwrap(),
+        );
+        let exported =
+            workspace::export_recovery(recovery, &temp.path().join("exported"), 1).unwrap();
+        assert_eq!(
+            fs::read_to_string(exported.files.join(".cache/requested.pdf")).unwrap(),
+            "requested output"
+        );
+    }
+
+    #[test]
+    fn recovery_reconciles_delivery_after_cleanup_without_overwriting_later_user_edits() {
+        let (_temp, mut c) = controller();
+        complete(&mut c);
+        let mut process = std::process::Command::new("/bin/sleep")
+            .arg("0.01")
+            .spawn()
+            .unwrap();
+        c.runtime = ProcessIdentity::capture(process.id()).unwrap();
+        process.wait().unwrap();
+        let token = "recovery-after-delivery-token";
+        c.token_digest = Some(format!("{:x}", Sha256::digest(token)));
+        c.persist().unwrap();
+        let run_dir = c.workspace.run_dir.clone();
+        let path = run_dir.join("claude.json");
+        let before_final_persist = fs::read(&path).unwrap();
+        let project = c.workspace.original.clone();
+        let result = settle(&mut c).unwrap();
+        assert_eq!(result["actions"][0]["status"], "complete");
+        assert!(c.workspace.workers.iter().all(|path| !path.exists()));
+        // State equivalent to a process loss after the delivery transaction
+        // completed but before the controller's final atomic state write.
+        fs::write(&path, before_final_persist).unwrap();
+        fs::write(project.join("source.txt"), "later user edit\n").unwrap();
+        drop(c);
+        let request = json!({"intent":"auto","token":token,"session_id":"session",
+            "agents":[{"id":"agent-1","status":"completed"},{"id":"agent-2","status":"killed"}],"background_tasks_stopped":true});
+        let recovered = recover_at(&run_dir, &request).unwrap();
+        assert_eq!(recovered["status"], "complete");
+        assert_eq!(
+            fs::read_to_string(project.join("source.txt")).unwrap(),
+            "later user edit\n"
+        );
     }
 
     #[test]
@@ -1445,6 +1910,70 @@ mod tests {
                 json!({"idempotency_key":"create-again", "title":"More work", "description":"Another independent task"}),
             );
             assert!(changed["actions"].as_array().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn completion_intent_holds_ready_resumes_until_capture_failure_or_withdrawal() {
+        for finish in ["completed", "failed", "withdrawn"] {
+            let (_temp, mut c) = controller();
+            tool(
+                &mut c,
+                1,
+                "wait",
+                "delm_complete",
+                json!({"idempotency_key":"wait",
+                "expected_revision":1,"outcome":"waiting","summary":"Waiting for peer","dependency":"worker:2"}),
+            );
+            c.handle(json!({"op":"turn_end","agent_id":"agent-1","turn_id":"turn-1","reason":"completed","answer":"Waiting"})).unwrap();
+            let declared = tool(
+                &mut c,
+                2,
+                "complete",
+                "delm_complete",
+                json!({"idempotency_key":"complete",
+                "expected_revision":1,"outcome":"complete","summary":"Ready","checks":[]}),
+            );
+            assert_eq!(declared["actions"][0]["type"], "completion_intent");
+            assert_eq!(declared["actions"][0]["pending"], true);
+            assert!(c.candidate.is_none());
+            assert!(!c.stop_requested);
+            let change = tool(
+                &mut c,
+                2,
+                "create",
+                "delm_task_create",
+                json!({"idempotency_key":"create",
+                "title":"Ready work","description":"Independent ready work"}),
+            );
+            assert!(change["actions"].as_array().unwrap().is_empty());
+            let result = if finish == "withdrawn" {
+                tool(
+                    &mut c,
+                    2,
+                    "withdraw",
+                    "delm_complete",
+                    json!({"idempotency_key":"withdraw",
+                    "expected_revision":1,"outcome":"partial","summary":"One requirement remains","remaining":"Finish implementation","checks":[]}),
+                )
+            } else {
+                c.handle(json!({"op":"turn_end","agent_id":"agent-2","turn_id":"turn-2","reason":finish,"answer":"Finished"})).unwrap()
+            };
+            let actions = result["actions"].as_array().unwrap();
+            assert!(
+                actions
+                    .iter()
+                    .any(|action| action["type"] == "completion_intent"
+                        && action["pending"] == false)
+            );
+            if finish == "completed" {
+                assert!(actions.iter().any(|action| action["type"] == "candidate"));
+                assert!(!actions.iter().any(|action| action["type"] == "resume"));
+            } else {
+                assert!(actions.iter().any(|action| action["type"] == "resume" && action["agent_id"] == "agent-1"));
+                assert!(c.candidate.is_none());
+                assert!(!c.stop_requested);
+            }
         }
     }
 
@@ -1525,6 +2054,7 @@ mod tests {
                         1,
                         &c.workers[1].result_policy,
                         vec![],
+                        &c.workspace.baseline_manifest,
                     )
                     .unwrap();
                     c.candidate = Some((1, completion));

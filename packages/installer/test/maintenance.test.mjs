@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {mkdtemp, mkdir, readFile, rm, symlink, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -95,4 +96,49 @@ test('status separates installed state from unverified session activation', () =
     assert.equal(installationReadiness(host, {legacyInstalled: true}).installation, 'source_installation');
     assert.equal(installationReadiness(host, {conflict: true}).installation, 'needs_attention');
   }
+});
+
+test('verified recovery permits maintenance only after shutdown and without workspace remnants', async t => {
+  const {home, run} = await fixture(t);
+  const recovery = join(run, 'workspace/recovery');
+  await mkdir(recovery, {recursive: true});
+  const content = 'retained requested output';
+  const sha256 = createHash('sha256').update(content).digest('hex');
+  const entry = {kind: 'file', sha256, size: Buffer.byteLength(content), mode: 0o644, link_target: null, xattrs_sha256: '', xattrs_bytes: 0, acl_sha256: '', flags: 0};
+  const bundle = {version: 1, original: join(home, 'project'), workers: [{worker: 0, changes: {'renders/result.txt': [null, entry]}}]};
+  await writeFile(join(recovery, 'complete.json'), JSON.stringify(bundle));
+  await writeFile(join(recovery, sha256), content);
+  await writeFile(join(run, 'claude.json'), JSON.stringify({status: 'recovery_required', finished: true}));
+  await assertMaintenanceSafe({home, host: 'claude'});
+  for (const shutdown_ack of ['pending', 'unconfirmed']) {
+    await writeFile(join(run, 'claude.json'), JSON.stringify({status: 'recovery_required', finished: true, finalization: {shutdown_ack}}));
+    await assert.rejects(assertMaintenanceSafe({home, host: 'claude'}), {code: 'ACTIVE_DELM_RUN'});
+  }
+  await writeFile(join(run, 'claude.json'), JSON.stringify({status: 'recovery_required', finished: true, finalization: {shutdown_ack: 'confirmed'}}));
+  await assertMaintenanceSafe({home, host: 'claude'});
+  for (const malformed of [
+    {...bundle, original: undefined},
+    {...bundle, workers: [bundle.workers[0], bundle.workers[0]]},
+    {...bundle, workers: [{worker: 0, changes: {file: [null, null]}}]},
+    {...bundle, workers: [{worker: 0, changes: {file: [null, {...entry, mode: undefined}]}}]},
+    {...bundle, workers: [{worker: 0, changes: {file: [null, {...entry, kind: 'symlink', link_target: null}]}}]},
+    {...bundle, workers: [{worker: 0, changes: {'.git/config': [null, entry]}}]},
+  ]) {
+    await writeFile(join(recovery, 'complete.json'), JSON.stringify(malformed));
+    await assert.rejects(assertMaintenanceSafe({home, host: 'claude'}), {code: 'ACTIVE_DELM_RUN'});
+  }
+  await writeFile(join(recovery, 'complete.json'), JSON.stringify(bundle));
+  await writeFile(join(run, 'claude.json'), JSON.stringify({status: 'recovery_required', finished: false}));
+  await assert.rejects(assertMaintenanceSafe({home, host: 'claude'}), {code: 'ACTIVE_DELM_RUN'});
+  await rm(join(run, 'claude.json'));
+  await writeFile(join(run, 'run.json'), JSON.stringify({status: 'recovery_required'}));
+  await assert.rejects(assertMaintenanceSafe({home, host: 'codex'}), {code: 'ACTIVE_DELM_RUN'});
+  await writeFile(join(run, 'shutdown-report.json'), JSON.stringify({ownership_resolved: true, survivors: [], errors: []}));
+  await assertMaintenanceSafe({home, host: 'codex'});
+  await writeFile(join(recovery, sha256), 'damaged');
+  await assert.rejects(assertMaintenanceSafe({home, host: 'codex'}), {code: 'ACTIVE_DELM_RUN'});
+  await writeFile(join(recovery, sha256), content);
+  await mkdir(join(run, 'workspace/worker-2'));
+  await assert.rejects(assertMaintenanceSafe({home, host: 'codex'}), {code: 'ACTIVE_DELM_RUN'});
+  assert.equal(await readFile(join(recovery, sha256), 'utf8'), content);
 });

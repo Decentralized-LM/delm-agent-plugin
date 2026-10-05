@@ -221,11 +221,31 @@ fn project_outcome(event: &Value) -> Value {
         .get("recovery")
         .filter(|v| v.is_string())
         .unwrap_or(&recovery["recovery"]);
+    let paths = |key: &str| {
+        delivery[key]
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .take(16)
+                    .map(|value| safe_string(value, 512))
+                    .filter(Value::is_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let path_count = |key: &str| delivery[key].as_array().map_or(0, Vec::len);
+    let excluded = delivery["excluded_paths"].as_object().map(|values| values.iter().take(16)
+        .map(|(path, reason)| json!({"path":reader::text(path,512),"reason":safe_string(reason,256)}))
+        .collect::<Vec<_>>()).unwrap_or_default();
     json!({"status":safe_string(&event["status"],80),
         "delivered":delivery["delivered"].as_bool(),"verification_required":delivery["verification_required"].as_bool(),
         "cleanup_complete":delivery["cleanup_complete"].as_bool().or(recovery["cleanup_complete"].as_bool()),
         "recovery_saved":recovery_path.is_string().then_some(true),"recovery_path":safe_string(recovery_path,4096),
         "changed_paths_count":delivery["changed_paths"].as_array().map(Vec::len),
+        "artifacts":paths("artifacts"),"artifacts_total":path_count("artifacts"),"artifacts_declared":delivery["artifacts_declared"].as_bool(),
+        "undelivered_outputs":paths("undelivered_outputs"),"undelivered_outputs_total":path_count("undelivered_outputs"),
+        "excluded_paths":excluded,"excluded_paths_total":delivery["excluded_paths"].as_object().map_or(0,serde_json::Map::len),
         "conflicts":delivery["conflicts"].as_array().map(|v|v.iter().take(16).map(|s|safe_string(s,512)).filter(Value::is_string).collect::<Vec<_>>()).unwrap_or_default(),
         "conflicts_total":delivery["conflicts"].as_array().map_or(0,Vec::len),
         "reason":safe_string(&event["reason"],2048),"retained_workspace_path":Value::Null})
@@ -613,6 +633,32 @@ mod tests {
         assert_eq!(result["outcome"]["verification_required"], true);
         assert_eq!(result["outcome"]["cleanup_complete"], true);
         assert!(!result.to_string().contains("PRIVATE COMMAND"));
+    }
+
+    #[test]
+    fn incomplete_generated_outputs_remain_distinct_from_conflicts_and_are_bounded() {
+        let paths = (0..40)
+            .map(|n| json!(format!("renders/output-{n}.mp4")))
+            .collect::<Vec<_>>();
+        let projected = project_outcome(&json!({"status":"delivery_conflict","delivery":{
+            "delivered":false,"cleanup_complete":true,"conflicts":[],"recovery":"/saved/outputs",
+            "artifacts":["renders/declared.mp4"],"undelivered_outputs":paths,
+            "excluded_paths":{".env":"recognized credential; not exported"}}}));
+        assert_eq!(projected["delivered"], false);
+        assert_eq!(projected["conflicts"], json!([]));
+        assert_eq!(projected["undelivered_outputs_total"], 40);
+        assert_eq!(
+            projected["undelivered_outputs"].as_array().unwrap().len(),
+            16
+        );
+        assert_eq!(projected["recovery_path"], "/saved/outputs");
+        assert_eq!(projected["artifacts_total"], 1);
+        assert_eq!(projected["excluded_paths"][0]["path"], ".env");
+        let delivered = project_outcome(&json!({"status":"delivered","delivery":{
+            "delivered":true,"artifacts_declared":true,"undelivered_outputs":["build/cache.log"]}}));
+        assert_eq!(delivered["artifacts_declared"], true);
+        assert_eq!(delivered["delivered"], true);
+        assert_eq!(delivered["undelivered_outputs_total"], 1);
     }
 
     #[test]

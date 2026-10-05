@@ -156,7 +156,7 @@ fn local_dependencies_are_not_transferred_and_existing_environment_survives() {
     fs::create_dir_all(prepared.workers[0].join("env/bin")).unwrap();
     fs::write(
         prepared.workers[0].join("env/pyvenv.cfg"),
-        "home = /usr/bin\n",
+        "home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.12.0\n",
     )
     .unwrap();
     std::os::unix::fs::symlink(
@@ -468,4 +468,336 @@ fn concurrent_symlink_parent_cannot_redirect_delivery() {
     assert!(!report.delivered);
     assert_eq!(fs::read(outside.join("file")).unwrap(), b"do not overwrite");
     assert!(prepared.workers.iter().all(|p| !p.exists()));
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn declared_ignored_artifacts_share_capture_verify_and_delivery_contract() {
+    let (_temp, prepared) = fixture();
+    let worker = &prepared.workers[0];
+    fs::write(worker.join(".gitignore"), "renders/\n*.log\n").unwrap();
+    fs::create_dir(worker.join("renders")).unwrap();
+    fs::write(worker.join("renders/movie.mp4"), [0, 1, 255, 8]).unwrap();
+    fs::write(worker.join("report.log"), "requested log artifact").unwrap();
+    let accepted = ResultSelection::new(
+        &prepared.baseline_manifest,
+        vec!["renders".into(), "report.log".into()],
+    )
+    .unwrap()
+    .capture(worker)
+    .unwrap();
+    assert_eq!(accepted.artifact_files, ["renders/movie.mp4", "report.log"]);
+    fs::write(worker.join("server.log"), "shutdown diagnostic").unwrap();
+    accepted.verify(worker).unwrap();
+    let report = deliver_accepted_result(&prepared, 0, &accepted).unwrap();
+    assert!(report.delivered && report.cleanup_complete);
+    assert_eq!(
+        fs::read(prepared.original.join("renders/movie.mp4")).unwrap(),
+        [0, 1, 255, 8]
+    );
+    assert_eq!(
+        fs::read_to_string(prepared.original.join("report.log")).unwrap(),
+        "requested log artifact"
+    );
+    assert!(!prepared.original.join("server.log").exists());
+    assert!(prepared.workers.iter().all(|path| !path.exists()));
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn ignored_unclassified_outputs_are_recoverable_for_both_peers_before_cleanup() {
+    let (temp, prepared) = fixture();
+    let worker = &prepared.workers[0];
+    fs::write(worker.join(".gitignore"), "renders/\n").unwrap();
+    fs::create_dir(worker.join("renders")).unwrap();
+    fs::write(worker.join("renders/movie.mp4"), "movie bytes").unwrap();
+    fs::write(
+        prepared.workers[1].join("peer-work.txt"),
+        "useful peer work",
+    )
+    .unwrap();
+    fs::write(worker.join(".env"), "TOKEN=do not export").unwrap();
+    let accepted = ResultSelection::new(&prepared.baseline_manifest, vec![])
+        .unwrap()
+        .capture(worker)
+        .unwrap();
+    assert_eq!(accepted.undelivered_outputs, ["renders/movie.mp4"]);
+    let report = deliver_accepted_result(&prepared, 0, &accepted).unwrap();
+    assert!(!report.delivered && report.cleanup_complete && report.conflicts.is_empty());
+    assert_eq!(report.undelivered_outputs, ["renders/movie.mp4"]);
+    let bundle = report.recovery.unwrap();
+    let inspected = inspect_recovery(&bundle).unwrap();
+    assert_eq!(inspected.workers.len(), 2);
+    assert!(
+        inspected
+            .workers
+            .iter()
+            .flat_map(|w| &w.changes)
+            .all(|entry| entry.path != ".env")
+    );
+    let export = export_recovery(&bundle, &temp.path().join("export-one"), 1).unwrap();
+    assert_eq!(
+        fs::read_to_string(export.files.join("renders/movie.mp4")).unwrap(),
+        "movie bytes"
+    );
+    assert!(!export.files.join(".env").exists());
+    let export = export_recovery(&bundle, &temp.path().join("export-two"), 2).unwrap();
+    assert_eq!(
+        fs::read_to_string(export.files.join("peer-work.txt")).unwrap(),
+        "useful peer work"
+    );
+    assert!(prepared.workers.iter().all(|path| !path.exists()));
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn selected_artifact_change_rejects_delivery_while_ignored_log_changes_do_not() {
+    let (_temp, prepared) = fixture();
+    let worker = &prepared.workers[0];
+    fs::write(worker.join(".gitignore"), "*.log\nmovie.mp4\n.cache/\n").unwrap();
+    fs::write(worker.join("movie.mp4"), "first render").unwrap();
+    fs::write(worker.join("server.log"), "start").unwrap();
+    fs::create_dir(worker.join(".cache")).unwrap();
+    fs::write(worker.join(".cache/data"), "cache one").unwrap();
+    let accepted = ResultSelection::new(&prepared.baseline_manifest, vec!["movie.mp4".into()])
+        .unwrap()
+        .capture(worker)
+        .unwrap();
+    fs::write(worker.join("server.log"), "shutdown").unwrap();
+    fs::write(worker.join(".cache/data"), "cache two").unwrap();
+    accepted.verify(worker).unwrap();
+    fs::write(worker.join("movie.mp4"), "second render").unwrap();
+    assert!(deliver_accepted_result(&prepared, 0, &accepted).is_err());
+    assert!(worker.exists());
+    assert!(!prepared.original.join("movie.mp4").exists());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn artifact_selection_rejects_unsafe_paths_secrets_dependencies_and_escaping_links() {
+    let (_temp, prepared) = fixture();
+    let worker = &prepared.workers[0];
+    for path in ["../outside", "/absolute", ".git/config"] {
+        assert!(ResultSelection::new(&prepared.baseline_manifest, vec![path.into()]).is_err());
+    }
+    fs::write(worker.join(".env"), "TOKEN=secret").unwrap();
+    fs::create_dir(worker.join("node_modules")).unwrap();
+    fs::write(worker.join("node_modules/dependency"), "dependency").unwrap();
+    for path in [".env", "node_modules", "missing"] {
+        assert!(
+            ResultSelection::new(&prepared.baseline_manifest, vec![path.into()])
+                .unwrap()
+                .capture(worker)
+                .is_err()
+        );
+    }
+    fs::remove_file(worker.join(".env")).unwrap();
+    std::os::unix::fs::symlink("/etc/passwd", worker.join("source-link")).unwrap();
+    assert!(
+        ResultSelection::new(&prepared.baseline_manifest, vec![])
+            .unwrap()
+            .capture(worker)
+            .is_err()
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn malformed_environment_config_does_not_hide_source_and_credentials_do_not_delete_baseline() {
+    let (_temp, prepared) = fixture();
+    let worker = &prepared.workers[0];
+    fs::create_dir(worker.join("custom")).unwrap();
+    fs::write(worker.join("custom/pyvenv.cfg"), "not a Python environment").unwrap();
+    fs::write(worker.join("custom/source.py"), "print('deliver me')").unwrap();
+    let accepted = ResultSelection::new(&prepared.baseline_manifest, vec![])
+        .unwrap()
+        .capture(worker)
+        .unwrap();
+    assert!(accepted.manifest.files.contains_key("custom/source.py"));
+    fs::write(
+        worker.join("file.txt"),
+        "-----BEGIN PRIVATE KEY-----\nprivate\n",
+    )
+    .unwrap();
+    assert!(
+        ResultSelection::new(&prepared.baseline_manifest, vec![])
+            .unwrap()
+            .capture(worker)
+            .is_err()
+    );
+    assert!(prepared.original.join("file.txt").exists());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn recovery_export_preserves_binary_modes_and_deletions_without_activating_symlinks() {
+    let (temp, prepared) = fixture();
+    let worker = &prepared.workers[0];
+    fs::remove_file(worker.join("untracked")).unwrap();
+    fs::write(worker.join("launch"), [0, 255, 42]).unwrap();
+    fs::set_permissions(worker.join("launch"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("/etc/passwd", worker.join("external-link")).unwrap();
+    let report = preserve_partial_and_cleanup(&prepared).unwrap();
+    let exported = export_recovery(&report.recovery, &temp.path().join("restored"), 1).unwrap();
+    assert_eq!(
+        fs::read(exported.files.join("launch")).unwrap(),
+        [0, 255, 42]
+    );
+    assert_eq!(
+        fs::metadata(exported.files.join("launch")).unwrap().mode() & 0o777,
+        0o755
+    );
+    assert!(fs::symlink_metadata(exported.files.join("external-link")).is_err());
+    assert!(!exported.files.join("untracked").exists());
+    assert_eq!(
+        fs::read_to_string(exported.base.join("untracked")).unwrap(),
+        "keep untracked\n"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(exported.manifest).unwrap()).unwrap();
+    assert!(manifest["changes"]["untracked"][1].is_null());
+    assert_eq!(
+        manifest["changes"]["external-link"][1]["link_target"],
+        "/etc/passwd"
+    );
+    assert_eq!(
+        fs::read_to_string(prepared.original.join("untracked")).unwrap(),
+        "keep untracked\n"
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn recovery_export_rejects_corruption_and_existing_or_unsafe_destinations() {
+    let (temp, prepared) = fixture();
+    fs::write(prepared.workers[0].join("new"), "saved bytes").unwrap();
+    let report = preserve_partial_and_cleanup(&prepared).unwrap();
+    let existing = temp.path().join("existing");
+    fs::create_dir(&existing).unwrap();
+    fs::write(existing.join("keep"), "untouched").unwrap();
+    assert!(export_recovery(&report.recovery, &existing, 1).is_err());
+    assert!(export_recovery(&report.recovery, &prepared.original.join("nested"), 1).is_err());
+    let hash = format!("{:x}", Sha256::digest(b"saved bytes"));
+    fs::write(report.recovery.join(hash), "bad bytes").unwrap();
+    assert!(inspect_recovery(&report.recovery).is_err());
+    let destination = temp.path().join("must-not-exist");
+    assert!(export_recovery(&report.recovery, &destination, 1).is_err());
+    assert!(!destination.exists());
+    assert_eq!(
+        fs::read_to_string(existing.join("keep")).unwrap(),
+        "untouched"
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn durable_delivery_retry_after_cleanup_never_reapplies_over_later_user_edits() {
+    let (_temp, prepared) = fixture();
+    fs::write(prepared.workers[0].join("file.txt"), "accepted result").unwrap();
+    let accepted = ResultSelection::new(&prepared.baseline_manifest, vec![])
+        .unwrap()
+        .capture(&prepared.workers[0])
+        .unwrap();
+    let report = deliver_accepted_result(&prepared, 0, &accepted).unwrap();
+    assert!(report.delivered && report.cleanup_complete);
+    assert!(!prepared.workers[0].exists());
+    fs::write(prepared.original.join("file.txt"), "later user edit").unwrap();
+    let retried = deliver_accepted_result(&prepared, 0, &accepted).unwrap();
+    assert!(retried.delivered && retried.cleanup_complete);
+    assert_eq!(
+        fs::read_to_string(prepared.original.join("file.txt")).unwrap(),
+        "later user edit"
+    );
+    assert!(deliver_accepted_result(&prepared, 1, &accepted).is_err());
+    let journal_path = prepared.run_dir.join("workspace/delivery/journal.json");
+    let mut journal: serde_json::Value =
+        serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+    journal["complete"] = serde_json::json!(false);
+    fs::write(journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+    assert!(deliver_accepted_result(&prepared, 0, &accepted).is_err());
+    assert_eq!(
+        fs::read_to_string(prepared.original.join("file.txt")).unwrap(),
+        "later user edit"
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn recovery_protects_declared_cache_path_outputs_and_preserves_nonignored_cache_named_source() {
+    let (temp, prepared) = fixture();
+    let worker = &prepared.workers[0];
+    fs::write(worker.join(".gitignore"), ".cache/\n").unwrap();
+    fs::create_dir(worker.join(".cache")).unwrap();
+    fs::write(worker.join(".cache/requested.pdf"), "requested PDF").unwrap();
+    let recovery =
+        preserve_partial_and_cleanup_with_artifacts(&prepared, &[".cache/requested.pdf".into()])
+            .unwrap();
+    let exported =
+        export_recovery(&recovery.recovery, &temp.path().join("cache-output"), 1).unwrap();
+    assert_eq!(
+        fs::read_to_string(exported.files.join(".cache/requested.pdf")).unwrap(),
+        "requested PDF"
+    );
+    let (_temp, prepared) = fixture();
+    fs::create_dir(prepared.workers[0].join(".cache")).unwrap();
+    fs::write(
+        prepared.workers[0].join(".cache/nonignored-source"),
+        "user source",
+    )
+    .unwrap();
+    let recovery = preserve_partial_and_cleanup(&prepared).unwrap();
+    let inspected = inspect_recovery(&recovery.recovery).unwrap();
+    assert!(
+        inspected.workers[0]
+            .changes
+            .iter()
+            .any(|entry| entry.path == ".cache/nonignored-source")
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn explicit_source_only_contract_keeps_incidental_build_output_without_blocking_delivery() {
+    for explicit in [false, true] {
+        let (temp, prepared) = fixture();
+        let worker = &prepared.workers[0];
+        fs::write(worker.join(".gitignore"), "dist/\n").unwrap();
+        fs::create_dir(worker.join("dist")).unwrap();
+        fs::write(worker.join("dist/generated.js"), "incidental build output").unwrap();
+        fs::write(worker.join("source.js"), "requested source change").unwrap();
+        let mut declaration = serde_json::json!({"outcome":"complete","expected_revision":1,"summary":"Source update complete","checks":[]});
+        if explicit {
+            declaration["artifacts"] = serde_json::json!([]);
+        }
+        let completion = crate::completion::Completion::capture_with_shared(
+            worker,
+            &declaration,
+            &Default::default(),
+            1,
+            &ResultPolicy::default(),
+            vec![],
+            &prepared.baseline_manifest,
+        )
+        .unwrap();
+        let report = completion.deliver(&prepared, 0).unwrap();
+        assert_eq!(report.artifacts_declared, explicit);
+        assert_eq!(report.delivered, explicit);
+        assert_eq!(report.undelivered_outputs, ["dist/generated.js"]);
+        assert_eq!(
+            fs::read_to_string(prepared.original.join("source.js")).unwrap(),
+            "requested source change"
+        );
+        assert!(!prepared.original.join("dist").exists());
+        let export = export_recovery(
+            report.recovery.as_ref().unwrap(),
+            &temp.path().join("review"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(export.files.join("dist/generated.js")).unwrap(),
+            "incidental build output"
+        );
+        assert!(report.cleanup_complete && prepared.workers.iter().all(|path| !path.exists()));
+    }
 }

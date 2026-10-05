@@ -19,6 +19,8 @@ pub(crate) struct Completion {
     pub shared_checks: Vec<Value>,
     pub manifest: Manifest,
     #[serde(default)]
+    pub accepted: Option<workspace::AcceptedResult>,
+    #[serde(default)]
     pub result_policy: workspace::ResultPolicy,
 }
 
@@ -38,6 +40,7 @@ impl Completion {
             revision,
             result_policy,
             Vec::new(),
+            &workspace::manifest(root)?,
         )
     }
 
@@ -51,6 +54,7 @@ impl Completion {
         revision: u64,
         result_policy: &workspace::ResultPolicy,
         shared_checks: Vec<Value>,
+        baseline: &Manifest,
     ) -> Result<Self> {
         let checks = validate_checks(declaration, native_checks, revision)?;
         Self::capture_verified(
@@ -60,6 +64,7 @@ impl Completion {
             revision,
             result_policy,
             shared_checks,
+            baseline,
         )
     }
 
@@ -70,6 +75,7 @@ impl Completion {
         revision: u64,
         result_policy: &workspace::ResultPolicy,
         shared_checks: Vec<Value>,
+        baseline: &Manifest,
     ) -> Result<Self> {
         let checks = validate_evidence(declaration, native_checks, revision)?;
         Self::capture_verified(
@@ -79,6 +85,7 @@ impl Completion {
             revision,
             result_policy,
             shared_checks,
+            baseline,
         )
     }
 
@@ -89,6 +96,7 @@ impl Completion {
         revision: u64,
         result_policy: &workspace::ResultPolicy,
         shared_checks: Vec<Value>,
+        baseline: &Manifest,
     ) -> Result<Self> {
         ensure!(
             declaration["outcome"].as_str() == Some("complete"),
@@ -98,7 +106,23 @@ impl Completion {
             declaration["expected_revision"].as_u64() == Some(revision),
             "candidate declaration is for an obsolete request revision"
         );
-        let manifest = workspace::manifest_for_result(root, result_policy)?;
+        let artifacts = match declaration.get("artifacts") {
+            None => Vec::new(),
+            Some(value) => value
+                .as_array()
+                .context("artifacts must be an array")?
+                .iter()
+                .map(|path| {
+                    path.as_str()
+                        .map(str::to_owned)
+                        .context("artifact paths must be strings")
+                })
+                .collect::<Result<Vec<_>>>()?,
+        };
+        let mut selection = workspace::ResultSelection::new(baseline, artifacts)?;
+        selection.artifacts_declared = declaration.get("artifacts").is_some();
+        let accepted = selection.capture(root)?;
+        let manifest = accepted.manifest.clone();
         let declared = declaration
             .get("shared_checks")
             .and_then(Value::as_array)
@@ -143,17 +167,32 @@ impl Completion {
             checks,
             shared_checks,
             manifest,
+            accepted: Some(accepted),
             result_policy: result_policy.clone(),
         })
     }
 
     /// Call after all owned writers have stopped, before retaining or cleaning.
     pub fn verify(&self, root: &Path) -> Result<()> {
+        if let Some(accepted) = &self.accepted {
+            accepted.verify(root)?;
+            return Ok(());
+        }
         ensure!(
             workspace::manifest_for_result(root, &self.result_policy)? == self.manifest,
             "candidate files changed between native completion and stopped-writer verification; preserve both workspaces without publishing this result"
         );
         Ok(())
+    }
+
+    pub fn deliver(
+        &self,
+        prepared: &workspace::PreparedWorkspace,
+        worker: usize,
+    ) -> Result<workspace::DeliveryReport> {
+        let accepted = self.accepted.as_ref().context(
+            "This saved result predates explicit artifact accounting; export its recovery data before cleanup")?;
+        workspace::deliver_accepted_result(prepared, worker, accepted)
     }
 }
 
@@ -234,7 +273,7 @@ mod tests {
 
     #[test]
     fn normalized_native_results_share_completion_fences_without_synthetic_exit_codes() {
-        let root = tempfile::tempdir().unwrap();
+        let root = project();
         std::fs::write(root.path().join("result.txt"), "ready").unwrap();
         let command = CommandEvidence {
             host: NativeHost::Claude,
@@ -260,6 +299,7 @@ mod tests {
             1,
             &workspace::ResultPolicy::default(),
             vec![],
+            &workspace::manifest(root.path()).unwrap(),
         )
         .unwrap();
         assert_eq!(completion.checks[0]["passed"], true);
@@ -277,6 +317,19 @@ mod tests {
         assert!(validate_evidence(&declaration, &checks, 1).is_err());
         std::fs::write(root.path().join("result.txt"), "late change").unwrap();
         assert!(completion.verify(root.path()).is_err());
+    }
+
+    fn project() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        root
     }
 
     fn check(exit: i64) -> Value {
@@ -329,7 +382,7 @@ mod tests {
     }
     #[test]
     fn candidate_fence_detects_post_completion_writers_without_mandatory_checks() {
-        let root = tempfile::tempdir().unwrap();
+        let root = project();
         std::fs::write(root.path().join("result.txt"), "ready").unwrap();
         let declaration = json!({"outcome":"complete","expected_revision":4,"summary":"Updated prose; no executable behavior changed","checks":[]});
         let candidate = Completion::capture(
@@ -347,7 +400,7 @@ mod tests {
 
     #[test]
     fn shared_receipts_match_the_captured_candidate_without_forging_local_commands() {
-        let root = tempfile::tempdir().unwrap();
+        let root = project();
         std::fs::write(root.path().join("result.txt"), "ready").unwrap();
         let manifest = workspace::manifest(root.path()).unwrap();
         let file = &manifest.files["result.txt"];
@@ -372,6 +425,7 @@ mod tests {
             4,
             &workspace::ResultPolicy::default(),
             vec![receipt.clone()],
+            &workspace::manifest(root.path()).unwrap(),
         )
         .unwrap();
         assert!(candidate.checks.is_empty());
@@ -384,7 +438,8 @@ mod tests {
                 &HashMap::new(),
                 4,
                 &workspace::ResultPolicy::default(),
-                vec![receipt]
+                vec![receipt],
+                &workspace::manifest(root.path()).unwrap()
             )
             .is_err()
         );
