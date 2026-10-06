@@ -132,6 +132,23 @@ pub async fn verify_lifecycle_hooks(
     shutdown
 }
 
+/// Build a temporary settings probe without starting a model turn.
+pub fn metadata_thread_request(
+    project: &Path,
+    config: Value,
+    parent: Option<&str>,
+) -> (&'static str, Value) {
+    let mut params = json!({"cwd":project,"config":config,"ephemeral":true});
+    if let Some(parent) = parent {
+        params["threadId"] = json!(parent);
+        params["excludeTurns"] = json!(true);
+        // Codex rejects deferGoalContinuation on ephemeral threads.
+        ("thread/fork", params)
+    } else {
+        ("thread/start", params)
+    }
+}
+
 /// Resolve a manually requested run through the installed stock CLI.
 /// Reads native metadata and qualifies isolation without generating a model turn.
 pub async fn stock_request(
@@ -266,15 +283,8 @@ pub async fn stock_request_with_parent_turn(
     } else {
         "native-saved-project-config"
     });
-    let mut fork_params = json!({"cwd":project,"config":project_overrides,"ephemeral":true});
-    let method = if let Some(parent) = &parent {
-        fork_params["threadId"] = json!(parent);
-        fork_params["excludeTurns"] = json!(true);
-        fork_params["deferGoalContinuation"] = json!(true);
-        "thread/fork"
-    } else {
-        "thread/start"
-    };
+    let (method, mut fork_params) =
+        metadata_thread_request(&project, project_overrides, parent.as_deref());
     if let Some(model) = model {
         fork_params["model"] = json!(model);
     }

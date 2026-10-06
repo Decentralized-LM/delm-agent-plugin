@@ -240,6 +240,10 @@ for line in sys.stdin:
             (pathlib.Path(environment[key]) / "canary").write_text("probe write\n")
         send({"id": request_id, "result": {"exitCode": 0, "stdout": "delm-isolation-ok\n", "stderr": "", "futureField": True}})
     elif method in ("thread/start", "thread/resume", "thread/fork"):
+        if params.get("ephemeral") and params.get("deferGoalContinuation"):
+            send({"id": request_id, "error": {"code": -32602,
+                                              "message": "deferGoalContinuation cannot be combined with ephemeral"}})
+            continue
         if params.get("environments") == []:
             send({"id": request_id, "error": {"code": -32602,
                                               "message": "Empty environments disables native filesystem and exec tools"}})

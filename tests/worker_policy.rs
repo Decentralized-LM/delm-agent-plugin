@@ -100,6 +100,29 @@ fn ordinary_configuration_and_managed_integrations_are_preserved() {
 }
 
 #[test]
+fn metadata_probes_do_not_combine_ephemeral_with_goal_deferral() {
+    let fixture = Fixture::new();
+    for parent in [None, Some("parent")] {
+        let (method, params) =
+            delm::workers::metadata_thread_request(&fixture.project, json!({}), parent);
+        assert_eq!(
+            method,
+            if parent.is_some() {
+                "thread/fork"
+            } else {
+                "thread/start"
+            }
+        );
+        assert_eq!(params["ephemeral"], true);
+        assert!(params.get("deferGoalContinuation").is_none());
+        if let Some(parent) = parent {
+            assert_eq!(params["threadId"], parent);
+            assert_eq!(params["excludeTurns"], true);
+        }
+    }
+}
+
+#[test]
 fn native_fork_adds_coordination_without_replacing_permissions_or_plugins() {
     let mut fixture = Fixture::new();
     fixture.request.auth_settings = json!({"parent_thread_id":"parent","parent_turn_id":"invocation", "saved_developer_instructions":"Keep existing conventions.",
