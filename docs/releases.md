@@ -2,7 +2,7 @@
 
 Public releases contain separate self-contained Codex and Claude Code plugins with identical universal macOS runtime bytes. Each package has its native manifest, run skill, lifecycle integration, and license files; Claude also includes its native MCP sidecar configuration and shared worker instructions. Users need Git and their selected host CLI, without a compiler or source checkout. Claude Code 2.1.289 or newer is the supported native API floor. Windows and Linux are separate future work.
 
-The public source repository is [jerry2247/delm-agent-plugin](https://github.com/jerry2247/delm-agent-plugin). The first native marketplace and npm package have not been published. Initial releases will use this repository; a later GitHub transfer is covered below.
+The public source repository is [jerry2247/delm-agent-plugin](https://github.com/jerry2247/delm-agent-plugin). The native marketplace and the [`delm-agent` npm package](https://www.npmjs.com/package/delm-agent) are published from this repository; a later GitHub transfer is covered below.
 
 ## Release destination
 

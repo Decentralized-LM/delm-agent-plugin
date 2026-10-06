@@ -32,7 +32,7 @@ DeLM uses your existing host account and starts agents only when you ask.
 
 ## Install on macOS
 
-**Release pending.** Public installation will use one command for either or both plugins:
+Install either or both plugins with one command:
 
 ```sh
 npx --yes delm-agent@latest install

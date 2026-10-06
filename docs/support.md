@@ -2,7 +2,7 @@
 
 DeLM runs on macOS through the selected host's native CLI and account. Builds target macOS 13 or later on Apple Silicon and Intel; advertised release support requires qualification on the actual architecture and OS. See [development](development.md) for source builds and [releases](releases.md) for publication requirements.
 
-The public source is available at [jerry2247/delm-agent-plugin](https://github.com/jerry2247/delm-agent-plugin). The npm package and native marketplace are not published yet; use the [source installation instructions](../CONTRIBUTING.md#install-from-source) to try the current code. After publication, `npx --yes delm-agent@latest install` will detect the available host and offer Codex, Claude Code, or both when both CLIs are installed.
+The public source is available at [jerry2247/delm-agent-plugin](https://github.com/jerry2247/delm-agent-plugin). Install with `npx --yes delm-agent@latest install`. The installer detects the available host and offers Codex, Claude Code, or both when both CLIs are installed.
 
 ## Selecting a project
 

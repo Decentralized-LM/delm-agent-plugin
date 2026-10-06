@@ -1,10 +1,12 @@
 # DeLM installer
 
-This source package is **unpublished**, has not reserved its npm name, and has `private: true` to prevent accidental publication. Its `release.json` deliberately has no repository configured. Management commands refuse to run until a release package is prepared; help and version remain available. The signed native plugin marketplace has not been published either. The command below is the planned public interface; it is not an available install command yet:
+The published [`delm-agent`](https://www.npmjs.com/package/delm-agent) package installs DeLM for Codex and Claude Code:
 
 ```sh
 npx --yes delm-agent@latest install
 ```
+
+The source package keeps `private: true` and an unconfigured `release.json` to prevent accidental publication. Release preparation supplies the repository address and creates the public npm tarball.
 
 The installer is a small, dependency-free Node CLI. It detects the installed host and delegates installation, updates, removal, and status to its native plugin manager. When both Codex and Claude Code are available, you choose one or both. A prepared package installs `delm@delm` from its configured repository's `marketplace` branch, using that host's native catalog. Preparation takes one GitHub `OWNER/REPO` destination and fixes it inside that package; users cannot override it with a CLI flag. The installer does not replace either host, edit configuration files itself, grant permissions, start workers, or run an updater. The installer version is independent of the plugin version; a new plugin release does not require publishing a new installer.
 
@@ -12,7 +14,7 @@ The installer is a small, dependency-free Node CLI. It detects the installed hos
 
 Installation currently supports macOS. Node.js 22+, Git, and the selected host CLI are required. Claude Code 2.1.289 or newer is the supported version floor for the native fork/Mods API contract. Install and update check that version before making changes; status and removal remain available on older versions when their native plugin JSON is compatible. For Codex, a desktop or IDE installation without stock Codex CLI is insufficient. Complete account login through the selected host before running DeLM; this installer does not inspect credentials. In a prepared package, `--help`, `--version`, and read-only `status` are available on other operating systems. Users need Git access to its distribution repository; publishing npm does not make a private Git repository publicly accessible.
 
-Once published, use these commands without a global installation. They are not available from npm yet:
+Use these commands without a global installation:
 
 ```sh
 npx --yes delm-agent@latest install
