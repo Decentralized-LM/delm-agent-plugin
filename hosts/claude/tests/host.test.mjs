@@ -32,7 +32,7 @@ async function fixture(options = {}) {
       handler: typeof matcher === 'function' ? matcher : handler});
     return {catch: () => {}};
   });
-  const requests = [], commands = [], timers = [], notices = [], prompts = [];
+  const requests = [], commands = [], timers = [], notices = [], prompts = [], directories = [];
   const agents = new Map(), store = options.store || new Map();
   let session = options.session || 'session-fixture', revision = 1;
   let finalization = null, generation = 0;
@@ -58,6 +58,7 @@ async function fixture(options = {}) {
     process: {
       spawn: () => createStream(),
       run: async (argv, init) => {
+        directories.push({argv: argv.slice(1, 3).join(' '), cwd: init.cwd});
         const request = JSON.parse(init.stdin);
         requests.push(argv.includes('recover') ? {...request, native_recover: true} : request);
         if (argv.includes('recover')) return {exitCode: 0, stdout: JSON.stringify({status: 'interrupted', message: 'Saved work is recoverable.'}), stderr: ''};
@@ -155,7 +156,7 @@ async function fixture(options = {}) {
     else state.queued.push(item);
     await setImmediate();
   }
-  return {host, call, step, launch, spawn, event, requests, agents, timers, prompts, store, notices,
+  return {host, call, step, launch, spawn, event, requests, agents, timers, prompts, store, notices, directories,
     retryFinish: () => module.retryFinish(host,session), select: id => { session = id; }};
 }
 
@@ -990,4 +991,148 @@ test('restored explicit cancel intent overrides an older live runtime delivery i
   assert.equal(reloaded.requests.find(request=>request.op==='cancel').reason,'User requested /delm-stop');
   assert.equal(reloaded.store.get('native-run:session-fixture').finalization.intent,'cancel');
   assert.equal(reloaded.requests.some(request=>request.native_recover && request.intent==='deliver'),false);
+});
+
+test('runtime helpers start in the runtime directory, never in a peer workspace', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn(); await f.step('peer-1');
+  // A peer's hooks see its private workspace as the session directory.
+  f.host.session.cwd = async () => '/fixture/worker-1';
+  const event = {tool: 'Bash', agentId: 'peer-1', tool_use_id: 'bash-cwd', command: 'node --test'};
+  await f.call('tool.call', event, async () => ({ref: 3, result: {stdout: 'ok', interrupted: false}}));
+  assert.equal(f.requests.find(r => r.op === 'command_start' && r.call_id === 'bash-cwd').cwd, '/fixture/worker-1');
+  await f.call('command.run', {command: 'delm-stop'});
+  while (f.timers.length) await f.timers.shift()();
+  assert.ok(f.directories.length >= 3);
+  for (const call of f.directories) assert.equal(call.cwd, '/tmp', `${call.argv} must not inherit a peer directory`);
+});
+
+test('stopping a peer aborts its command bookkeeping without a failure notice', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn(); await f.step('peer-1');
+  let finish;
+  const running = new Promise(resolve => { finish = resolve; });
+  const native = {ref: 9, result: {stdout: '', interrupted: true}};
+  const event = {tool: 'Bash', agentId: 'peer-1', tool_use_id: 'bash-stopped', command: 'sleep 150'};
+  // The command is already running when the user stops DeLM.
+  const call = f.call('tool.call', event, () => running);
+  await setImmediate();
+  await f.call('command.run', {command: 'delm-stop'});
+  const run = f.host.process.run;
+  f.host.process.run = async (argv, init) => {
+    if (JSON.parse(init.stdin).op === 'command_end') throw new Error('delm: $.process.run(/tmp/delm-fixture) aborted');
+    return run(argv, init);
+  };
+  finish(native);
+  assert.equal(await call, native);
+  assert.deepEqual(f.notices.filter(line => /needs attention/.test(line)), []);
+  assert.notEqual(f.store.get('native-run:session-fixture').phase, 'recovery_required');
+});
+
+test('command bookkeeping failures outside a stop still need attention', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn(); await f.step('peer-1');
+  const run = f.host.process.run;
+  f.host.process.run = async (argv, init) => {
+    if (JSON.parse(init.stdin).op === 'command_end') throw new Error('DeLM native bridge did not complete its request.');
+    return run(argv, init);
+  };
+  const native = {ref: 10, result: {stdout: 'ok', interrupted: false}};
+  const event = {tool: 'Bash', agentId: 'peer-1', tool_use_id: 'bash-failed', command: 'node --test'};
+  assert.equal(await f.call('tool.call', event, async () => native), native);
+  assert.ok(f.notices.some(line => /needs attention: DeLM native bridge did not complete/.test(line)));
+});
+
+function taskNotification(id, status = 'completed') {
+  return `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>toolu-${id}</tool-use-id>\n`
+    + `<output-file>/tmp/tasks/${id}.output</output-file>\n<status>${status}</status>\n`
+    + `<summary>Agent "DeLM peer" finished</summary>\n<result>Nothing has reached your project yet.</result>\n</task-notification>`;
+}
+
+test('peer status notifications never start a parent turn, during the run or after delivery', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn('peer-1'); await f.spawn('peer-2');
+  let admitted = 0;
+  const parent = async input => { admitted++; return input; };
+  const notice = text => f.call('prompt.submit', {text, origin: {kind: 'task-notification'}}, parent);
+  assert.deepEqual(await notice(taskNotification('peer-2')),
+    {drop: 'DeLM handled a status notice from peer 2 itself; see /delm-status for progress.'});
+  // Claude may deliver a notification into a running parent turn.
+  assert.ok((await f.call('prompt.submit', {text: taskNotification('peer-1'), turnId: 'parent-turn',
+    origin: {kind: 'task-notification'}}, parent)).drop);
+  assert.deepEqual(await notice(taskNotification('peer-2') + '\n' + taskNotification('peer-1', 'killed')),
+    {drop: 'DeLM handled status notices from peers 1 and 2 itself; see /delm-status for progress.'});
+  await f.event({type: 'final', status: 'delivered', delivery: {verification_required: false}});
+  // DeLM stops a peer while settling; that notice can arrive after delivery.
+  assert.ok((await notice(taskNotification('peer-1', 'killed'))).drop);
+  assert.equal(admitted, 0);
+  assert.equal(f.requests.some(r => r.op === 'update'), false);
+});
+
+test('foreign tasks, background shells, peer helpers and other prompts still reach the parent', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn('peer-1'); await f.spawn('peer-2'); await f.step('peer-1');
+  await f.call('tool.call', {tool: 'Bash', agentId: 'peer-1', tool_use_id: 'shell-start', command: 'serve'},
+    async () => ({ref: 12, result: {backgroundTaskId: 'owned-shell'}}));
+  // A peer's own helper agent reports to that peer, never through DeLM.
+  const helper = await f.call('agent.spawn', {tool_use_id: 'helper', parentAgentId: 'peer-1', subagentType: 'Explore'},
+    async () => ({agentId: 'helper-1'}));
+  assert.equal(helper.agentId, 'helper-1');
+  const kept = [
+    {text: taskNotification('unrelated-agent'), origin: {kind: 'task-notification'}},
+    {text: taskNotification('owned-shell', 'killed'), origin: {kind: 'task-notification'}},
+    {text: taskNotification('helper-1'), origin: {kind: 'task-notification'}},
+    {text: taskNotification('peer-1') + '\n' + taskNotification('unrelated-agent'), origin: {kind: 'task-notification'}},
+    {text: taskNotification('peer-1') + '\nAlso check the logs.', origin: {kind: 'task-notification'}},
+    {text: 'peer-1 finished', origin: {kind: 'task-notification'}},
+    {text: taskNotification('peer-1'), origin: {kind: 'unclassified'}},
+  ];
+  for (const input of kept) assert.deepEqual(await f.call('prompt.submit', input), input);
+});
+
+test('a late notice from an earlier run peer stays out after the next run starts', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn('peer-1'); await f.spawn('peer-2');
+  await f.event({type: 'final', status: 'delivered', delivery: {verification_required: false}});
+  const next = await f.call('command.run', {command: 'delm:run', args: 'Build the next tool.'});
+  assert.match(next.args, /exactly two native fork/);
+  await f.call('turn.start', {turnId: 'second-launch', text: 'launch'});
+  await f.spawn('peer-3');
+  assert.ok((await f.call('prompt.submit', {text: taskNotification('peer-2', 'killed'),
+    origin: {kind: 'task-notification'}})).drop);
+  assert.match((await f.call('prompt.submit', {text: taskNotification('peer-3'),
+    origin: {kind: 'task-notification'}})).drop, /from peer 1 itself/);
+});
+
+test('a stopped peer turn end that loses the race with the final result neither alarms nor reopens the run', async () => {
+  for (const final of [
+    {type: 'final', status: 'stopped', recovery: {cleanup_complete: true}},
+    {type: 'final', status: 'delivered', delivery: {delivered: true, verification_required: false}},
+  ]) {
+    const f = await fixture(); await f.launch(); await f.spawn('peer-1'); await f.spawn('peer-2'); await f.step('peer-1');
+    let release;
+    const late = new Promise(resolve => { release = resolve; });
+    const run = f.host.process.run;
+    f.host.process.run = async (argv, init) => {
+      if (JSON.parse(init.stdin).op !== 'turn_end') return run(argv, init);
+      // The runtime exits after its final result and drops this request.
+      await late;
+      return {exitCode: 1, stdout: '', stderr: 'Error: Claude bridge closed without a result\n',
+        isStdoutTruncated: false, isStderrTruncated: false};
+    };
+    const ended = f.call('turn.complete', {agentId: 'peer-1', turnId: 'worker-turn', reason: 'answer', isAborted: true});
+    await setImmediate();
+    await f.event(final);
+    release();
+    await ended;
+    assert.deepEqual(f.notices.filter(line => /needs attention/.test(line)), [], final.status);
+    const saved = f.store.get('native-run:session-fixture');
+    assert.equal(saved.phase, final.status);
+    assert.equal(saved.failure, null);
+  }
+});
+
+test('a final report that cannot be posted says so without marking the finished run as failed', async () => {
+  const f = await fixture(); await f.launch(); await f.spawn('peer-1'); await f.spawn('peer-2');
+  f.host.prompt.submit = async () => { throw new Error('The prompt queue is closed.'); };
+  await f.event({type: 'final', status: 'delivered', delivery: {delivered: true, verification_required: false}});
+  while (f.timers.length) await f.timers.shift()();
+  assert.ok(f.notices.includes('DeLM finished, but could not post its report: The prompt queue is closed. Open /delm-status for the outcome.'),
+    f.notices.join('\n'));
+  assert.equal(f.notices.some(line => /needs attention/.test(line)), false);
+  assert.equal(f.store.get('native-run:session-fixture').phase, 'delivered');
 });

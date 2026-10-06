@@ -295,6 +295,32 @@ class ClaudeBoardIntegration(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("does not belong to this conversation", result.stderr)
 
+    def test_runs_directory_from_older_releases_is_viewable_with_the_real_cli(self):
+        # Releases before the private storage layout created `runs` with 0755.
+        # The run writer still accepts it, so the installed observer must too.
+        runs = self.fixture.run_dir.parent
+        self.fixture.task("Visible after an older install")
+        runs.chmod(0o755)
+        try:
+            view = self.fixture.read()
+            self.assertEqual([task["title"] for task in view["tasks"]["items"]],
+                             ["Visible after an older install"])
+            for mode in (0o775, 0o777):
+                runs.chmod(mode)
+                result = self.fixture.read(check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(f"has permissions {mode:03o}; it must not be writable by other users",
+                              result.stderr)
+            runs.chmod(0o755)
+            self.fixture.run_dir.chmod(0o755)
+            result = self.fixture.read(check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("must not be accessible to other users", result.stderr)
+        finally:
+            runs.chmod(0o700)
+            self.fixture.run_dir.chmod(0o700)
+
     def test_large_publications_fit_native_transport_without_skipping_details(self):
         expected = []
         paths = [f"{index}/" + "a/" * 250 for index in range(32)]

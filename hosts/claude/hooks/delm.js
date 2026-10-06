@@ -9,6 +9,7 @@ const restores = new Map();
 const starts = new Set();
 const generations = new Map();
 const restoreAttempts = new Set();
+const peers = new Map();
 const STORE_PREFIX = 'native-run:';
 function ownsConversation(run) {
   return Boolean(run && !run.finished && !run.ending && run.phase === 'working'
@@ -98,10 +99,18 @@ async function current($, run) {
   return !run.ending && runs.get(run.session) === run && await $.session.id() === run.session;
 }
 
+// A hook running for a forked peer has that peer's private workspace as its
+// session directory. Helper processes must never inherit it: a helper still
+// alive there vetoes workspace cleanup when the run stops or finishes.
+function helperDirectory(run) {
+  const executable = run.ready.executable;
+  return executable.slice(0, executable.lastIndexOf('/')) || '/';
+}
+
 async function request($, run, op, fields = {}, timeoutMs = 120000) {
   const result = await $.process.run(
     [run.ready.executable, 'claude', 'request', '--socket', run.ready.socket],
-    {stdin: JSON.stringify({token: run.ready.token, op, ...fields}) + '\n', timeoutMs},
+    {stdin: JSON.stringify({token: run.ready.token, op, ...fields}) + '\n', timeoutMs, cwd: helperDirectory(run)},
   );
   if (result.exitCode !== 0 || result.isStdoutTruncated || result.isStderrTruncated) {
     throw new Error(result.stderr.trim() || 'DeLM native bridge did not complete its request.');
@@ -114,6 +123,10 @@ async function request($, run, op, fields = {}, timeoutMs = 120000) {
 }
 
 async function reportFailure($, run, error) {
+  // The runtime's final result settles the run. Bookkeeping that loses the
+  // race with the bridge's exit after that result, such as a stopped peer's
+  // turn end, cannot fail or reopen it.
+  if (run.finished) return;
   run.failure = String(error?.message || error);
   run.phase = 'recovery_required';
   run.canRetryFinish = run.finalization?.intent === 'deliver' && !run.finished && !run.cancelRequested;
@@ -213,7 +226,11 @@ async function submitControl($, run, message, detail = {kind: 'final'}) {
     await persist($, run);
     await $.prompt.submit({text: message});
   } catch (error) {
-    await reportFailure($, run, error);
+    if (!run.finished) await reportFailure($, run, error);
+    else if (await current($, run)) {
+      $.ui.log('DeLM finished, but could not post its report: ' + String(error.message || error).replace(/\.$/, '')
+        + '. Open /delm-status for the outcome.');
+    }
   }
 }
 
@@ -531,7 +548,7 @@ async function recover($, stored, requestedIntent = null) {
   const result = await $.process.run([run.ready.executable, 'claude', 'recover', '--run-id', run.ready.run_id], {
     stdin: JSON.stringify({token: run.ready.token, session_id: run.session, agents, background_tasks_stopped: true,
       intent: run.cancelRequested ? 'cancel' : requestedIntent || run.finalization?.intent || 'auto'}) + '\n',
-    timeoutMs: 120000,
+    timeoutMs: 120000, cwd: helperDirectory(run),
   });
   if (result.exitCode !== 0 || result.isStdoutTruncated || result.isStderrTruncated) {
     throw new Error(result.stderr.trim() || 'DeLM needs recovery before another run can start.');
@@ -548,6 +565,35 @@ async function recover($, stored, requestedIntent = null) {
 
 function owned(run, id) {
   return id && (run?.agents[id] || run?.descendants[id]);
+}
+
+function rememberPeer(run, agentId, slot) {
+  if (!peers.has(run.session)) peers.set(run.session, new Map());
+  peers.get(run.session).set(agentId, slot);
+}
+
+// Claude notifies the parent each time a forked peer stops, including when
+// DeLM stops it while settling. DeLM reports peer progress on its board and
+// the outcome in its handoff, so admitting the notification only starts a
+// parent turn that narrates stale peer status, even after delivery, and holds
+// DeLM's own controls behind that turn. A peer of an earlier run in this
+// conversation can still notify after a new run starts. Anything else in the
+// prompt, including another task's notification, keeps it for the parent.
+const NOTIFICATION = /<task-notification>[\s\S]*?<\/task-notification>/g;
+
+function peerNotification(run, session, e) {
+  const blocks = e.text.match(NOTIFICATION) || [];
+  if (!blocks.length || e.text.replace(NOTIFICATION, '').trim()) return null;
+  const slots = new Set();
+  for (const block of blocks) {
+    const id = /^<task-notification>\s*<task-id>([^<]+)<\/task-id>/.exec(block)?.[1].trim();
+    const slot = id && (run?.agents[id]?.slot || peers.get(session)?.get(id));
+    if (!slot) return null;
+    slots.add(slot);
+  }
+  const names = [...slots].sort((a, b) => a - b);
+  return 'DeLM handled ' + (names.length === 1 ? 'a status notice from peer ' + names[0]
+    : 'status notices from peers ' + names.join(' and ')) + ' itself; see /delm-status for progress.';
 }
 
 async function waitForOwnBinding(run, agentId) {
@@ -682,6 +728,7 @@ export function register(on) {
       run.agents[result.agentId] = {slot, status: 'running', turn: null,
         deliveredRevision: run.ready.revision, resumeRevision: run.ready.revision,
         acknowledgedRevision: 0, pending: null, lastUpdate: null};
+      rememberPeer(run, result.agentId, slot);
       await persist($, run);
       await request($, run, 'bind', {slot, agent_id: result.agentId});
       await request($, run, 'configure_scopes', {
@@ -839,7 +886,9 @@ export function register(on) {
       }
       return result;
     } catch (error) {
-      await reportFailure($, run, error);
+      // Stopping a peer aborts its in-flight bookkeeping. Settlement proves
+      // shutdown independently, so that abort is not a run failure.
+      if (!run.stopping && !run.finished) await reportFailure($, run, error);
       if (nativeResult) return nativeResult;
       return {deny: 'DeLM could not record this native command: ' + String(error.message || error)};
     }
@@ -923,6 +972,10 @@ export function register(on) {
   on('prompt.submit', async ($, e, next) => {
     const run = await currentRun($, false);
     if (!run) restoreInBackground($);
+    if (e.origin.kind === 'task-notification') {
+      const handled = peerNotification(run, await $.session.id(), e);
+      if (handled) return {drop: handled};
+    }
     if (run && e.origin.kind === 'plugin' && e.origin.name === $.plugin.name) {
       const control = run.controls?.find(value => !value.admitted && value.text === e.text);
       if (control) {

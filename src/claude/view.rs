@@ -47,29 +47,60 @@ pub struct Arguments {
 /// This intentionally does not use state::run_path: that helper creates missing
 /// storage. Looking at a missing/old run must leave the filesystem untouched.
 fn run_path(id: &str) -> Result<PathBuf> {
-    let id = uuid::Uuid::parse_str(id).context("Invalid view run identity")?;
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is unset")?);
-    let parent = home.join("Library/Application Support").canonicalize()?;
-    let root = parent.join("DeLM");
-    for path in [
-        &root,
-        &root.join("runs"),
-        &root.join("runs").join(id.to_string()),
-    ] {
-        owned_directory(path)?;
-    }
-    Ok(root.join("runs").join(id.to_string()))
+    run_path_in(&home, id)
 }
 
-fn owned_directory(path: &Path) -> Result<()> {
+/// Directory modes the observer refuses for run storage ancestors and for the
+/// run itself.
+const ANCESTOR_FORBIDDEN: u32 = 0o022;
+const RUN_FORBIDDEN: u32 = 0o077;
+
+fn run_path_in(home: &Path, id: &str) -> Result<PathBuf> {
+    let id = uuid::Uuid::parse_str(id).context("Invalid view run identity")?;
+    let parent = home.join("Library/Application Support").canonicalize()?;
+    let root = parent.join("DeLM");
+    let runs = root.join("runs");
+    let run = runs.join(id.to_string());
+    // The writer creates every run privately, but it accepts an existing owned
+    // `runs` directory with any mode, and older releases created it with the
+    // default 0755. The observer must accept every layout the writer runs in:
+    // ancestors only have to be owned and unmodifiable by other users, which
+    // already prevents another account from replacing a run. The run itself
+    // stays private.
+    owned_directory(&root, ANCESTOR_FORBIDDEN)?;
+    owned_directory(&runs, ANCESTOR_FORBIDDEN)?;
+    owned_directory(&run, RUN_FORBIDDEN)?;
+    Ok(run)
+}
+
+fn owned_directory(path: &Path, forbidden: u32) -> Result<()> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
+        .open(path)
+        .with_context(|| {
+            format!(
+                "Board view cannot open {} as a real directory",
+                path.display()
+            )
+        })?;
     let meta = file.metadata()?;
     ensure!(
-        meta.is_dir() && meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o077 == 0,
-        "Board view storage must be private and owned by the current user"
+        meta.is_dir() && meta.uid() == unsafe { libc::geteuid() },
+        "Board view storage {} must be a directory owned by the current user",
+        path.display()
+    );
+    ensure!(
+        meta.mode() & forbidden == 0,
+        "Board view storage {} has permissions {:03o}; it must not be {} other users",
+        path.display(),
+        meta.mode() & 0o777,
+        if forbidden == RUN_FORBIDDEN {
+            "accessible to"
+        } else {
+            "writable by"
+        }
     );
     Ok(())
 }
@@ -365,7 +396,7 @@ struct Observer {
 
 impl Observer {
     fn new(run: PathBuf, run_id: String, session: String) -> Result<Self> {
-        owned_directory(&run)?;
+        owned_directory(&run, RUN_FORBIDDEN)?;
         ensure!(
             !session.is_empty() && session.len() <= 256,
             "Missing view conversation identity"
@@ -386,7 +417,7 @@ impl Observer {
     }
 
     fn snapshot(&mut self, collection: Option<&str>, page: Page) -> Result<Value> {
-        owned_directory(&self.run)?;
+        owned_directory(&self.run, RUN_FORBIDDEN)?;
         let metadata = std::fs::symlink_metadata(&self.run)?;
         ensure!(
             (metadata.dev(), metadata.ino()) == self.directory_identity
@@ -840,5 +871,78 @@ mod tests {
                 .unwrap()
                 .contains(&json!("outcome"))
         );
+    }
+
+    fn storage_home(runs_mode: u32, run_mode: u32) -> (tempfile::TempDir, String, PathBuf) {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("Library/Application Support/DeLM");
+        let id = uuid::Uuid::new_v4().to_string();
+        let run = root.join("runs").join(&id);
+        fs::create_dir_all(&run).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(root.join("runs"), fs::Permissions::from_mode(runs_mode)).unwrap();
+        fs::set_permissions(&run, fs::Permissions::from_mode(run_mode)).unwrap();
+        (home, id, run)
+    }
+
+    #[test]
+    fn run_storage_created_by_older_releases_remains_viewable() {
+        // Older releases created `runs` with the default 0755 mode and the run
+        // writer still accepts it, so the observer must open those runs too.
+        for runs_mode in [0o700, 0o750, 0o755] {
+            let (home, id, run) = storage_home(runs_mode, 0o700);
+            let resolved = run_path_in(home.path(), &id).unwrap();
+            assert_eq!(resolved, run.canonicalize().unwrap());
+        }
+        let (home, id, _) = storage_home(0o755, 0o700);
+        fs::set_permissions(
+            home.path().join("Library/Application Support/DeLM"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert!(run_path_in(home.path(), &id).is_ok());
+    }
+
+    #[test]
+    fn run_storage_that_other_users_can_change_or_read_is_refused_with_its_reason() {
+        for runs_mode in [0o775, 0o757, 0o777] {
+            let (home, id, _) = storage_home(runs_mode, 0o700);
+            let error = format!("{:#}", run_path_in(home.path(), &id).unwrap_err());
+            assert!(
+                error.contains("must not be writable by other users"),
+                "{error}"
+            );
+            assert!(error.contains(&format!("{:03o}", runs_mode)), "{error}");
+        }
+        for run_mode in [0o750, 0o705, 0o755] {
+            let (home, id, _) = storage_home(0o755, run_mode);
+            let error = format!("{:#}", run_path_in(home.path(), &id).unwrap_err());
+            assert!(
+                error.contains("must not be accessible to other users"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn linked_or_missing_run_storage_is_refused_without_creating_anything() {
+        let (home, id, run) = storage_home(0o755, 0o700);
+        let elsewhere = home.path().join("elsewhere");
+        fs::rename(&run, &elsewhere).unwrap();
+        symlink(&elsewhere, &run).unwrap();
+        assert!(run_path_in(home.path(), &id).is_err());
+        fs::remove_file(&run).unwrap();
+        let runs = run.parent().unwrap();
+        let moved = home.path().join("moved-runs");
+        fs::rename(runs, &moved).unwrap();
+        symlink(&moved, runs).unwrap();
+        assert!(run_path_in(home.path(), &id).is_err());
+        fs::remove_file(runs).unwrap();
+        fs::create_dir(runs).unwrap();
+        fs::set_permissions(runs, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = format!("{:#}", run_path_in(home.path(), &id).unwrap_err());
+        assert!(error.contains("cannot open"), "{error}");
+        assert!(!run.exists(), "Viewing a missing run must not create it");
+        assert!(run_path_in(home.path(), "not-a-run").is_err());
     }
 }

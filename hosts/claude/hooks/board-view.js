@@ -201,10 +201,20 @@ function argv($, state, extra = []) {
   return [$.plugin.root + '/bin/delm', 'claude', 'view', '--run-id', state.runId,
     '--session-id', state.session, ...extra];
 }
+// The observer explains refusals on stderr. Keep its first line and cause so
+// the board can say why updates stopped instead of only that they did.
+export function observerReason(stderr) {
+  const lines = String(stderr || '').split('\n').map(line => line.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  const message = lines[0].replace(/^Error:\s*/, '');
+  const caused = lines.indexOf('Caused by:');
+  const cause = caused >= 0 && lines[caused + 1] ? lines[caused + 1].replace(/^\d+:\s*/, '') : '';
+  return cleanText(cause && cause !== message ? `${message}: ${cause}` : message, 600) || null;
+}
 async function readOnce($, state, extra = []) {
-  const result = await $.process.run(argv($, state, extra), {stdin: '', timeoutMs: 3000});
+  const result = await $.process.run(argv($, state, extra), {stdin: '', timeoutMs: 3000, cwd: $.plugin.root});
   if (result.exitCode !== 0 || result.isStdoutTruncated || result.stdout.length > MAX_LINE) {
-    throw new Error('DeLM could not read this saved board.');
+    throw new Error(observerReason(result.stderr) || 'DeLM could not read this saved board.');
   }
   return validateSnapshot(JSON.parse(result.stdout), state.session, state.runId);
 }
@@ -220,6 +230,7 @@ function accept($, state, value) {
   state.snapshot = value;
   state.phase = !value.finished && state.hostFailure ? 'recovery_required' : null;
   state.disconnected = false;
+  state.viewError = null;
   state.attention = (!value.finished && state.hostFailure) || value.outcome?.reason || null;
   state.retries = 0;
   if (value.finished) {
@@ -236,12 +247,14 @@ function watch($, state) {
   const stamp = ++state.streamGeneration;
   const interval = state.hidden ? 1000 : 250;
   void (async () => {
-    let buffer = '';
+    let buffer = '', errors = '';
     try {
-      const stream = $.process.spawn({argv: argv($, state, ['--watch', '--interval-ms', String(interval)])});
+      // A long-lived observer must never hold a peer workspace as its directory.
+      const stream = $.process.spawn({argv: argv($, state, ['--watch', '--interval-ms', String(interval)]), cwd: $.plugin.root});
       state.stream = stream;
       watchRead: for await (const chunk of stream) {
         if (!valid(state) || state.streamGeneration !== stamp) break;
+        if (chunk.stream === 'stderr') { errors = (errors + chunk.text).slice(-4096); continue; }
         if (chunk.stream !== 'stdout') continue;
         buffer += chunk.text;
         if (buffer.length > MAX_LINE * 2) throw new Error('DeLM board output exceeded its limit.');
@@ -255,7 +268,7 @@ function watch($, state) {
         }
       }
       if (valid(state) && state.streamGeneration === stamp && !state.snapshot?.finished) {
-        throw new Error('The DeLM board observer disconnected.');
+        throw new Error(observerReason(errors) || 'The DeLM board observer disconnected.');
       }
     } catch (error) {
       if (valid(state) && state.streamGeneration === stamp) {

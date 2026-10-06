@@ -6,7 +6,7 @@ import test from 'node:test';
 const rendererSource = await readFile(new URL('../hooks/board-render.js', import.meta.url), 'utf8');
 const rendererURL = 'data:text/javascript;base64,' + Buffer.from(rendererSource).toString('base64');
 const viewSource = await readFile(new URL('../hooks/board-view.js', import.meta.url), 'utf8');
-const {registerBoard: createBoardView, observeBoard, validateSnapshot, acceptsSnapshot} = await import('data:text/javascript;base64,'
+const {registerBoard: createBoardView, observeBoard, validateSnapshot, acceptsSnapshot, observerReason} = await import('data:text/javascript;base64,'
   + Buffer.from(viewSource.replace("'./board-render.js'", JSON.stringify(rendererURL))).toString('base64'));
 
 const SESSION = 'conversation-1';
@@ -792,4 +792,57 @@ test('explicit collection refresh includes new records and replaces only the pag
   assert.deepEqual(requests.at(-1), {offset: 0, anchor: 130, anchored: false});
   assert.match(text(f.render()), /50 total/);
   assert.deepEqual(f.forbidden, []); f.stop();
+});
+
+const STORAGE_REFUSAL = 'Error: Board view storage /Users/me/Library/Application Support/DeLM/runs has permissions 777; it must not be writable by other users\n';
+
+test('a refused observer explains its reason instead of loading forever', async () => {
+  const f = fixture(); await f.view.status(f.host, SESSION);
+  f.streams[0].push(STORAGE_REFUSAL, 'stderr'); f.streams[0].end(); await flush();
+  const overview = text(f.render());
+  assert.match(overview, /Updates disconnected/);
+  assert.match(overview, /Tasks unavailable/); assert.doesNotMatch(overview, /Loading tasks/);
+  assert.match(overview, /Shared context unavailable/); assert.doesNotMatch(overview, /Loading shared context/);
+  f.press('board-details'); await flush();
+  assert.match(text(f.render()), /Reason: Board view storage .*runs has permissions 777; it must not be writable by other users/);
+  assert.deepEqual(f.forbidden, []); f.stop();
+});
+
+test('a reconnected observer clears the previous reason', async () => {
+  const f = fixture(); await f.view.status(f.host, SESSION);
+  f.streams[0].push(STORAGE_REFUSAL, 'stderr'); f.streams[0].end(); await flush();
+  const retry = f.timers.find(timer => timer.kind === 'after' && timer.milliseconds >= 1000 && !timer.cancelled && !timer.fired);
+  retry.fired = true; retry.callback(); await flush();
+  await f.emit(snapshot());
+  const overview = text(f.render());
+  assert.doesNotMatch(overview, /Updates disconnected/); assert.match(overview, /Current task/);
+  f.press('board-details'); await flush();
+  assert.doesNotMatch(text(f.render()), /Reason:/); f.stop();
+});
+
+test('an observer that ends without stderr keeps the generic disconnect reason', async () => {
+  const f = fixture(); await f.view.status(f.host, SESSION); await f.emit(snapshot());
+  f.streams[0].end(); await flush();
+  assert.match(text(f.render()), /Current task/);
+  f.press('board-details'); await flush();
+  assert.match(text(f.render()), /Reason: The DeLM board observer disconnected\./); f.stop();
+});
+
+test('observer refusals are reduced to one readable line with their cause', () => {
+  assert.equal(observerReason(STORAGE_REFUSAL),
+    'Board view storage /Users/me/Library/Application Support/DeLM/runs has permissions 777; it must not be writable by other users');
+  assert.equal(observerReason('Error: Board view cannot open /x/runs/id as a real directory\n\nCaused by:\n    No such file or directory (os error 2)\n'),
+    'Board view cannot open /x/runs/id as a real directory: No such file or directory (os error 2)');
+  assert.equal(observerReason(''), null); assert.equal(observerReason(undefined), null);
+  assert.ok(observerReason('Error: ' + 'x'.repeat(5000)).length <= 600);
+});
+
+test('board observers run from the plugin directory, never a peer workspace', async () => {
+  const f = fixture(); await f.view.status(f.host, SESSION);
+  f.streams[0].push(STORAGE_REFUSAL, 'stderr'); f.streams[0].end(); await flush();
+  await f.view.status(f.host, SESSION);
+  const helpers = f.commands.filter(command => command.kind === 'spawn' || command.kind === 'run');
+  assert.ok(helpers.length >= 2);
+  for (const command of helpers) assert.equal(command.cwd, '/installed/current-plugin');
+  f.stop();
 });

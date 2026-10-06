@@ -797,6 +797,23 @@ fn same_user_processes(
     bail!("Workspace quiet checks require macOS process metadata")
 }
 
+/// Short executable name used only to explain a cleanup veto.
+#[cfg(target_os = "macos")]
+fn process_name(pid: u32) -> String {
+    let mut buffer = [0u8; 256];
+    let length =
+        unsafe { libc::proc_name(pid as i32, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if length <= 0 {
+        return "unknown process".into();
+    }
+    String::from_utf8_lossy(&buffer[..length as usize]).into_owned()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_name(_pid: u32) -> String {
+    "unknown process".into()
+}
+
 fn inspect_workspace_references(
     processes: &[Process],
     roots: &[PathBuf],
@@ -827,8 +844,9 @@ fn inspect_workspace_references(
                 "Cannot exclude a workspace reference for live PID {}; preserve the workspaces",
                 info.identity.pid
             ))?,
-            "Live PID {} still references a private workspace; stop its native task before cleanup",
-            info.identity.pid
+            "Live PID {} ({}) still references a private workspace; stop its native task before cleanup",
+            info.identity.pid,
+            process_name(info.identity.pid)
         );
     }
     Ok(())
@@ -1144,6 +1162,10 @@ mod quiet_tests {
                 error
                     .to_string()
                     .contains(&format!("Live PID {}", child.0.id()))
+            );
+            assert!(
+                !error.to_string().contains("unknown process"),
+                "a veto names the process it observed: {error}"
             );
             assert!(
                 identity.is_running().unwrap(),

@@ -113,6 +113,7 @@ export function normalizeBoard(input = {}) {
     freshness: snapshot.freshness || {}, phase: input.phase || snapshot.phase || snapshot.status || 'preparing',
     runId: snapshot.runId ?? snapshot.run_id, requestRevision: snapshot.requestRevision ?? snapshot.request_revision ?? snapshot.revision,
     attention: snapshot.attention || input.attention, disconnected: input.disconnected || snapshot.freshness?.disconnected,
+    viewError: input.disconnected && input.viewError ? cleanText(input.viewError, 600) : null,
     selectedAgentName: selectedAgent?.name,
     canRetryFinish: Boolean(input.canRetryFinish && !snapshot.finished), retryingFinish: Boolean(input.retryingFinish),
     conversationAvailable: Boolean(input.conversationAvailable)};
@@ -228,6 +229,7 @@ function more(h, type, shown, collection, actions) {
 function emptyCollection(view, kind) {
   const unavailable = view.freshness.unavailable || view.freshness.unavailableSources || view.freshness.unavailable_sources || [];
   if (unavailable.includes('board')) {
+    if (!view.source && view.disconnected) return kind === 'tasks' ? 'Tasks unavailable' : 'Shared context unavailable';
     if (!view.source) return kind === 'tasks' ? 'Loading tasks…' : 'Loading shared context…';
     return kind === 'tasks' ? 'Tasks temporarily unavailable' : 'Shared context temporarily unavailable';
   }
@@ -434,6 +436,7 @@ function detail(h, view, screen, actions) {
     const observedDate = new Date(view.observed_at);
     if (Number.isFinite(view.observed_at) && Number.isFinite(observedDate.getTime())) children.push(h.text(`Last observed ${observedDate.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC')}`, {dimColor: true}));
     if (view.disconnected) children.push(h.text('Updates disconnected. These are the last observed facts.', {dimColor: true}));
+    if (view.viewError) children.push(h.text(`Reason: ${view.viewError}`));
     if (view.requestRevision != null) children.push(h.text(`Accepted request revision ${view.requestRevision}`, {dimColor: true}));
     for (const agent of view.agents) if (agent.receivedRevision != null) children.push(h.text(`${agent.name} received revision ${agent.receivedRevision}`, {dimColor: true}));
     children.push(h.blank(), h.button('detail-tasks', `All tasks (${view.tasks.total})`, () => actions.select?.('tasks', null)),
