@@ -14,7 +14,7 @@ Build and install through the native plugin manager:
 ./scripts/install.sh
 ```
 
-Restart Codex, review and trust DeLM in `/hooks`, then restart again. Open the intended project and invoke `$delm:run <task>`. The contributor marketplace is `delm-local`. Installation neither replaces Codex nor grants hook trust.
+Restart Codex, review and trust DeLM in `/hooks`, then restart again. Open the intended project using `codex --ask-for-approval on-request` and invoke `$delm:run <task>`. Confirm 2, 3, or 4 agents in the native form; 2 is selected initially. The contributor marketplace is `delm-local`. Installation neither replaces Codex nor grants hook trust.
 
 To build without installing, run `./scripts/build.sh --host codex`. It stages the package under `.build/plugin/` and preserves earlier packages.
 
@@ -83,21 +83,42 @@ Release architecture, signing, and publication requirements are documented in [r
 
 ### Codex
 
-Only run this when real account use has been authorized. Supply a small task beginning with `$delm:run `:
+For the agent selector, use the bounded native-terminal fixture first:
+
+```sh
+cargo build --locked --bin delm
+python3 scripts/verify_codex_selector.py --out .validation/selector-cancel --case cancel
+```
+
+This stages the production plugin in a disposable Codex home and presses Escape in the real native form. It makes no model calls. `--case never`, `--case normal`, and `--case worker` check policy refusal, ordinary conversation, and nested worker suppression against a local scripted provider. `--case positive --agents 3` confirms the form, creates exactly three real native worker threads, and checks inherited environment values through their native execution tools using scripted responses. It establishes the launch path, not model-generated task quality. Each invocation has a 60-second ceiling and records the actual terminal bytes, native version, package hash, and result. Captured terminal bytes can be rendered as an evidence image; they are not an operating-system screenshot.
+
+The routine `test_native_selection_environment.py` regression also checks three- and four-agent confirmation with a deliberately restricted MCP environment. It verifies that the trusted command hook preserves the original environment, waits for confirmation, and starts only one runtime even if the hook is repeated. It uses the `native-lifecycle-fixture` executable and makes no host or account calls.
+
+With explicit account authorization, the tiny live check uses GPT-6 Astra at medium effort and confirms the selected count through the native form:
+
+```sh
+python3 scripts/verify_codex_selector.py \
+  --out .validation/selector-live --case live --agents 3 \
+  --auth-home "${CODEX_HOME:-$HOME/.codex}"
+```
+
+The live task creates one text file and performs one focused check. Its work budget leaves time for shutdown within the same 60-second ceiling. A timed-out or undelivered result is a failed check, not a speed result. The fixture references the existing native login without reading or copying credentials, then removes the reference after confirming shutdown.
+
+The longer fresh-install qualification below is separate. Only run this when real account use has been authorized. Supply a small task beginning with `$delm:run `:
 
 ```sh
 python3 scripts/verify_fresh_install.py \
   --out .validation/fresh-install-01 \
   --auth-home "${CODEX_HOME:-$HOME/.codex}" \
   --runtime target/debug/delm \
-  --model gpt-6-astra --effort xhigh \
+  --model gpt-6-astra --effort medium --agents 2 \
   --task-file /absolute/path/to/task.txt \
   --timeout-seconds 1500
 ```
 
 Select an available model and effort. This helper installs the plugin into a disposable Codex home, trusts its discovered hooks there, and invokes a real parent session. It uses real account capacity and stays outside routine CI. It references the existing file-backed login without copying its contents and removes that reference after confirmed shutdown.
 
-Evidence covers native ownership, exact task handoff, both workers, observed collaboration, delivery to the disposable original project, and removal of temporary workspaces. A `delivered` status is distinct from fully verified completion: required local setup or merged-result checks must finish in the parent before reporting the task ready. This qualifies a fresh installation, not new-account login or subjective product quality. Keep its evidence private.
+Evidence covers native ownership, exact task handoff, the selected worker roster, observed collaboration, delivery to the disposable original project, and removal of temporary workspaces. A `delivered` status is distinct from fully verified completion: required local setup or merged-result checks must finish in the parent before reporting the task ready. This qualifies a fresh installation, not new-account login or subjective product quality. Keep its evidence private.
 
 ### Claude Code
 

@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartRequest {
+    #[serde(default = "crate::config::default_worker_count")]
+    pub worker_count: usize,
     pub project: PathBuf,
     pub task: String,
     #[serde(default)]

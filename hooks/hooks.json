@@ -17,7 +17,21 @@
           {
             "type": "command",
             "command": "exec \"${PLUGIN_ROOT}/bin/delm\" lifecycle-hook",
-            "timeout": 5
+            "timeout": 330
+          },
+          {
+            "type": "mcp_tool",
+            "server": "delm_selector",
+            "tool": "select_agents",
+            "input": {
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "turn_id": "${turn_id}",
+              "prompt": "${prompt}",
+              "cwd": "${cwd}"
+            },
+            "timeout": 330,
+            "statusMessage": "Choose DeLM agent count"
           }
         ]
       }

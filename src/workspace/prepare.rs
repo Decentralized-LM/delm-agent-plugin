@@ -13,6 +13,27 @@ pub(super) struct Ownership {
     pub(super) root: (u64, u64),
     pub(super) children: BTreeMap<String, (u64, u64)>,
 }
+
+pub(super) fn validate_ownership_roster(
+    prepared: &PreparedWorkspace,
+    ownership: &Ownership,
+) -> Result<()> {
+    prepared.validate_layout()?;
+    let required: BTreeSet<_> = std::iter::once("baseline".to_owned())
+        .chain((1..=prepared.workers.len()).map(|worker| format!("worker-{worker}")))
+        .collect();
+    ensure!(
+        required
+            .iter()
+            .all(|name| ownership.children.contains_key(name))
+            && ownership.children.keys().all(|name| {
+                required.contains(name) || matches!(name.as_str(), "capture-0" | "capture-1")
+            }),
+        "workspace ownership roster does not match selected workers"
+    );
+    Ok(())
+}
+
 pub(super) fn identity(path: &Path) -> Result<(u64, u64)> {
     let m = fs::symlink_metadata(path)?;
     ensure!(
@@ -201,6 +222,17 @@ fn initialize_selected_root(original: &Path, root: &File, run_dir: &Path) -> Res
 /// Capture a saved project and two workers. `project` is the selected root.
 /// Failed preparation removes its identified partial captures before returning.
 pub fn prepare(project: &Path, run_dir: &Path, limit: u64) -> Result<PreparedWorkspace> {
+    prepare_with_workers(project, run_dir, limit, crate::config::DEFAULT_WORKER_COUNT)
+}
+
+/// Capture a saved project and the selected immutable worker roster.
+pub fn prepare_with_workers(
+    project: &Path,
+    run_dir: &Path,
+    limit: u64,
+    worker_count: usize,
+) -> Result<PreparedWorkspace> {
+    crate::config::validate_worker_count(worker_count)?;
     #[cfg(not(target_os = "macos"))]
     bail!("native COW workspaces require macOS");
     let until = deadline();
@@ -322,7 +354,9 @@ pub fn prepare(project: &Path, run_dir: &Path, limit: u64) -> Result<PreparedWor
                         .cloned()
                         .collect();
                     let baseline_index = git::run(&saved, &saved, &["ls-files", "--stage", "-z"])?;
-                    let workers = [workspace.join("worker-1"), workspace.join("worker-2")];
+                    let workers: Vec<_> = (1..=worker_count)
+                        .map(|worker| workspace.join(format!("worker-{worker}")))
+                        .collect();
                     for worker in &workers {
                         guard.create(worker.file_name().unwrap().to_str().unwrap())?;
                         clone_selected(
@@ -347,8 +381,10 @@ pub fn prepare(project: &Path, run_dir: &Path, limit: u64) -> Result<PreparedWor
                         &baseline_manifest,
                     )?;
                     let mut children = BTreeMap::new();
-                    for name in ["baseline", "worker-1", "worker-2"] {
-                        children.insert(name.to_owned(), identity(&workspace.join(name))?);
+                    children.insert("baseline".to_owned(), identity(&saved)?);
+                    for worker in &workers {
+                        let name = worker.file_name().unwrap().to_str().unwrap();
+                        children.insert(name.to_owned(), identity(worker)?);
                     }
                     for previous in 0..attempt {
                         let name = format!("capture-{previous}");
@@ -751,7 +787,8 @@ pub fn retain_result_with_policy(
     worker: usize,
     policy: &ResultPolicy,
 ) -> Result<PathBuf> {
-    ensure!(worker < 2, "worker index must be zero or one");
+    prepared.validate_layout()?;
+    ensure!(worker < prepared.workers.len(), "unknown result worker");
     let workspace = prepared.run_dir.join("workspace");
     let ownership: Ownership =
         serde_json::from_reader(File::open(workspace.join("ownership.json"))?)?;
@@ -761,17 +798,7 @@ pub fn retain_result_with_policy(
             && ownership.root == identity(&workspace)?,
         "workspace ownership mismatch"
     );
-    ensure!(
-        prepared.baseline == workspace.join("baseline")
-            && prepared.workers == [workspace.join("worker-1"), workspace.join("worker-2")],
-        "unowned workspace paths"
-    );
-    for name in ownership.children.keys() {
-        ensure!(
-            ["baseline", "worker-1", "worker-2", "capture-0", "capture-1"].contains(&name.as_str()),
-            "invalid ownership entry"
-        );
-    }
+    validate_ownership_roster(prepared, &ownership)?;
     let winner = &prepared.workers[worker];
     validate_retained_git(winner)?;
     if workspace.join("retained-result.json").exists() {
@@ -859,11 +886,11 @@ fn validate_retained_git(winner: &Path) -> Result<()> {
 }
 
 fn cleanup(workspace: &Path, ownership: &Ownership, worker: usize, winner: &Path) -> Result<()> {
-    let winner_name = if worker == 0 { "worker-1" } else { "worker-2" };
+    let winner_name = format!("worker-{}", worker + 1);
     // remove_dir_all does not traverse symlinks. The caller has stopped owned
     // writers, and worker sandboxes cannot modify this runtime-owned parent.
     for (name, owned) in &ownership.children {
-        if name == winner_name {
+        if name == &winner_name {
             ensure!(identity(winner)? == *owned, "winner identity changed");
             continue;
         }

@@ -54,8 +54,39 @@ pub struct PreparedWorkspace {
     pub original: PathBuf,
     pub run_dir: PathBuf,
     pub baseline: PathBuf,
-    pub workers: [PathBuf; 2],
+    pub workers: Vec<PathBuf>,
     pub baseline_manifest: Manifest,
+}
+
+impl PreparedWorkspace {
+    /// Validate the immutable roster without requiring worker trees to remain
+    /// present: a delivered run can be loaded again after successful cleanup.
+    pub fn validate_layout(&self) -> Result<()> {
+        crate::config::validate_worker_count(self.workers.len())?;
+        for path in [&self.original, &self.run_dir] {
+            ensure!(
+                path.is_absolute()
+                    && path
+                        .components()
+                        .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+                    && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str(),
+                "workspace roots must be canonical absolute paths"
+            );
+        }
+        ensure!(
+            !self.original.starts_with(&self.run_dir) && !self.run_dir.starts_with(&self.original),
+            "private storage must be separate from the original project"
+        );
+        let workspace = self.run_dir.join("workspace");
+        ensure!(
+            self.baseline.as_os_str() == workspace.join("baseline").as_os_str()
+                && self.workers.iter().enumerate().all(|(index, path)| {
+                    path.as_os_str() == workspace.join(format!("worker-{}", index + 1)).as_os_str()
+                }),
+            "unowned workspace paths"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -799,7 +830,7 @@ pub use delivery::{
     preserve_partial_and_cleanup, preserve_partial_and_cleanup_with_artifacts,
 };
 pub use output::{AcceptedResult, ResultSelection};
-pub use prepare::{prepare, retain_result, retain_result_with_policy};
+pub use prepare::{prepare, prepare_with_workers, retain_result, retain_result_with_policy};
 pub use recovery::{RecoveryExport, RecoveryInspection, export_recovery, inspect_recovery};
 pub use result::{ResultPolicy, RuntimeLink, manifest_for_result};
 

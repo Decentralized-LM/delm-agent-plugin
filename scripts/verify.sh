@@ -6,6 +6,8 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --locked
+cargo build --locked --example native-lifecycle-fixture
+python3 -B scripts/test_native_selection_environment.py
 python3 -B scripts/test_claude_board.py
 python3 -B scripts/test_installation.py
 python3 -B scripts/test_maintenance.py

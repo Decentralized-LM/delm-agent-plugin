@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -30,9 +30,16 @@ struct Service {
     invalidated_check: bool,
 }
 
-#[derive(Default)]
 pub struct Services {
     entries: BTreeMap<String, Service>,
+    worker_count: usize,
+    active_workers: BTreeSet<usize>,
+}
+
+impl Default for Services {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub fn tool_definitions() -> Vec<Value> {
@@ -222,6 +229,31 @@ fn refresh(entry: &mut Service, board: &Board) -> Result<()> {
 }
 
 impl Services {
+    pub fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            worker_count: crate::config::DEFAULT_WORKER_COUNT,
+            active_workers: (1..=crate::config::DEFAULT_WORKER_COUNT).collect(),
+        }
+    }
+
+    pub fn for_worker_count(worker_count: usize) -> Result<Self> {
+        crate::config::validate_worker_count(worker_count)?;
+        Ok(Self {
+            entries: BTreeMap::new(),
+            worker_count,
+            active_workers: (1..=worker_count).collect(),
+        })
+    }
+
+    /// A current-turn call authenticated by the native host proves this member
+    /// is active again. It does not restore prior service ownership.
+    fn activate_worker(&mut self, worker: usize) -> Result<()> {
+        ensure!((1..=self.worker_count).contains(&worker), "Unknown worker");
+        self.active_workers.insert(worker);
+        Ok(())
+    }
+
     /// Previously observed ownership is retained for shutdown checks. A service
     /// can keep serving loaded bytes after releasing every source descriptor.
     pub(crate) fn process_identities(&self) -> Vec<ProcessIdentity> {
@@ -232,7 +264,13 @@ impl Services {
     }
 
     pub fn call(&mut self, worker: usize, args: Value, host: u32, board: &Board) -> Result<Value> {
-        ensure!((1..=2).contains(&worker), "Unknown worker");
+        ensure!(
+            board.worker_count() == self.worker_count,
+            "Preview registry worker roster does not match the board"
+        );
+        // Native adapters reject stale/retired turns before dispatching here.
+        // A member can legitimately return after a later user update.
+        self.activate_worker(worker)?;
         let action = field(&args, "action")?;
         if action == "list" {
             for entry in self.entries.values_mut() {
@@ -400,10 +438,14 @@ impl Services {
     }
 
     /// Release a stopped worker's check leases. Empty/dead service claims are
-    /// removed; a live owned server transfers to the peer with a new generation
-    /// and retains its source scope. No process is signalled by this operation.
+    /// removed; a live owned server transfers to a remaining member with a new
+    /// generation and retains its source scope. With no remaining member, its
+    /// process identity remains tracked for shutdown. No process is signalled.
     pub fn retire_worker(&mut self, worker: usize) -> Result<Value> {
-        ensure!((1..=2).contains(&worker), "Unknown worker");
+        ensure!((1..=self.worker_count).contains(&worker), "Unknown worker");
+        self.active_workers.remove(&worker);
+        let successor = self.active_workers.first().copied();
+        let mut retained = Vec::new();
         let mut removed = Vec::new();
         let mut transferred = Vec::new();
         for (name, entry) in &mut self.entries {
@@ -420,9 +462,14 @@ impl Services {
                 .transpose()?
                 .unwrap_or(false)
             {
-                entry.owner = 3 - worker;
-                entry.generation = uuid::Uuid::new_v4().to_string();
-                transferred.push(name.clone());
+                if let Some(successor) = successor {
+                    entry.owner = successor;
+                    entry.generation = uuid::Uuid::new_v4().to_string();
+                    transferred.push(name.clone());
+                } else {
+                    entry.state = "stopping".into();
+                    retained.push(name.clone());
+                }
             } else {
                 removed.push(name.clone());
             }
@@ -430,7 +477,7 @@ impl Services {
         for name in &removed {
             self.entries.remove(name);
         }
-        Ok(json!({"removed":removed,"transferred":transferred}))
+        Ok(json!({"removed":removed,"transferred":transferred,"retained_for_shutdown":retained}))
     }
 }
 
@@ -447,22 +494,28 @@ mod tests {
     struct Fixture {
         _temp: tempfile::TempDir,
         board: Board,
-        workers: [PathBuf; 2],
+        workers: Vec<PathBuf>,
     }
     impl Fixture {
         fn new() -> Self {
+            Self::with_workers(2)
+        }
+
+        fn with_workers(count: usize) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let run = temp.path().join("run");
             let baseline = temp.path().join("baseline");
-            let workers = [temp.path().join("worker1"), temp.path().join("worker2")];
-            for path in [&run, &baseline, &workers[0], &workers[1]] {
+            let workers = (1..=count)
+                .map(|worker| temp.path().join(format!("worker{worker}")))
+                .collect::<Vec<_>>();
+            for path in [&run, &baseline].into_iter().chain(workers.iter()) {
                 fs::create_dir(path).unwrap();
             }
-            for path in [&baseline, &workers[0], &workers[1]] {
+            for path in std::iter::once(&baseline).chain(workers.iter()) {
                 fs::write(path.join("main.js"), "ready").unwrap();
             }
             let mut board = Board::open(&run, &baseline, workers.clone()).unwrap();
-            for worker in 1..=2 {
+            for worker in 1..=count {
                 board.set_worker_policy(worker,&json!({"default_permissions":"test","permissions":{"test":{"filesystem":{workers[worker-1].to_string_lossy().as_ref():"write"}}}})).unwrap();
             }
             Self {
@@ -747,5 +800,77 @@ mod tests {
             services.retire_worker(2).unwrap()["removed"],
             json!(["web"])
         );
+    }
+
+    #[test]
+    fn service_membership_and_retirement_cover_the_selected_team() {
+        let fixture = Fixture::with_workers(4);
+        let mut services = Services::for_worker_count(4).unwrap();
+        let host = std::process::id();
+        assert!(
+            services
+                .call(4, json!({"action":"list"}), host, &fixture.board)
+                .is_ok()
+        );
+        assert!(
+            services
+                .call(5, json!({"action":"list"}), host, &fixture.board)
+                .is_err()
+        );
+        assert!(
+            Services::default()
+                .call(1, json!({"action":"list"}), host, &fixture.board)
+                .is_err()
+        );
+        services.retire_worker(2).unwrap();
+        assert!(!services.active_workers.contains(&2));
+        // A later authenticated current-turn call reactivates the member.
+        let resumed = services.call(2, claim(), host, &fixture.board).unwrap();
+        assert_eq!(resumed["claimed"], true);
+        assert_eq!(resumed["service"]["owner"], 2);
+        assert!(services.active_workers.contains(&2));
+        assert!(
+            services
+                .call(2, json!({"action":"list"}), host, &fixture.board)
+                .is_ok()
+        );
+        assert!(services.activate_worker(5).is_err());
+        assert!(services.retire_worker(5).is_err());
+        assert!(Services::for_worker_count(1).is_err());
+        assert!(Services::for_worker_count(5).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_service_transfers_to_remaining_members_and_is_retained_for_final_shutdown() {
+        let fixture = Fixture::with_workers(4);
+        let mut services = Services::for_worker_count(4).unwrap();
+        let host = std::process::id();
+        let initial = services.call(4, claim(), host, &fixture.board).unwrap();
+        let generation = initial["service"]["generation"].clone();
+        let mut server = Server::start(&fixture.workers[3]);
+        services.call(4,json!({"action":"ready","name":"web","generation":generation,"revision":"publication:7","url":format!("http://127.0.0.1:{}",server.1),"pid":server.0.id()}),host,&fixture.board).unwrap();
+        services.retire_worker(1).unwrap();
+        services.retire_worker(2).unwrap();
+        assert_eq!(
+            services.retire_worker(4).unwrap()["transferred"],
+            json!(["web"])
+        );
+        let adopted = services.call(3, claim(), host, &fixture.board).unwrap();
+        assert_eq!(adopted["service"]["owner"], 3);
+        assert_eq!(adopted["service"]["source_worker"], 4);
+        assert_ne!(adopted["service"]["generation"], generation);
+        assert_eq!(
+            services.retire_worker(3).unwrap()["retained_for_shutdown"],
+            json!(["web"])
+        );
+        assert_eq!(services.process_identities().len(), 1);
+        assert!(services.process_identities()[0].is_running().unwrap());
+        server.stop();
+        assert_eq!(
+            services.retire_worker(3).unwrap()["removed"],
+            json!(["web"])
+        );
+        assert!(services.process_identities().is_empty());
     }
 }

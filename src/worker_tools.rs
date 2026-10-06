@@ -41,14 +41,19 @@ struct WireCall {
 
 pub struct Gateway {
     pub calls: mpsc::Receiver<Call>,
-    paths: [PathBuf; 2],
-    tokens: [String; 2],
+    paths: Vec<PathBuf>,
+    tokens: Vec<String>,
     listeners: Vec<JoinHandle<()>>,
     bound: Vec<(PathBuf, u64, u64)>,
 }
 
 impl Gateway {
     pub fn start(run_id: &str) -> Result<Self> {
+        Self::for_worker_count(run_id, crate::config::DEFAULT_WORKER_COUNT)
+    }
+
+    pub fn for_worker_count(run_id: &str, count: usize) -> Result<Self> {
+        crate::config::validate_worker_count(count)?;
         let id = uuid::Uuid::parse_str(run_id)?;
         let root = Path::new("/tmp")
             .canonicalize()?
@@ -63,14 +68,12 @@ impl Gateway {
             meta.is_dir() && meta.uid() == unsafe { libc::getuid() } && meta.mode() & 0o077 == 0,
             "Worker tool storage is not private"
         );
-        let paths = [
-            root.join(format!("{id}-1.mcp")),
-            root.join(format!("{id}-2.mcp")),
-        ];
-        let tokens = [
-            uuid::Uuid::new_v4().to_string(),
-            uuid::Uuid::new_v4().to_string(),
-        ];
+        let paths = (1..=count)
+            .map(|worker| root.join(format!("{id}-{worker}.mcp")))
+            .collect();
+        let tokens = (0..count)
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect();
         let (sender, calls) = mpsc::channel(32);
         let mut gateway = Self {
             calls,
@@ -79,7 +82,7 @@ impl Gateway {
             listeners: Vec::new(),
             bound: Vec::new(),
         };
-        for index in 0..2 {
+        for index in 0..count {
             let listener = UnixListener::bind(&gateway.paths[index])?;
             let identity = fs::symlink_metadata(&gateway.paths[index])?;
             ensure!(
@@ -115,7 +118,7 @@ impl Gateway {
     }
 
     pub fn config(&self, index: usize) -> Result<Value> {
-        ensure!(index < 2, "Unknown worker");
+        ensure!(index < self.paths.len(), "Unknown worker");
         Ok(
             json!({"command":std::env::current_exe()?,"args":["worker-mcp","--socket",self.paths[index]],
             "env":{"DELM_COORDINATION_TOKEN":self.tokens[index]},"enabled":true,"required":true,"tool_timeout_sec":120}),

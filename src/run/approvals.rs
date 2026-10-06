@@ -14,8 +14,12 @@ pub(super) struct Pending {
     pub params: Value,
 }
 
-#[derive(Default)]
-pub(super) struct Approvals(HashMap<String, Pending>);
+pub(super) struct Approvals(HashMap<String, Pending>, usize);
+impl Default for Approvals {
+    fn default() -> Self {
+        Self(HashMap::new(), crate::config::DEFAULT_WORKER_COUNT)
+    }
+}
 
 pub(crate) fn supported(method: &str) -> bool {
     matches!(
@@ -257,6 +261,11 @@ fn validate_permissions(params: &Value, response: &Value) -> Result<()> {
 }
 
 impl Approvals {
+    pub fn for_worker_count(count: usize) -> Result<Self> {
+        crate::config::validate_worker_count(count)?;
+        Ok(Self(HashMap::new(), count))
+    }
+
     pub fn insert(
         &mut self,
         native_id: Value,
@@ -266,7 +275,7 @@ impl Approvals {
         params: Value,
     ) -> Result<Event> {
         ensure!(
-            worker < 2 && supported(method),
+            worker < self.1 && supported(method),
             "Unbound or unsupported native approval"
         );
         ensure!(

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "delm_selector": {
+      "command": "./bin/delm",
+      "args": ["selector-mcp"],
+      "cwd": ".",
+      "env_vars": ["DELM_WORKER_SESSION"],
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 330
+    }
+  }
+}

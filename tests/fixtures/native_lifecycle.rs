@@ -1,5 +1,7 @@
 //! A harmless native-host fixture using the actual production lifecycle module.
-//! This executable has no worker launch or model API code path.
+//! The fixture-only run command starts a disposable child, never a model.
+//! Its MCP endpoint handles ordinary-prompt no-ops; explicit DeLM invocation
+//! and selector behavior are qualified separately with the production binary.
 use anyhow::{Context, Result, ensure};
 use delm::lifecycle::{self, HookInput, Signal};
 use serde_json::{Value, json};
@@ -13,6 +15,59 @@ use std::{
 
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).map(String::as_str) == Some("capture-lifecycle-hook") {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(delm::cli::execute(delm::cli::Command::LifecycleHook));
+    }
+    if args.get(1).map(String::as_str) == Some("captured-run") {
+        let path = args
+            .iter()
+            .position(|arg| arg == "--capture")
+            .and_then(|index| args.get(index + 1))
+            .context("missing captured fixture input")?;
+        let capture = lifecycle::read_capture(&PathBuf::from(path))?;
+        let mut attempts = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(capture.project.join("capture-starts.jsonl"))?;
+        writeln!(attempts, "{}", json!({"pid": std::process::id()}))?;
+        let binding = lifecycle::consume_capture(&capture)?;
+        binding.register(&uuid::Uuid::new_v4().to_string())?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(capture.project.join("captured-environment.json"))?;
+        // These are synthetic fixture values only. Never enumerate or write the
+        // environment, authentication material, or unrelated native settings.
+        serde_json::to_writer(
+            &mut output,
+            &json!({
+            "worker_count": capture.worker_count, "pid": std::process::id(),
+            "process_identity": delm::supervisor::ProcessIdentity::capture(std::process::id())?,
+                "parent_pid": unsafe { libc::getppid() },
+                "codex_home": std::env::var("CODEX_HOME").ok(),
+                "path": std::env::var("PATH").ok(),
+                "marker": std::env::var("DELM_TEST_NATIVE_ENV").ok(),
+                "thread": std::env::var("CODEX_THREAD_ID").ok()
+            }),
+        )?;
+        output.flush()?;
+        let until = Instant::now() + Duration::from_secs(10);
+        while !capture.project.join("release-captured-child").exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        binding.unregister()?;
+        fs::write(capture.project.join("captured-child-finished"), b"stopped")?;
+        return Ok(());
+    }
+    if args.get(1).map(String::as_str) == Some("selector-mcp") {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(delm::selector::serve_stdio());
+    }
     if args.get(1).map(String::as_str) == Some("validate-listing") {
         let listing: Value = serde_json::from_reader(std::io::stdin())?;
         lifecycle::validate_hook_listing(&listing, &std::env::current_exe()?)?;

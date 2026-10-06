@@ -142,3 +142,27 @@ test('verified recovery permits maintenance only after shutdown and without work
   await assert.rejects(assertMaintenanceSafe({home, host: 'codex'}), {code: 'ACTIVE_DELM_RUN'});
   assert.equal(await readFile(join(recovery, sha256), 'utf8'), content);
 });
+
+test('recovery worker identities stay within the selected immutable roster', async t => {
+  const {home, run} = await fixture(t);
+  const recovery = join(run, 'workspace/recovery');
+  await mkdir(recovery, {recursive: true});
+  await writeFile(join(run, 'run.json'), JSON.stringify({status: 'recovery_required'}));
+  await writeFile(join(run, 'shutdown-report.json'), JSON.stringify({ownership_resolved: true, survivors: [], errors: []}));
+  const bundle = {version: 1, original: join(home, 'project'), worker_count: 4,
+    workers: Array.from({length: 4}, (_, worker) => ({worker, changes: {}}))};
+  const manifest = join(recovery, 'complete.json');
+  await writeFile(manifest, JSON.stringify(bundle));
+  await assertMaintenanceSafe({home, host: 'codex'});
+  for (const worker_count of [null, true, 1, 2, 3, 5, '4']) {
+    await writeFile(manifest, JSON.stringify({...bundle, worker_count}));
+    await assert.rejects(assertMaintenanceSafe({home, host: 'codex'}), {code: 'ACTIVE_DELM_RUN'});
+  }
+  const legacy = {...bundle, workers: bundle.workers.slice(0, 2)};
+  delete legacy.worker_count;
+  await writeFile(manifest, JSON.stringify(legacy));
+  await assertMaintenanceSafe({home, host: 'codex'});
+  legacy.workers[1] = {worker: 3, changes: {}};
+  await writeFile(manifest, JSON.stringify(legacy));
+  await assert.rejects(assertMaintenanceSafe({home, host: 'codex'}), {code: 'ACTIVE_DELM_RUN'});
+});

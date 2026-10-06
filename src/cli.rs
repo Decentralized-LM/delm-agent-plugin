@@ -47,7 +47,7 @@ pub enum Command {
         #[arg(long)]
         run_id: String,
         /// Export this worker's saved changes; requires --output.
-        #[arg(long, requires = "output", value_parser = clap::value_parser!(u8).range(1..=2))]
+        #[arg(long, requires = "output", value_parser = clap::value_parser!(u8).range(1..=4))]
         worker: Option<u8>,
         /// New folder outside the project. Existing files are never overwritten.
         #[arg(long, requires = "worker")]
@@ -68,6 +68,8 @@ pub enum Command {
         command: crate::claude::Command,
     },
     #[command(hide = true)]
+    SelectorMcp,
+    #[command(hide = true)]
     CapturedRun {
         #[arg(long)]
         capture: PathBuf,
@@ -79,7 +81,7 @@ pub enum Command {
         #[arg(long)]
         capture: PathBuf,
     },
-    /// Run two workers in private copies of one Git repository.
+    /// Run collaborating workers in private copies of one Git repository.
     Run {
         #[arg(long, hide = true)]
         launch_token: Option<String>,
@@ -110,7 +112,7 @@ pub enum Command {
         #[arg(long)]
         after: Option<u64>,
     },
-    /// Send a clarification to both workers.
+    /// Send a clarification to all workers.
     Update {
         #[arg(long)]
         run_id: String,
@@ -384,6 +386,9 @@ pub async fn execute(command: Command) -> Result<()> {
                     Some(captured.turn_id.clone()),
                 )
                 .await?;
+                request.worker_count = captured
+                    .worker_count
+                    .context("Native agent selection is missing")?;
                 if captured.captured_at_ms > 0 {
                     request.auth_settings["invocation_received_at_ms"] =
                         json!(captured.captured_at_ms);
@@ -409,6 +414,7 @@ pub async fn execute(command: Command) -> Result<()> {
         }
         Command::Follow { capture } => follow_capture(&capture).await,
         Command::LifecycleHook => native_hook().await,
+        Command::SelectorMcp => crate::selector::serve_stdio().await,
         Command::WorkerMcp { socket } => crate::worker_tools::serve_stdio(&socket).await,
         Command::Watchdog { spec } => crate::supervisor::watchdog(&spec),
         Command::Run {
@@ -422,6 +428,10 @@ pub async fn execute(command: Command) -> Result<()> {
             seconds,
         } => {
             crate::lifecycle::ensure_not_worker()?;
+            ensure!(
+                std::env::var_os("CODEX_THREAD_ID").is_none(),
+                "Use $delm:run and confirm its native selector; direct native launches are not supported"
+            );
             let binding = launch_token.as_deref().map(crate::lifecycle::consume_launch).transpose().context("Native launch was not confirmed. Trust DeLM in /hooks and restart Codex before invoking the skill again")?;
             ensure!(
                 binding.is_some() || std::env::var_os("CODEX_THREAD_ID").is_none(),
@@ -552,9 +562,16 @@ async fn native_hook() -> Result<()> {
         "Native hook input exceeds its limit"
     );
     let input = serde_json::from_slice(&bytes).context("Invalid native hook input")?;
-    let action = crate::lifecycle::prepare_hook(input, &std::env::current_exe()?)?;
-    if let Some(capture) = &action.launch {
-        spawn_capture(&std::env::current_exe()?, capture)?;
+    let mut action = crate::lifecycle::prepare_hook(input, &std::env::current_exe()?)?;
+    if let Some(capture) = &action.selection {
+        // This trusted command hook retains the complete native environment.
+        // The sibling MCP hook only records the user's confirmed choice.
+        action.output = Some(match wait_and_launch_capture(capture).await {
+            Ok(output) => output,
+            Err(error) => {
+                json!({"continue":false,"stopReason":format!("DeLM did not launch: {error:#}")})
+            }
+        });
     }
     if let Some(delivery) = action.delivery {
         // Native Interrupt has a short deadline. The control request merely
@@ -574,6 +591,33 @@ async fn native_hook() -> Result<()> {
         println!("{}", serde_json::to_string(&output)?);
     }
     Ok(())
+}
+
+async fn wait_and_launch_capture(capture: &crate::lifecycle::CapturedInvocation) -> Result<Value> {
+    let executable = std::env::current_exe()?;
+    let claim_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut form_deadline = None;
+    loop {
+        let now = tokio::time::Instant::now();
+        match crate::lifecycle::selection_progress(
+            capture,
+            &executable,
+            now >= claim_deadline,
+            form_deadline.is_some_and(|deadline| now >= deadline),
+        )? {
+            crate::lifecycle::SelectionProgress::Ready => break,
+            crate::lifecycle::SelectionProgress::WaitingForUser => {
+                form_deadline.get_or_insert(now + Duration::from_secs(300));
+            }
+            crate::lifecycle::SelectionProgress::WaitingForSelector => {}
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    if let Some((selected, _guard)) = crate::lifecycle::selected_launch(capture, &executable)? {
+        spawn_capture(&executable, &selected)?;
+    }
+    let selected = crate::lifecycle::read_capture(&capture.path)?;
+    Ok(crate::lifecycle::selection_context(&selected, &executable))
 }
 
 fn record_own_skill(
@@ -612,7 +656,10 @@ fn print_configuration(request: &crate::protocol::StartRequest) -> Result<()> {
     Ok(())
 }
 
-fn spawn_capture(executable: &Path, capture: &crate::lifecycle::CapturedInvocation) -> Result<()> {
+pub(crate) fn spawn_capture(
+    executable: &Path,
+    capture: &crate::lifecycle::CapturedInvocation,
+) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let result = (|| -> Result<()> {
         let log = OpenOptions::new()
@@ -946,7 +993,7 @@ fn publish_update(
     if state.admission.is_none() {
         state.last_contact = Instant::now();
     }
-    state.snapshot.message = "Your update is queued for both workers.".into();
+    state.snapshot.message = "Your update is queued for all workers.".into();
     state.publish_change();
     Ok(())
 }
@@ -1108,7 +1155,7 @@ async fn handle_control(
                 state.expected_revision += 1;
                 state.snapshot.questions.remove(&id);
                 state.last_contact = Instant::now();
-                state.snapshot.message = "Your answer is queued for the identified question and both workers.".into();
+                state.snapshot.message = "Your answer is queued for the identified question and all workers.".into();
                 state.publish_change();
                 0
             }
@@ -1416,7 +1463,7 @@ mod tests {
     #[tokio::test]
     async fn captured_spawn_failure_is_durable_and_follow_does_not_hang() {
         let fixture = crate::lifecycle::tests::CaptureFixture::new();
-        let capture = fixture.submit().launch.unwrap();
+        let capture = fixture.selected_capture(2);
         let error =
             spawn_capture(&fixture.project.join("missing-executable"), &capture).unwrap_err();
         assert!(error.to_string().contains("Could not start"));
@@ -1438,7 +1485,7 @@ mod tests {
     #[test]
     fn failed_launch_bookkeeping_stops_and_reaps_its_owned_child() {
         let fixture = crate::lifecycle::tests::CaptureFixture::new();
-        let capture = fixture.submit().launch.unwrap();
+        let capture = fixture.selected_capture(2);
         let marker = capture.path.with_extension("launch.json");
         fs::remove_file(&marker).unwrap();
         fs::create_dir(&marker).unwrap();
@@ -1454,7 +1501,7 @@ mod tests {
     #[tokio::test]
     async fn captured_dead_runtime_is_reported_without_a_terminal_event() {
         let fixture = crate::lifecycle::tests::CaptureFixture::new();
-        let capture = fixture.submit().launch.unwrap();
+        let capture = fixture.selected_capture(2);
         let mut child = std::process::Command::new("/bin/sleep")
             .arg("10")
             .spawn()

@@ -8,7 +8,7 @@ impl Board {
     /// Shared services use the same confined, explicit-input fingerprinting as
     /// check receipts. Callers choose the scope; this is not a whole-tree claim.
     pub fn input_snapshot(&self, worker: usize, scope: &[String]) -> Result<Value> {
-        ensure!((1..=2).contains(&worker), "unbound worker identity");
+        self.require_worker(worker)?;
         ensure!(
             !scope.is_empty() && scope.len() <= 2048,
             "input scope needs 1 to 2048 explicit file paths"
@@ -21,7 +21,7 @@ impl Board {
     }
 
     pub fn worker_path(&self, worker: usize) -> Result<&Path> {
-        ensure!((1..=2).contains(&worker), "unbound worker identity");
+        self.require_worker(worker)?;
         self.workers[worker - 1].verify()?;
         Ok(&self.workers[worker - 1].path)
     }
@@ -34,7 +34,7 @@ impl Board {
         args: Value,
         boundary: impl FnOnce() -> u64,
     ) -> Result<Value> {
-        ensure!((1..=2).contains(&worker), "unbound worker identity");
+        self.require_worker(worker)?;
         self.lock.lock_exclusive()?;
         let result = (|| {
             if let Some(replay) = replay(&self.db, worker, "delm_check_begin", &args)? {
@@ -127,7 +127,7 @@ impl Board {
         args: Value,
         native_record: impl FnOnce(&str) -> Result<(CommandEvidence, Value)>,
     ) -> Result<Value> {
-        ensure!((1..=2).contains(&worker), "unbound worker identity");
+        self.require_worker(worker)?;
         self.lock.lock_exclusive()?;
         let result = (|| {
             if let Some(replay) = replay(&self.db, worker, "delm_check_finish", &args)? {
@@ -229,7 +229,7 @@ impl Board {
     /// This proves scope equality and observed execution, not complete coverage,
     /// ambient environment equality, or absence of transient writes during a check.
     pub fn shared_checks(&self, worker: usize, args: &Value, revision: u64) -> Result<Vec<Value>> {
-        ensure!((1..=2).contains(&worker), "unbound worker identity");
+        self.require_worker(worker)?;
         let Some(requested) = args.get("shared_checks") else {
             return Ok(Vec::new());
         };

@@ -19,8 +19,12 @@ const PRUNABLE: &[&str] = &[
     "events.jsonl",
     "worker-1-capabilities.json",
     "worker-2-capabilities.json",
+    "worker-3-capabilities.json",
+    "worker-4-capabilities.json",
     "worker-1-thread.json",
     "worker-2-thread.json",
+    "worker-3-thread.json",
+    "worker-4-thread.json",
 ];
 
 fn owned_file(path: &Path) -> Result<File> {

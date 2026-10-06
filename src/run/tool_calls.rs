@@ -87,7 +87,7 @@ impl Calls {
         Ok(())
     }
 
-    fn authorize(&mut self, workers: &[Worker; 2], call: &Call) -> Result<bool> {
+    fn authorize(&mut self, workers: &[Worker], call: &Call) -> Result<bool> {
         let worker = workers.get(call.worker).context("Unknown MCP worker")?;
         let id = call
             .call_id
@@ -147,7 +147,7 @@ impl Calls {
 
     /// Native stdout and the local socket are separate channels. Wait briefly
     /// for a matching event instead of guessing identity from arrival order.
-    pub fn take_ready(&mut self, workers: &[Worker; 2]) -> Vec<Call> {
+    pub fn take_ready(&mut self, workers: &[Worker]) -> Vec<Call> {
         let mut ready = Vec::new();
         for (received, call) in std::mem::take(&mut self.pending) {
             match self.authorize(workers, &call) {

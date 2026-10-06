@@ -1,6 +1,6 @@
 interface:
   display_name: "DeLM"
-  short_description: "Build with two collaborating agents."
+  short_description: "Choose 2–4 collaborating agents."
   brand_color: "#2563EB"
 policy:
   allow_implicit_invocation: false

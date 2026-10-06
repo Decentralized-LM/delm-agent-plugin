@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 #[serde(deny_unknown_fields)]
 struct Cursor {
     version: u8,
+    #[serde(default)]
+    viewer: usize,
     collection: String,
     revision: u64,
     through: i64,
@@ -64,7 +66,7 @@ pub(super) fn list(db: &Connection, worker: usize, args: &Value) -> Result<Value
     let owner = match args.get("owner") {
         None => None,
         Some(Value::String(value)) if value == "self" => Some(worker),
-        Some(Value::String(value)) if value == "peer" => Some(3 - worker),
+        Some(Value::String(value)) if value == "peer" => Some(0),
         _ => anyhow::bail!("Owner filter must be self or peer"),
     };
     ensure!(
@@ -80,7 +82,7 @@ pub(super) fn list(db: &Connection, worker: usize, args: &Value) -> Result<Value
     let prior = args.get("cursor").map(|_| -> Result<Cursor> {
         let cursor: Cursor = serde_json::from_str(string(args, "cursor", 1024)?)
             .context("Invalid discovery cursor; restart without a cursor")?;
-        ensure!(cursor.version == 1 && cursor.collection == collection
+        ensure!(cursor.version == 2 && cursor.viewer == worker && cursor.collection == collection
             && cursor.task_state.as_deref() == task_state && cursor.owner == owner,
             "Discovery cursor does not match this collection or filters; restart without a cursor");
         ensure!(cursor.revision == revision, "The request changed; restart discovery without a cursor");
@@ -104,15 +106,15 @@ pub(super) fn list(db: &Connection, worker: usize, args: &Value) -> Result<Value
         );
     }
     let (mut items, total) = if collection == "tasks" {
-        let filters = "id<=?1 AND (?3 IS NULL OR state=?3) AND (?4 IS NULL OR owner=?4)";
+        let filters = "id<=?1 AND (?3 IS NULL OR state=?3) AND (?4 IS NULL OR (?4=0 AND owner!=?5) OR owner=?4)";
         let total: i64 = db.query_row(
             &format!("SELECT COUNT(*) FROM tasks WHERE {filters} AND id>?2"),
-            params![through, 0, task_state, owner],
+            params![through, 0, task_state, owner, worker],
             |row| row.get(0),
         )?;
-        let mut query = db.prepare(&format!("SELECT id,author,owner,state,body,updated,task_number FROM (SELECT tasks.*,ROW_NUMBER() OVER(ORDER BY id) AS task_number FROM tasks) WHERE {filters} AND id>?2 ORDER BY id LIMIT ?5"))?;
+        let mut query = db.prepare(&format!("SELECT id,author,owner,state,body,updated,task_number FROM (SELECT tasks.*,ROW_NUMBER() OVER(ORDER BY id) AS task_number FROM tasks) WHERE {filters} AND id>?2 ORDER BY id LIMIT ?6"))?;
         let rows = query.query_map(
-            params![through, after, task_state, owner, limit + 1],
+            params![through, after, task_state, owner, worker, limit + 1],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -185,7 +187,8 @@ pub(super) fn list(db: &Connection, worker: usize, args: &Value) -> Result<Value
             _ => "receipt_id",
         };
         Some(serde_json::to_string(&Cursor {
-            version: 1,
+            version: 2,
+            viewer: worker,
             collection: collection.into(),
             revision,
             through,

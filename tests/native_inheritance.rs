@@ -151,6 +151,7 @@ async fn native_fork_preserves_saved_skill_tools_and_approval_policy() {
         &child_skills,
         &source_tools,
         &child_tools,
+        Some("delm_coordination_1"),
     )
     .unwrap();
     let docs = child

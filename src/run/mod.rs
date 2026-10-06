@@ -1,4 +1,4 @@
-//! One durable two-worker invocation. The host owns presentation; this module
+//! One durable invocation with a fixed worker roster. The host owns presentation; this module
 //! owns worker lifetimes and accepts completions in native event order.
 pub(crate) mod approvals;
 mod completion;
@@ -152,10 +152,32 @@ struct Saved {
     retained_artifacts: std::collections::BTreeSet<String>,
     request: StartRequest,
     workspace: PreparedWorkspace,
-    workers: [Worker; 2],
+    workers: Vec<Worker>,
     revision: u64,
     expires: u64,
     status: String,
+}
+
+fn validate_roster(saved: &Saved) -> Result<()> {
+    crate::config::validate_worker_count(saved.request.worker_count)?;
+    ensure!(
+        saved.workers.len() == saved.request.worker_count
+            && saved.workspace.workers.len() == saved.request.worker_count,
+        "Saved worker roster disagrees with the selected agent count"
+    );
+    saved.workspace.validate_layout()?;
+    let threads: Vec<_> = saved
+        .workers
+        .iter()
+        .filter(|worker| !worker.thread.is_empty())
+        .map(|worker| &worker.thread)
+        .collect();
+    let unique: std::collections::HashSet<_> = threads.iter().copied().collect();
+    ensure!(
+        unique.len() == threads.len(),
+        "Saved workers share a native thread identity"
+    );
+    Ok(())
 }
 
 fn requested_artifacts(saved: &Saved) -> Vec<String> {
@@ -225,7 +247,8 @@ async fn serve_inner(
                 "This run's execution allowance has expired. Its work remains available."
             );
             ensure!(
-                authorization.project.canonicalize()? == state.workspace.original
+                authorization.worker_count == state.request.worker_count
+                    && authorization.project.canonicalize()? == state.workspace.original
                     && authorization.auth_home.canonicalize()? == state.request.auth_home
                     && authorization.model == state.request.model
                     && authorization.model_provider == state.request.model_provider
@@ -240,6 +263,7 @@ async fn serve_inner(
         }
         _ => bail!("The first command must start or explicitly resume a DeLM task"),
     };
+    validate_roster(&saved)?;
     let run_dir = saved.workspace.run_dir.clone();
     if let Some(mut admission) = admission {
         let mut event = Event::new(
@@ -445,7 +469,7 @@ async fn serve_inner(
             let delivery = (|| -> Result<workspace::DeliveryReport> {
                 ensure!(
                     writers_stopped,
-                    "Worker processes did not stop cleanly; both projects are preserved"
+                    "Worker processes did not stop cleanly; all worker projects are preserved"
                 );
                 candidate.verify(&saved.workspace.workers[winner])?;
                 atomic_json(&run_dir.join("completion.json"), &candidate)?;
@@ -645,6 +669,7 @@ async fn prepare(
     input: &mut mpsc::Receiver<HostCommand>,
     output: &mpsc::UnboundedSender<Event>,
 ) -> Result<(Saved, RunLock)> {
+    crate::config::validate_worker_count(request.worker_count)?;
     ensure!(
         !request.task.trim().is_empty(),
         "Enter the task after $delm:run"
@@ -707,7 +732,10 @@ async fn prepare_capture(
     );
     let mut preparing = Event::new(
         "status",
-        "Preparing two working copies. The completed changes will be applied to your project.",
+        format!(
+            "Preparing {} working copies. The completed changes will be applied to your project.",
+            request.worker_count
+        ),
     );
     preparing.run_id = run_dir
         .file_name()
@@ -726,8 +754,14 @@ async fn prepare_capture(
     )?;
     preparation_journal.observe("phase", &json!({"phase":"preparation","boundary":"start"}))?;
     let mut revision = 1;
+    let worker_count = request.worker_count;
     let mut prepare = tokio::task::spawn_blocking(move || {
-        workspace::prepare(&project, &directory, crate::config::MAX_REPO_SIZE_BYTES)
+        workspace::prepare_with_workers(
+            &project,
+            &directory,
+            crate::config::MAX_REPO_SIZE_BYTES,
+            worker_count,
+        )
     });
     let workspace = loop {
         tokio::select! {
@@ -762,7 +796,7 @@ async fn prepare_capture(
         retained_artifacts: Default::default(),
         request,
         workspace,
-        workers: Default::default(),
+        workers: vec![Worker::default(); worker_count],
         revision,
         expires: 0,
         status: "prepared".into(),
@@ -991,10 +1025,11 @@ async fn drive(
         .file_name()
         .context("Run identity missing")?
         .to_string_lossy();
-    let mut gateway = crate::worker_tools::Gateway::start(&run_id)?;
-    let mut services = crate::services::Services::default();
+    let mut gateway =
+        crate::worker_tools::Gateway::for_worker_count(&run_id, saved.request.worker_count)?;
+    let mut services = crate::services::Services::for_worker_count(saved.request.worker_count)?;
     crate::workers::prepare_worker_capabilities(rpc, &saved.request).await?;
-    for index in 0..2 {
+    for index in 0..saved.workers.len() {
         let mut config = worker_config(
             &saved.request,
             &saved.workspace.run_dir,
@@ -1005,9 +1040,14 @@ async fn drive(
         saved.workers[index].result_policy =
             crate::workers::result_policy(&saved.request, &saved.workspace.run_dir)?;
         let instructions = format!(
-            "{}\n\nYou are worker {}.\n\nThe original project path is {}. Interpret references beneath that path as the corresponding relative paths in your private working directory; never open the original path.",
+            "{}\n\nYou are worker {} of {}. Team worker IDs: {}.\n\nThe original project path is {}. Interpret references beneath that path as the corresponding relative paths in your private working directory; never open the original path.",
             include_str!("../../plugin/worker.md"),
             index + 1,
+            saved.request.worker_count,
+            (1..=saved.request.worker_count)
+                .map(|worker| worker.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
             serde_json::to_string(&saved.workspace.original)?
         );
         config["mcp_servers"][format!("delm_coordination_{}", index + 1)] =
@@ -1045,6 +1085,7 @@ async fn drive(
             &saved.request,
             &saved.workspace.workers[index],
             &saved.workers[index].thread,
+            index + 1,
         )
         .await?;
         atomic_json(
@@ -1085,13 +1126,16 @@ async fn drive(
     atomic_json(&saved.workspace.run_dir.join("run.json"), saved)?;
     let mut started = Event::new(
         "started",
-        "Two DeLM workers are running and sharing progress.",
+        format!(
+            "{} DeLM workers are running and sharing progress.",
+            saved.workers.len()
+        ),
     );
     started.request_revision = Some(saved.revision);
     let _ = output.send(started);
-    let mut first_actions = [false; 2];
+    let mut first_actions = vec![false; saved.workers.len()];
     let mut questions = questions::Questions::default();
-    let mut approvals = approvals::Approvals::default();
+    let mut approvals = approvals::Approvals::for_worker_count(saved.workers.len())?;
     let mut pending_candidate: Option<(usize, completion::Completion)> = None;
     let mut pending_accept_revision = None;
     let mut tool_calls = tool_calls::Calls::default();
@@ -1147,7 +1191,7 @@ async fn drive(
                     pending_candidate = None;
                     pending_accept_revision = None;
                     saved.revision += 1; board.set_revision(saved.revision)?;
-                    let mut accepted = Event::new("status", "Applying your update to both workers.");
+                    let mut accepted = Event::new("status", "Applying your update to all workers.");
                     accepted.request_revision = Some(saved.revision);
                     let _ = output.send(accepted);
                     saved.request.task.push_str(&format!("\n\nUser update:\n{text}"));
@@ -1184,7 +1228,7 @@ async fn drive(
                     let text = format!("User answered these questions: {}\nAnswers: {}", pending.items, serde_json::to_string(&answers)?);
                     saved.request.task.push_str(&format!("\n\n{text}"));
                     journal.record("user_answer", &json!({"id":id,"revision":saved.revision,"questions":pending.items,"answers":answers}))?;
-                    let mut event = Event::new("answer_applied", "Applying your answer to both workers.");
+                    let mut event = Event::new("answer_applied", "Applying your answer to all workers.");
                     event.id = Some(id);
                     event.request_revision = Some(saved.revision);
                     let _ = output.send(event);
@@ -1282,7 +1326,7 @@ async fn drive(
                             let released=board.release_worker_claims(index+1,status)?;
                             let retired_services=services.retire_worker(index+1)?;
                             journal.record("worker_services_retired", &retired_services)?;
-                            let _=output.send(Event::new("notice",format!("Worker {} stopped with status {status}. {} tasks are available for its peer.",index+1,released.len())));
+                            let _=output.send(Event::new("notice",format!("Worker {} stopped with status {status}. {} tasks are available for other workers.",index+1,released.len())));
                         }
                         else if saved.workers[index].revision == saved.revision {
                             let outcome = saved.workers[index].outcome.clone();
@@ -1385,7 +1429,7 @@ async fn dispatch_tool(
     allow_wakeup: bool,
     journal: &mut Journal,
 ) -> Result<(bool, Value)> {
-    let checked = if index >= 2 || saved.workers[index].turn.is_none() {
+    let checked = if index >= saved.workers.len() || saved.workers[index].turn.is_none() {
         Err(anyhow::anyhow!("This worker has no active turn"))
     } else if tool == "delm_complete" {
         completion::validate_checks(&args, &saved.workers[index].checks, saved.revision).map(|_| ())
@@ -1407,7 +1451,7 @@ async fn dispatch_tool(
         Ok(value) => value,
         Err(error) => json!({"error":error.to_string(),"board":board.view()?}),
     };
-    if index >= 2 {
+    if index >= saved.workers.len() {
         return Ok((false, body));
     }
     body["recent_commands"] = recent_commands(&saved.workers[index], saved.revision);

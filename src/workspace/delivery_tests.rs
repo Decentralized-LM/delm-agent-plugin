@@ -2,6 +2,10 @@ use super::*;
 use tempfile::TempDir;
 
 fn fixture() -> (TempDir, PreparedWorkspace) {
+    fixture_with_workers(crate::config::DEFAULT_WORKER_COUNT)
+}
+
+fn fixture_with_workers(worker_count: usize) -> (TempDir, PreparedWorkspace) {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     fs::create_dir(&project).unwrap();
@@ -34,8 +38,115 @@ fn fixture() -> (TempDir, PreparedWorkspace) {
     )
     .unwrap();
     fs::write(project.join("untracked"), "keep untracked\n").unwrap();
-    let prepared = prepare(&project, &temp.path().join("run"), u64::MAX).unwrap();
+    let prepared =
+        prepare_with_workers(&project, &temp.path().join("run"), u64::MAX, worker_count).unwrap();
     (temp, prepared)
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn four_worker_delivery_uses_selected_result_and_cleans_the_entire_roster() {
+    let (_temp, prepared) = fixture_with_workers(4);
+    assert_eq!(prepared.workers.len(), 4);
+    let index = fs::read(prepared.original.join(".git/index")).unwrap();
+    for (worker, path) in prepared.workers.iter().enumerate() {
+        fs::write(path.join("result.txt"), format!("worker {}", worker + 1)).unwrap();
+    }
+    let report = deliver_result(&prepared, 3, &ResultPolicy::default()).unwrap();
+    assert!(report.delivered && report.cleanup_complete);
+    assert_eq!(
+        fs::read_to_string(prepared.original.join("result.txt")).unwrap(),
+        "worker 4"
+    );
+    assert_eq!(
+        fs::read(prepared.original.join(".git/index")).unwrap(),
+        index
+    );
+    assert!(prepared.workers.iter().all(|path| !path.exists()));
+    assert!(!prepared.baseline.exists());
+    assert!(
+        deliver_result(&prepared, 3, &ResultPolicy::default())
+            .unwrap()
+            .delivered
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn four_worker_recovery_preserves_every_peer_and_exports_worker_four() {
+    let (temp, prepared) = fixture_with_workers(4);
+    for (worker, path) in prepared.workers.iter().enumerate() {
+        fs::write(path.join("result.txt"), format!("partial {}", worker + 1)).unwrap();
+    }
+    let report = preserve_partial_and_cleanup(&prepared).unwrap();
+    assert!(report.cleanup_complete);
+    let inspection = inspect_recovery(&report.recovery).unwrap();
+    assert_eq!(inspection.worker_count, 4);
+    assert_eq!(
+        inspection
+            .workers
+            .iter()
+            .map(|worker| worker.worker)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4]
+    );
+    let export = export_recovery(&report.recovery, &temp.path().join("export-four"), 4).unwrap();
+    assert_eq!(
+        fs::read_to_string(export.files.join("result.txt")).unwrap(),
+        "partial 4"
+    );
+    assert!(prepared.workers.iter().all(|path| !path.exists()));
+    assert!(!prepared.original.join("result.txt").exists());
+    assert!(export_recovery(&report.recovery, &temp.path().join("export-five"), 5).is_err());
+
+    let manifest = report.recovery.join("complete.json");
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    saved["worker_count"] = serde_json::json!(2);
+    fs::write(&manifest, serde_json::to_vec(&saved).unwrap()).unwrap();
+    assert!(inspect_recovery(&report.recovery).is_err());
+    assert!(export_recovery(&report.recovery, &temp.path().join("forged-four"), 4).is_err());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn legacy_two_worker_state_and_recovery_remain_readable() {
+    let (temp, prepared) = fixture();
+    let legacy: PreparedWorkspace =
+        serde_json::from_slice(&serde_json::to_vec(&prepared).unwrap()).unwrap();
+    legacy.validate_layout().unwrap();
+    assert_eq!(legacy.workers.len(), 2);
+    assert!(deliver_result(&legacy, 2, &ResultPolicy::default()).is_err());
+    assert!(legacy.workers.iter().all(|path| path.exists()));
+    fs::write(legacy.workers[1].join("result.txt"), "legacy second worker").unwrap();
+    let report = preserve_partial_and_cleanup(&legacy).unwrap();
+    let manifest = report.recovery.join("complete.json");
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    saved.as_object_mut().unwrap().remove("worker_count");
+    fs::write(&manifest, serde_json::to_vec(&saved).unwrap()).unwrap();
+    assert_eq!(inspect_recovery(&report.recovery).unwrap().worker_count, 2);
+    let export = export_recovery(&report.recovery, &temp.path().join("legacy-export"), 2).unwrap();
+    assert_eq!(
+        fs::read_to_string(export.files.join("result.txt")).unwrap(),
+        "legacy second worker"
+    );
+    assert!(export_recovery(&report.recovery, &temp.path().join("legacy-four"), 4).is_err());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn altered_workspace_roster_cannot_deliver_or_remove_owned_trees() {
+    let (_temp, mut prepared) = fixture_with_workers(4);
+    let all_workers = prepared.workers.clone();
+    prepared.workers.truncate(2);
+    assert!(deliver_result(&prepared, 0, &ResultPolicy::default()).is_err());
+    assert!(preserve_partial_and_cleanup(&prepared).is_err());
+    assert!(all_workers.iter().all(|path| path.exists()));
+    prepared.workers = all_workers;
+    prepared.workers[3] = prepared.workers[0].clone();
+    assert!(prepared.validate_layout().is_err());
+    assert!(retain_result(&prepared, 3).is_err());
 }
 
 #[test]

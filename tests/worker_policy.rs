@@ -172,7 +172,8 @@ fn coordination_server_never_overwrites_a_saved_or_plugin_integration() {
             &json!([]),
             &json!([]),
             &json!([]),
-            &json!([{"name":"delm_coordination_unrelated","tools_sha256":"ordinary"}])
+            &json!([{"name":"delm_coordination_unrelated","tools_sha256":"ordinary"}]),
+            None
         )
         .is_err()
     );
@@ -210,6 +211,7 @@ fn skill_content_and_mcp_tool_definitions_must_match_not_only_names() {
         &expected_skills,
         &expected_tools,
         &expected_tools,
+        None,
     )
     .unwrap();
     let mut changed = expected_skills.clone();
@@ -219,7 +221,8 @@ fn skill_content_and_mcp_tool_definitions_must_match_not_only_names() {
             &expected_skills,
             &changed,
             &expected_tools,
-            &expected_tools
+            &expected_tools,
+            None
         )
         .is_err()
     );
@@ -230,7 +233,8 @@ fn skill_content_and_mcp_tool_definitions_must_match_not_only_names() {
             &expected_skills,
             &expected_skills,
             &expected_tools,
-            &changed
+            &changed,
+            None
         )
         .is_err()
     );
@@ -239,7 +243,8 @@ fn skill_content_and_mcp_tool_definitions_must_match_not_only_names() {
             &expected_skills,
             &json!([]),
             &expected_tools,
-            &expected_tools
+            &expected_tools,
+            None
         )
         .is_err()
     );
@@ -260,14 +265,16 @@ fn capability_parity_detects_enablement_dependencies_auth_and_discovery_changes(
         let mut actual = skills.clone();
         actual[0][field] = value;
         assert!(
-            delm::workers::compare_capability_manifests(&skills, &actual, &tools, &tools).is_err(),
+            delm::workers::compare_capability_manifests(&skills, &actual, &tools, &tools, None)
+                .is_err(),
             "accepted changed skill {field}"
         );
     }
     let mut enabled = skills.clone();
     enabled[1]["enabled"] = json!(true);
     assert!(
-        delm::workers::compare_capability_manifests(&skills, &enabled, &tools, &tools).is_err()
+        delm::workers::compare_capability_manifests(&skills, &enabled, &tools, &tools, None)
+            .is_err()
     );
     for (field, value) in [
         ("auth_status", json!("notLoggedIn")),
@@ -277,13 +284,91 @@ fn capability_parity_detects_enablement_dependencies_auth_and_discovery_changes(
         let mut actual = tools.clone();
         actual[0][field] = value;
         assert!(
-            delm::workers::compare_capability_manifests(&skills, &skills, &tools, &actual).is_err(),
+            delm::workers::compare_capability_manifests(&skills, &skills, &tools, &actual, None)
+                .is_err(),
             "accepted changed MCP {field}"
         );
     }
     let mut reordered = skills.clone();
     reordered.as_array_mut().unwrap().reverse();
-    delm::workers::compare_capability_manifests(&skills, &reordered, &tools, &tools).unwrap();
+    delm::workers::compare_capability_manifests(&skills, &reordered, &tools, &tools, None).unwrap();
+}
+
+#[test]
+fn capability_parity_allows_only_the_current_workers_coordination_server() {
+    let skills = json!([]);
+    let original = json!([{"name":"docs","tools_sha256":"same"}]);
+    for worker in 1..=4 {
+        let own = format!("delm_coordination_{worker}");
+        let mut actual = original.clone();
+        actual
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":own,"tools_sha256":"board"}));
+        delm::workers::compare_capability_manifests(
+            &skills,
+            &skills,
+            &original,
+            &actual,
+            Some(&own),
+        )
+        .unwrap();
+        assert!(delm::workers::compare_capability_manifests(
+            &skills, &skills, &original, &actual, None,
+        ).is_err(), "unconfigured coordination server was exempted");
+        for other in 1..=4 {
+            if other == worker {
+                continue;
+            }
+            let other = format!("delm_coordination_{other}");
+            assert!(
+                delm::workers::compare_capability_manifests(
+                    &skills,
+                    &skills,
+                    &original,
+                    &actual,
+                    Some(&other),
+                )
+                .is_err(),
+                "worker {worker} inherited another worker's coordination server"
+            );
+        }
+        for unexpected in [
+            "delm_coordination_5",
+            "delm_coordination_unrelated",
+            "unrequested",
+        ] {
+            let mut extra = actual.clone();
+            extra
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"name":unexpected}));
+            assert!(
+                delm::workers::compare_capability_manifests(
+                    &skills,
+                    &skills,
+                    &original,
+                    &extra,
+                    Some(&own),
+                )
+                .is_err(),
+                "unexpected integration {unexpected} was exempted"
+            );
+        }
+        let mut changed = actual.clone();
+        changed[0]["tools_sha256"] = json!("changed");
+        assert!(
+            delm::workers::compare_capability_manifests(
+                &skills,
+                &skills,
+                &original,
+                &changed,
+                Some(&own),
+            )
+            .is_err(),
+            "adding coordination weakened existing integration parity"
+        );
+    }
 }
 
 #[tokio::test]
@@ -311,17 +396,19 @@ async fn lifecycle_hook_discovery_checks_trust_without_starting_worker_threads()
     }))
     .unwrap();
     for status in ["trusted", "untrusted"] {
-        let hooks = delm::lifecycle::REQUIRED_EVENTS
+        let mut hooks = delm::lifecycle::REQUIRED_EVENTS
             .iter()
             .map(|event| {
                 json!({
                     "eventName":event,"source":"plugin","sourcePath":hooks_file,
                     "handlerType":"command","enabled":true,"async":false,"trustStatus":status,
-                    "matcher":null,"timeoutSec":if *event == "interrupt" {3} else {5},
+                    "matcher":null,"timeoutSec":if *event == "interrupt" {3} else if *event == "userPromptSubmit" {330} else {5},
                     "command":format!("exec \"{}\" lifecycle-hook", executable.display())
                 })
             })
             .collect::<Vec<_>>();
+        hooks.push(json!({"eventName":"userPromptSubmit","source":"plugin","sourcePath":hooks_file,
+            "handlerType":"mcpTool","server":"delm_selector","tool":"select_agents","enabled":true,"matcher":null,"timeoutSec":330,"trustStatus":status}));
         fs::write(
             host.with_extension("json"),
             serde_json::to_vec(&json!({

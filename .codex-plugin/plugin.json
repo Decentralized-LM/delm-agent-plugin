@@ -3,5 +3,6 @@
   "version": "0.3.0",
   "description": "Build in parallel with collaborating Codex agents and deliver their changes to your project.",
   "skills": "./skills",
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
 }

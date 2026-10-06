@@ -7,6 +7,8 @@ use std::os::unix::fs::DirBuilderExt;
 struct Bundle {
     version: u8,
     original: PathBuf,
+    #[serde(default = "crate::config::default_worker_count")]
+    worker_count: usize,
     workers: Vec<Delta>,
     #[serde(default)]
     excluded_paths: BTreeMap<String, String>,
@@ -37,6 +39,7 @@ pub struct RecoveryInspection {
     pub bundle: PathBuf,
     pub original: PathBuf,
     pub partial: bool,
+    pub worker_count: usize,
     pub workers: Vec<RecoveryWorker>,
     pub verified_blobs: usize,
     pub excluded_paths: BTreeMap<String, String>,
@@ -101,15 +104,18 @@ fn load(bundle: &Path) -> Result<(PathBuf, File, Bundle, usize)> {
         "Recovery manifest grew beyond its bound"
     );
     let saved: Bundle = serde_json::from_slice(&bytes)?;
+    crate::config::validate_worker_count(saved.worker_count)?;
     ensure!(
-        saved.version == 1 && saved.original.is_absolute() && saved.workers.len() <= 2,
+        saved.version == 1
+            && saved.original.is_absolute()
+            && saved.workers.len() <= saved.worker_count,
         "Unsupported recovery manifest"
     );
     let mut workers = BTreeSet::new();
     let mut blobs = BTreeSet::new();
     for worker in &saved.workers {
         ensure!(
-            worker.worker < 2 && workers.insert(worker.worker),
+            worker.worker < saved.worker_count && workers.insert(worker.worker),
             "Invalid recovery worker identity"
         );
         ensure!(
@@ -153,6 +159,7 @@ pub fn inspect_recovery(bundle: &Path) -> Result<RecoveryInspection> {
         bundle,
         original: saved.original,
         partial: true,
+        worker_count: saved.worker_count,
         verified_blobs,
         excluded_paths: saved.excluded_paths,
         workers: saved
@@ -233,11 +240,15 @@ fn export_version(root: &Path, blobs: &File, delta: &Delta, after: bool) -> Resu
 }
 
 /// Export one worker's before/after changes into a new destination. Public
-/// worker numbers are 1 and 2. Original-project writes and deletion application
+/// worker numbers are one-based. Original-project writes and deletion application
 /// are intentionally separate actions; the manifest records both explicitly.
 pub fn export_recovery(bundle: &Path, destination: &Path, worker: usize) -> Result<RecoveryExport> {
-    ensure!((1..=2).contains(&worker), "Select worker 1 or 2");
     let (bundle, blobs, saved, _) = load(bundle)?;
+    ensure!(
+        (1..=saved.worker_count).contains(&worker),
+        "Select a worker from this run's roster (1–{})",
+        saved.worker_count
+    );
     let selected = saved
         .workers
         .iter()

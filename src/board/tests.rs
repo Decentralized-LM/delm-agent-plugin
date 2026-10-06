@@ -7,16 +7,22 @@ struct Fixture {
     _temp: tempfile::TempDir,
     run: PathBuf,
     baseline: PathBuf,
-    workers: [PathBuf; 2],
+    workers: Vec<PathBuf>,
 }
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_workers(2)
+    }
+
+    fn with_workers(count: usize) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let run = temp.path().join("run");
         let baseline = temp.path().join("baseline");
-        let workers = [temp.path().join("worker1"), temp.path().join("worker2")];
-        for path in [&run, &baseline, &workers[0], &workers[1]] {
+        let workers = (1..=count)
+            .map(|worker| temp.path().join(format!("worker{worker}")))
+            .collect::<Vec<_>>();
+        for path in [&run, &baseline].into_iter().chain(workers.iter()) {
             fs::create_dir(path).unwrap();
         }
         Self {
@@ -28,7 +34,7 @@ impl Fixture {
     }
 
     fn seed(&self, name: &str, bytes: &[u8]) {
-        for root in [&self.baseline, &self.workers[0], &self.workers[1]] {
+        for root in std::iter::once(&self.baseline).chain(self.workers.iter()) {
             let path = root.join(name);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, bytes).unwrap();
@@ -37,7 +43,7 @@ impl Fixture {
 
     fn board(&self) -> Board {
         let mut board = Board::open(&self.run, &self.baseline, self.workers.clone()).unwrap();
-        for worker in 1..=2 {
+        for worker in 1..=self.workers.len() {
             board.set_worker_policy(worker,&json!({"default_permissions":"test","permissions":{"test":{"filesystem":{self.workers[worker-1].to_string_lossy().as_ref():"write"}}}})).unwrap();
         }
         board
@@ -1376,4 +1382,214 @@ fn integration_availability_waits_for_the_current_assembler_to_finish() {
         board.wait_ready(&cursor).unwrap(),
         "previously unavailable integration is now claimable"
     );
+}
+
+#[test]
+fn team_roster_is_exact_and_cannot_expand_on_reopen() {
+    for count in 2..=4 {
+        let fixture = Fixture::with_workers(count);
+        let mut board = fixture.board();
+        assert_eq!(board.worker_count(), count);
+        assert_eq!(
+            board.view().unwrap()["workers"].as_array().unwrap().len(),
+            count
+        );
+        for invalid in [0, count + 1] {
+            assert!(board.call(invalid, "delm_status", json!({})).is_err());
+            assert!(board.worker_path(invalid).is_err());
+            assert!(board.input_snapshot(invalid, &["main.js".into()]).is_err());
+            assert!(board.shared_checks(invalid, &json!({}), 1).is_err());
+            assert!(board.set_worker_scopes(invalid, vec![]).is_err());
+            assert!(board.release_worker_claims(invalid, "stopped").is_err());
+        }
+        drop(board);
+        assert_eq!(fixture.board().worker_count(), count);
+        if count > 2 {
+            assert!(
+                Board::open(
+                    &fixture.run,
+                    &fixture.baseline,
+                    fixture.workers[..2].to_vec()
+                )
+                .is_err()
+            );
+        } else {
+            let extra = fixture._temp.path().join("worker3");
+            fs::create_dir(&extra).unwrap();
+            let mut enlarged = fixture.workers.clone();
+            enlarged.push(extra);
+            assert!(Board::open(&fixture.run, &fixture.baseline, enlarged).is_err());
+        }
+    }
+}
+
+#[test]
+fn legacy_two_worker_table_reopens_without_migration() {
+    let fixture = Fixture::new();
+    let board = fixture.board();
+    board.db.execute_batch("ALTER TABLE workers RENAME TO old_workers;
+        CREATE TABLE workers (worker INTEGER PRIMARY KEY CHECK(worker IN (1,2)), state TEXT NOT NULL, summary TEXT NOT NULL, dependency TEXT, updated INTEGER NOT NULL);
+        INSERT INTO workers SELECT * FROM old_workers; DROP TABLE old_workers;").unwrap();
+    drop(board);
+    let mut reopened = fixture.board();
+    assert_eq!(reopened.worker_count(), 2);
+    assert!(reopened.call(2, "delm_status", json!({})).is_ok());
+    assert!(reopened.call(3, "delm_status", json!({})).is_err());
+}
+
+#[test]
+fn four_workers_compete_for_one_integration_claim() {
+    let fixture = Fixture::with_workers(4);
+    let mut board = fixture.board();
+    let tasks = (1..=4)
+        .map(|worker| {
+            create_task(
+                &mut board,
+                worker,
+                &format!("assembly-{worker}"),
+                "integration",
+            )
+        })
+        .collect::<Vec<_>>();
+    let barrier = Arc::new(Barrier::new(4));
+    let handles = tasks
+        .into_iter()
+        .enumerate()
+        .map(|(index, task)| {
+            let mut board = fixture.board();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                board.call(
+                    index + 1,
+                    "delm_task_claim",
+                    json!({"idempotency_key":"claim", "task_id":task}),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(Result::is_ok)
+            .count(),
+        1
+    );
+    let current = board.view().unwrap();
+    assert_eq!(
+        current["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["state"] == "claimed")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn peer_discovery_covers_every_other_owner_with_bound_cursors() {
+    let fixture = Fixture::with_workers(4);
+    let mut board = fixture.board();
+    for worker in 1..=4 {
+        let task = create_task(
+            &mut board,
+            worker,
+            &format!("task-{worker}"),
+            "implementation",
+        );
+        claim_task(&mut board, worker, "claim", task);
+    }
+    create_task(&mut board, 1, "unclaimed", "implementation");
+    let first = board
+        .call(
+            1,
+            "delm_list",
+            json!({"collection":"tasks", "owner":"peer", "limit":2}),
+        )
+        .unwrap()["result"]
+        .clone();
+    assert_eq!(first["total"], 3);
+    let cursor = first["next_cursor"].clone();
+    assert!(
+        board
+            .call(
+                2,
+                "delm_list",
+                json!({"collection":"tasks", "owner":"peer", "limit":2, "cursor":cursor})
+            )
+            .is_err()
+    );
+    let second = board
+        .call(
+            1,
+            "delm_list",
+            json!({"collection":"tasks", "owner":"peer", "limit":2, "cursor":cursor}),
+        )
+        .unwrap()["result"]
+        .clone();
+    let owners = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second["items"].as_array().unwrap())
+        .map(|task| task["owner"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(owners, vec![2, 3, 4]);
+}
+
+#[test]
+fn fourth_worker_dependencies_are_valid_and_wake_on_relevant_publication() {
+    let fixture = Fixture::with_workers(4);
+    let mut board = fixture.board();
+    let declaration = json!({"idempotency_key":"wait", "expected_revision":1, "outcome":"waiting", "summary":"Waiting on shared work", "dependency":"worker:4"});
+    board.call(1, "delm_complete", declaration.clone()).unwrap();
+    let cursor = board.wait_cursor(&declaration).unwrap().unwrap();
+    assert!(!board.wait_ready(&cursor).unwrap());
+    publish(&mut board, 3, "unrelated", &[]);
+    assert!(!board.wait_ready(&cursor).unwrap());
+    publish(&mut board, 4, "ready", &[]);
+    assert!(board.wait_ready(&cursor).unwrap());
+    assert!(board.call(4, "delm_complete", declaration).is_err());
+    assert!(board.dependency_owner("worker:5").is_err());
+}
+
+#[test]
+fn fourth_worker_check_receipt_is_reusable_by_other_members_only_for_matching_inputs() {
+    let fixture = Fixture::with_workers(4);
+    fixture.seed("main.js", b"ready");
+    let mut board = fixture.board();
+    let begun = board
+        .begin_check(
+            4,
+            json!({"idempotency_key":"begin", "summary":"Focused check", "paths":["main.js"]}),
+            || 100,
+        )
+        .unwrap();
+    let receipt = board.finish_check(4, json!({"idempotency_key":"finish", "snapshot_id":begun["result"]["snapshot_id"], "command_id":"test-command"}), &native_check(&fixture.workers[3],101,0)).unwrap();
+    let declaration = json!({"shared_checks":[receipt["result"]["receipt_id"]]});
+    for worker in 1..=4 {
+        assert_eq!(
+            board.shared_checks(worker, &declaration, 1).unwrap()[0]["worker"],
+            4
+        );
+    }
+    fs::write(fixture.workers[0].join("main.js"), b"changed").unwrap();
+    assert!(board.shared_checks(1, &declaration, 1).is_err());
+    assert!(board.shared_checks(2, &declaration, 2).is_err());
+    assert!(board.shared_checks(5, &declaration, 1).is_err());
+}
+
+#[test]
+fn worker_roots_must_remain_distinct_for_every_team_member() {
+    let fixture = Fixture::with_workers(4);
+    let mut duplicated = fixture.workers.clone();
+    duplicated[3] = duplicated[1].clone();
+    assert!(Board::open(&fixture.run, &fixture.baseline, duplicated).is_err());
+    let nested = fixture.workers[2].join("nested");
+    fs::create_dir(&nested).unwrap();
+    let mut overlapping = fixture.workers.clone();
+    overlapping[3] = nested;
+    assert!(Board::open(&fixture.run, &fixture.baseline, overlapping).is_err());
 }

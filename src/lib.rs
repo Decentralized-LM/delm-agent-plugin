@@ -11,6 +11,7 @@ pub mod lifecycle;
 pub mod package;
 pub mod protocol;
 pub mod run;
+pub mod selector;
 pub mod services;
 pub mod supervisor;
 pub mod worker_tools;

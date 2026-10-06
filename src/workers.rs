@@ -104,6 +104,32 @@ impl Drop for ProbeDirectory {
     }
 }
 
+fn metadata_thread_request(
+    project: &Path,
+    overrides: Value,
+    parent: Option<&str>,
+    model: Option<String>,
+    effort: Option<String>,
+) -> (&'static str, Value) {
+    let mut params = json!({"cwd":project,"config":overrides,"ephemeral":true});
+    let method = if let Some(parent) = parent {
+        params["threadId"] = json!(parent);
+        params["excludeTurns"] = json!(true);
+        // Ephemeral forks do not inherit a goal. Native Codex rejects combining
+        // them with deferGoalContinuation, which is only for persistent forks.
+        "thread/fork"
+    } else {
+        "thread/start"
+    };
+    if let Some(model) = model {
+        params["model"] = json!(model);
+    }
+    if let Some(effort) = effort {
+        params["config"]["model_reasoning_effort"] = json!(effort);
+    }
+    (method, params)
+}
+
 /// Read current native hook trust without opening a thread or generating tokens.
 /// A fresh listing does not prove what the parent session already loaded, so it
 /// supplements the invocation handshake and monitoring lease, never replaces them.
@@ -188,6 +214,7 @@ pub async fn stock_request_with_parent_turn(
         .ok()
         .filter(|id| !id.is_empty());
     let mut request = StartRequest {
+        worker_count: crate::config::DEFAULT_WORKER_COUNT,
         project: project.clone(),
         task,
         context,
@@ -266,21 +293,13 @@ pub async fn stock_request_with_parent_turn(
     } else {
         "native-saved-project-config"
     });
-    let mut fork_params = json!({"cwd":project,"config":project_overrides,"ephemeral":true});
-    let method = if let Some(parent) = &parent {
-        fork_params["threadId"] = json!(parent);
-        fork_params["excludeTurns"] = json!(true);
-        fork_params["deferGoalContinuation"] = json!(true);
-        "thread/fork"
-    } else {
-        "thread/start"
-    };
-    if let Some(model) = model {
-        fork_params["model"] = json!(model);
-    }
-    if let Some(effort) = effort {
-        fork_params["config"]["model_reasoning_effort"] = json!(effort);
-    }
+    let (method, fork_params) = metadata_thread_request(
+        &project,
+        project_overrides,
+        parent.as_deref(),
+        model,
+        effort,
+    );
     let inherited = rpc
         .request(method, fork_params)
         .await
@@ -522,7 +541,14 @@ pub async fn verify_worker_capabilities(
     request: &StartRequest,
     project: &Path,
     thread: &str,
+    worker: usize,
 ) -> Result<Value> {
+    crate::config::validate_worker_count(request.worker_count)?;
+    ensure!(
+        (1..=request.worker_count).contains(&worker),
+        "Worker {worker} is not a member of this DeLM run"
+    );
+    let coordination = format!("delm_coordination_{worker}");
     let (skills, tools) = tokio::try_join!(
         rpc.request("skills/list", json!({"cwds":[project],"forceReload":true})),
         mcp_manifest(rpc, thread)
@@ -533,6 +559,7 @@ pub async fn verify_worker_capabilities(
         &skills,
         &request.auth_settings["mcp_manifest"],
         &tools,
+        Some(&coordination),
     )?;
     verify_skill_resources(&request.auth_settings["skills_manifest"], &skills)?;
     let compared = request.auth_settings["skills_manifest"].is_array()
@@ -547,6 +574,7 @@ pub fn compare_capability_manifests(
     actual_skills: &Value,
     expected_tools: &Value,
     actual_tools: &Value,
+    allowed_coordination: Option<&str>,
 ) -> Result<()> {
     if let Some(expected) = expected_skills.as_array() {
         let actual = actual_skills
@@ -603,9 +631,9 @@ pub fn compare_capability_manifests(
             );
         }
         for server in actual.iter().filter(|server| {
-            !server["name"]
+            server["name"]
                 .as_str()
-                .is_some_and(|name| matches!(name, "delm_coordination_1" | "delm_coordination_2"))
+                .is_none_or(|name| Some(name) != allowed_coordination)
         }) {
             ensure!(
                 expected.iter().any(|candidate| [
@@ -992,31 +1020,29 @@ impl RpcClient {
     }
 
     pub async fn shutdown(&mut self, threads: &[(String, Option<String>)]) -> Result<()> {
-        ensure!(threads.len() <= 2, "DeLM owns at most two worker threads");
+        ensure!(
+            threads.len() <= crate::config::MAX_WORKER_COUNT,
+            "Worker thread count exceeds the supported limit"
+        );
         let native = tokio::time::timeout(Duration::from_secs(8), async {
-            // Dispatch both interrupts before waiting for either worker's tool
-            // cleanup, so one slow archive cannot extend its peer's model work.
-            let (first, second) = tokio::join!(
-                self.interrupt_worker(threads.first()),
-                self.interrupt_worker(threads.get(1))
+            // Dispatch every interrupt concurrently before cleanup. A slow
+            // worker must not extend another worker's model work.
+            let slots: Vec<_> = (0..crate::config::MAX_WORKER_COUNT)
+                .map(|index| threads.get(index))
+                .collect();
+            let (a, b, c, d) = tokio::join!(
+                self.interrupt_worker(slots[0]),
+                self.interrupt_worker(slots[1]),
+                self.interrupt_worker(slots[2]),
+                self.interrupt_worker(slots[3])
             );
-            let mut clean = first && second;
-            for (thread, _) in threads {
-                if thread.is_empty() {
-                    continue;
-                }
-                for method in ["thread/backgroundTerminals/clean", "thread/archive"] {
-                    clean &= matches!(
-                        tokio::time::timeout(
-                            Duration::from_secs(2),
-                            self.request(method, json!({"threadId":thread}))
-                        )
-                        .await,
-                        Ok(Ok(_))
-                    );
-                }
-            }
-            clean
+            let (e, f, g, h) = tokio::join!(
+                self.clean_worker(slots[0]),
+                self.clean_worker(slots[1]),
+                self.clean_worker(slots[2]),
+                self.clean_worker(slots[3])
+            );
+            a && b && c && d && e && f && g && h
         })
         .await;
         let clean = matches!(native, Ok(true));
@@ -1036,9 +1062,27 @@ impl RpcClient {
         self.reader.abort();
         ensure!(
             clean,
-            "Native worker shutdown was not fully acknowledged; preserve both projects"
+            "Native worker shutdown was not fully acknowledged; preserve all worker projects"
         );
         Ok(())
+    }
+
+    async fn clean_worker(&self, worker: Option<&(String, Option<String>)>) -> bool {
+        let Some((thread, _)) = worker.filter(|(thread, _)| !thread.is_empty()) else {
+            return true;
+        };
+        let mut clean = true;
+        for method in ["thread/backgroundTerminals/clean", "thread/archive"] {
+            clean &= matches!(
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    self.request(method, json!({"threadId":thread}))
+                )
+                .await,
+                Ok(Ok(_))
+            );
+        }
+        clean
     }
 
     async fn interrupt_worker(&self, worker: Option<&(String, Option<String>)>) -> bool {
@@ -1084,7 +1128,11 @@ pub fn worker_config(
     project: &Path,
     worker: usize,
 ) -> Result<Value> {
-    ensure!((1..=2).contains(&worker), "Worker identity must be 1 or 2");
+    crate::config::validate_worker_count(request.worker_count)?;
+    ensure!(
+        (1..=request.worker_count).contains(&worker),
+        "Worker identity is outside this run"
+    );
     let original = request.project.canonicalize()?;
     let run_dir = run_dir.canonicalize()?;
     let project = project.canonicalize()?;
@@ -1256,7 +1304,11 @@ pub fn worker_thread_request(
     additions: Value,
     instructions: &str,
 ) -> Result<(&'static str, Value)> {
-    ensure!((1..=2).contains(&worker), "Worker identity must be 1 or 2");
+    crate::config::validate_worker_count(request.worker_count)?;
+    ensure!(
+        (1..=request.worker_count).contains(&worker),
+        "Worker identity is outside this run"
+    );
     let parent = request.auth_settings["parent_thread_id"].as_str();
     let mut config = stock_overrides(&request.auth_settings, project)?;
     rebase_project_paths(&mut config, &request.project, project);
@@ -1443,7 +1495,11 @@ pub fn verify_thread_response(
     worker: usize,
     response: &Value,
 ) -> Result<()> {
-    ensure!((1..=2).contains(&worker), "Unbound worker identity");
+    crate::config::validate_worker_count(request.worker_count)?;
+    ensure!(
+        (1..=request.worker_count).contains(&worker),
+        "Unbound worker identity"
+    );
     ensure!(
         Path::new(
             response["cwd"]
@@ -1510,4 +1566,94 @@ pub fn verify_thread_response(
         "Codex omitted native thread identity"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_forks_are_ephemeral_without_goal_inheritance() {
+        for parent in [None, Some("active-parent")] {
+            let (method, params) = metadata_thread_request(
+                Path::new("/project"),
+                json!({"features":{"plugins":true}}),
+                parent,
+                Some("fixture".into()),
+                Some("medium".into()),
+            );
+            assert_eq!(
+                method,
+                if parent.is_some() {
+                    "thread/fork"
+                } else {
+                    "thread/start"
+                }
+            );
+            assert_eq!(params["ephemeral"], true);
+            assert!(params.get("deferGoalContinuation").is_none());
+            assert_eq!(params["model"], "fixture");
+            assert_eq!(params["config"]["model_reasoning_effort"], "medium");
+            assert_eq!(params["config"]["features"]["plugins"], true);
+            if let Some(parent) = parent {
+                assert_eq!(params["threadId"], parent);
+                assert_eq!(params["excludeTurns"], true);
+            } else {
+                assert!(params.get("threadId").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_fork_uses_native_compatible_flags_without_a_model_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let host = root.join("codex");
+        fs::write(&host, include_str!("../tests/fixtures/worker_host.py")).unwrap();
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(host.with_extension("json"), r#"{"mode":"metadata_only"}"#).unwrap();
+        let request: StartRequest = serde_json::from_value(json!({
+            "project":root,"task":"Metadata only","model":"fixture",
+            "auth_home":root,"host_executable":host,"policy":{}
+        }))
+        .unwrap();
+        let mut rpc = RpcClient::spawn(&request, &root).await.unwrap();
+        rpc.initialize().await.unwrap();
+        let (method, params) =
+            metadata_thread_request(&root, json!({}), Some("live-parent"), None, None);
+        let mut invalid = params.clone();
+        invalid["deferGoalContinuation"] = json!(true);
+        let error = rpc.request(method, invalid).await.unwrap_err().to_string();
+        assert!(
+            error.contains("cannot be combined with `ephemeral`"),
+            "{error}"
+        );
+        let inherited = rpc.request(method, params).await.unwrap();
+        assert_eq!(inherited["model"], "fixture");
+        assert_eq!(inherited["thread"]["id"], "ephemeral-compatibility");
+        rpc.request(
+            "thread/unsubscribe",
+            json!({"threadId":inherited["thread"]["id"]}),
+        )
+        .await
+        .unwrap();
+        rpc.shutdown(&[]).await.unwrap();
+        let wire = fs::read_to_string(host.with_extension("jsonl")).unwrap();
+        for line in wire.lines() {
+            let record: Value = serde_json::from_str(line).unwrap();
+            if record["direction"] == "in" {
+                assert!(
+                    matches!(
+                        record["message"]["method"].as_str(),
+                        Some("initialize" | "initialized" | "thread/fork" | "thread/unsubscribe")
+                    ),
+                    "metadata lookup must not resume or start a model turn: {record}"
+                );
+            }
+        }
+        assert!(
+            !host.with_extension("state.json").exists(),
+            "metadata must not persist a worker thread"
+        );
+    }
 }

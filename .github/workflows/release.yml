@@ -101,6 +101,10 @@ jobs:
           for scenario in interrupt preflight stop owner-death plugin-remove; do
             python3 scripts/verify_native_lifecycle.py --fixture "target/$BUILD_TARGET/release/examples/native-lifecycle-fixture" --case "$scenario" --out "$RUNNER_TEMP/qualification/$scenario"
           done
+      - name: Qualify native agent selection with the release binary
+        run: |
+          python3 scripts/verify_codex_selector.py --runtime "target/$BUILD_TARGET/release/delm" --case cancel --out "$RUNNER_TEMP/qualification/selector-cancel"
+          python3 scripts/verify_codex_selector.py --runtime "target/$BUILD_TARGET/release/delm" --case positive --agents 4 --out "$RUNNER_TEMP/qualification/selector-four"
       - name: Exercise and record the exact runtime bytes being archived
         run: |
           python3 scripts/qualify_release.py smoke --runtime "target/$BUILD_TARGET/release/delm" --architecture "$BUILD_ARCHITECTURE" --out "$RUNNER_TEMP/qualification/smoke"

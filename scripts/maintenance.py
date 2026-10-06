@@ -38,13 +38,14 @@ def verified_recovery(run):
         return False
     directory(root)
     bundle = record(root / "complete.json", 64 * 1024 * 1024)
-    if not bundle or bundle.get("version") != 1 or not isinstance(bundle.get("original"), str) or not Path(bundle["original"]).is_absolute() or not isinstance(bundle.get("workers"), list) or len(bundle["workers"]) > 2:
+    worker_count = bundle.get("worker_count", 2) if bundle else None
+    if not bundle or bundle.get("version") != 1 or type(worker_count) is not int or not 2 <= worker_count <= 4 or not isinstance(bundle.get("original"), str) or not Path(bundle["original"]).is_absolute() or not isinstance(bundle.get("workers"), list) or len(bundle["workers"]) > worker_count:
         return False
     verified = set()
     workers = set()
     count = 0
     for worker in bundle["workers"]:
-        if not isinstance(worker, dict) or type(worker.get("worker")) is not int or worker["worker"] not in (0, 1) or worker["worker"] in workers or not isinstance(worker.get("changes"), dict):
+        if not isinstance(worker, dict) or type(worker.get("worker")) is not int or not 0 <= worker["worker"] < worker_count or worker["worker"] in workers or not isinstance(worker.get("changes"), dict):
             return False
         workers.add(worker["worker"])
         for relative, pair in worker["changes"].items():

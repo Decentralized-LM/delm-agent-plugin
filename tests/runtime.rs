@@ -423,6 +423,137 @@ fn normal_completion_delivers_into_original_and_removes_both_workspaces() {
 }
 
 #[test]
+fn team_count_three_and_four_route_native_approval_to_last_worker_and_deliver() {
+    for count in [3, 4] {
+        let fixture = Fixture::new("approvals");
+        let mut request = fixture.request(20);
+        request["worker_count"] = json!(count);
+        let mut session = fixture.launch(request);
+        let approvals: Vec<_> = (0..count)
+            .map(|_| session.until(|event| event["type"] == "approval"))
+            .collect();
+        let identities = approvals
+            .iter()
+            .map(|event| event["details"]["worker"].as_u64().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(identities, (1..=count as u64).collect());
+        for approval in &approvals {
+            let decision = if approval["details"]["worker"] == count {
+                "accept"
+            } else {
+                "decline"
+            };
+            session.send(
+                json!({"type":"respond", "id":approval["id"], "response":{"decision":decision}}),
+            );
+        }
+        let ready = session.until(|event| event["type"] == "ready");
+        session.accept(&ready);
+        let result = session.finish();
+        assert_eq!(result["type"], "result", "{:?}", session.events);
+        assert_eq!(result["details"]["worker"], count);
+        assert_eq!(
+            fs::read_to_string(fixture.project.join("result.txt")).unwrap(),
+            format!("thread-{count}\n")
+        );
+        let mut delivered = snapshot(&fixture.project);
+        delivered.remove(Path::new("result.txt")).unwrap();
+        assert_eq!(
+            delivered, fixture.before,
+            "delivery changed pre-existing data"
+        );
+        let run = fixture.run_path(&result);
+        let saved: Value =
+            serde_json::from_slice(&fs::read(run.join("run.json")).unwrap()).unwrap();
+        assert_eq!(saved["request"]["worker_count"], count);
+        assert_eq!(saved["workers"].as_array().unwrap().len(), count);
+        assert_eq!(
+            saved["workspace"]["workers"].as_array().unwrap().len(),
+            count
+        );
+        let starts = fixture.requests("thread/start");
+        assert_eq!(starts.len(), count);
+        assert_eq!(fixture.requests("turn/start").len(), count);
+        for (index, start) in starts.iter().enumerate() {
+            let instructions = start["params"]["developerInstructions"].as_str().unwrap();
+            assert!(instructions.contains(&format!("You are worker {} of {count}.", index + 1)));
+            assert!(
+                start["params"]["cwd"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(&format!("worker-{}", index + 1))
+            );
+        }
+        for method in ["thread/backgroundTerminals/clean", "thread/archive"] {
+            let stopped = fixture
+                .requests(method)
+                .iter()
+                .map(|request| request["params"]["threadId"].as_str().unwrap().to_owned())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                stopped,
+                (1..=count).map(|id| format!("thread-{id}")).collect()
+            );
+        }
+        for name in std::iter::once("baseline".to_owned())
+            .chain((1..=count).map(|id| format!("worker-{id}")))
+        {
+            assert!(!run.join("workspace").join(name).exists());
+        }
+        fixture.assert_hosts_stopped();
+    }
+}
+
+#[test]
+fn team_count_four_updates_and_stops_every_worker_with_complete_recovery() {
+    let fixture = Fixture::new("wait");
+    let mut request = fixture.request(20);
+    request["worker_count"] = json!(4);
+    let mut session = fixture.launch(request);
+    session.until(running);
+    session.send(json!({"type":"message", "text":"Report the current status."}));
+    let deadline = Instant::now() + LIMIT;
+    while fixture.requests("turn/steer").len() < 4 {
+        assert!(
+            Instant::now() < deadline,
+            "user update did not reach all workers"
+        );
+        assert!(session.child.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    session.send(json!({"type":"stop"}));
+    let result = session.finish();
+    assert_eq!(result["type"], "stopped");
+    assert_eq!(result["details"]["cleanup_complete"], true);
+    let recovery = Path::new(result["partial_paths"][0].as_str().unwrap());
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(recovery.join("complete.json")).unwrap()).unwrap();
+    assert_eq!(manifest["worker_count"], 4);
+    assert_eq!(manifest["workers"].as_array().unwrap().len(), 4);
+    let interrupted = fixture
+        .requests("turn/interrupt")
+        .iter()
+        .map(|request| request["params"]["threadId"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        interrupted,
+        (1..=4).map(|id| format!("thread-{id}")).collect()
+    );
+    for id in 1..=4 {
+        assert!(
+            !recovery
+                .parent()
+                .unwrap()
+                .join(format!("worker-{id}"))
+                .exists()
+        );
+    }
+    assert!(!recovery.parent().unwrap().join("baseline").exists());
+    fixture.assert_hosts_stopped();
+    fixture.assert_original();
+}
+
+#[test]
 fn stop_preserves_compact_recovery_and_removes_both_private_projects() {
     let fixture = Fixture::new("wait");
     let mut session = fixture.start(30);

@@ -13,6 +13,56 @@ fn fixture() -> (TempDir, PathBuf) {
 }
 
 #[test]
+fn invalid_worker_count_is_rejected_before_project_or_run_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("new-project");
+    fs::create_dir(&project).unwrap();
+    let run = temp.path().join("new-run");
+    for count in [0, 1, 5, usize::MAX] {
+        assert!(prepare_with_workers(&project, &run, u64::MAX, count).is_err());
+        assert!(!project.join(".git").exists());
+        assert!(!run.exists());
+    }
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn selected_roster_isolated_copies_and_retention_work_for_three_and_four() {
+    for count in [3, 4] {
+        let (temp, project) = fixture();
+        let prepared =
+            prepare_with_workers(&project, &temp.path().join("run"), u64::MAX, count).unwrap();
+        prepared.validate_layout().unwrap();
+        assert_eq!(prepared.workers.len(), count);
+        for worker in &prepared.workers {
+            assert_eq!(
+                fs::read_to_string(worker.join("tracked.txt")).unwrap(),
+                "saved contents\n"
+            );
+        }
+        fs::write(
+            prepared.workers[count - 1].join("tracked.txt"),
+            "selected result",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(prepared.workers[0].join("tracked.txt")).unwrap(),
+            "saved contents\n"
+        );
+        let winner = retain_result(&prepared, count - 1).unwrap();
+        assert_eq!(winner, prepared.workers[count - 1]);
+        assert!(winner.exists());
+        assert!(
+            prepared.workers[..count - 1]
+                .iter()
+                .all(|path| !path.exists())
+        );
+        assert!(!prepared.baseline.exists());
+        assert_eq!(retain_result(&prepared, count - 1).unwrap(), winner);
+    }
+}
+
+#[test]
 #[cfg(target_os = "macos")]
 fn linked_worktree_is_rejected_before_inventory_or_private_capture() {
     let temp = tempfile::tempdir().unwrap();

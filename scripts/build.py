@@ -18,7 +18,7 @@ from dependency_notices import FILENAME as DEPENDENCY_NOTICES, validate as valid
 
 SOURCE = Path(__file__).resolve().parent.parent
 PACKAGE_FILES = (
-    ".codex-plugin/plugin.json", "skills/run/SKILL.md",
+    ".codex-plugin/plugin.json", ".mcp.json", "skills/run/SKILL.md",
     "skills/run/agents/openai.yaml", "hooks/hooks.json", "LICENSE", "NOTICE", DEPENDENCY_NOTICES,
 )
 CLAUDE_PACKAGE_FILES = (

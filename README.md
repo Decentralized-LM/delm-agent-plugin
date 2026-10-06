@@ -46,7 +46,9 @@ Build from source with Git, Python 3, Rust, and Xcode Command Line Tools. Instal
 ./scripts/install.sh
 ```
 
-Restart Codex, open `/hooks`, and review and trust the DeLM hooks. Restart once more to load the configuration, then open Codex in the project you want to work on.
+Restart Codex, open `/hooks`, and review and trust the DeLM hooks. Restart once more to load the configuration, then open Codex in the project you want to work on. Use Codex 0.160.0 or later with an approval mode that permits questions, such as `codex --ask-for-approval on-request`.
+
+Enter `$delm:run <your task>`. In the same terminal, **How many agents?** offers **2 agents (default)**, **3 agents**, and **4 agents**. Press **Enter** for 2, or use **↑/↓** then **Enter**. **Esc** cancels without launching. Every run requires confirmation; DeLM never infers the count from your task text. Codex approval mode `never` declines native forms, so it cannot start a DeLM run with this required selector.
 
 ### Claude Code
 
@@ -96,7 +98,7 @@ In Claude Code, a live board opens automatically in the same terminal. It shows 
 
 Include images and file mentions when starting a Claude run. During a run, send text or paste the relevant file content. Claude's current native API cannot forward new media attachments to existing agents; DeLM explains this before accepting an unsupported update. See [Claude input support](docs/claude-integration.md) for details.
 
-The current version runs two agents in private project copies. They share contributions and divide useful checks, so a recorded check can be reused when it still applies to the result.
+Codex offers 2–4 agents, with 2 selected by default. Claude Code runs two agents. Each agent works in a private project copy. They share contributions and divide useful checks, so a recorded check can be reused when it still applies to the result.
 
 **The result is delivered to your original project.** DeLM applies source changes and requested artifacts, preserves your Git index, merges compatible edits, and retains conflicts for recovery. Saved partial changes can be exported into a new folder for review. Temporary worker directories are removed after safe delivery or recovery. When the delivered project needs dependency setup or a focused check, the parent completes it before reporting the result ready.
 

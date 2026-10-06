@@ -1,4 +1,4 @@
-//! Durable coordination for the two native workers.
+//! Durable coordination for the selected native worker team.
 //!
 //! Actor identities and request revisions come from the runtime. Model arguments
 //! never select a workspace or a destination. Large bodies remain in immutable
@@ -38,24 +38,28 @@ pub struct Board {
     lock: File,
     objects: Root,
     baseline: Root,
-    workers: [Root; 2],
-    policies: [Option<Vec<(PathBuf, String)>>; 2],
+    workers: Vec<Root>,
+    policies: Vec<Option<Vec<(PathBuf, String)>>>,
 }
 
 impl Board {
-    pub fn open(run_dir: &Path, baseline: &Path, workers: [PathBuf; 2]) -> Result<Self> {
+    pub fn open(run_dir: &Path, baseline: &Path, workers: impl Into<Vec<PathBuf>>) -> Result<Self> {
+        let workers = workers.into();
+        crate::config::validate_worker_count(workers.len())?;
         let run = fs::canonicalize(run_dir).context("open run directory")?;
         let baseline = Root::open(baseline)?;
-        let workers = [Root::open(&workers[0])?, Root::open(&workers[1])?];
-        ensure!(
-            baseline.path != workers[0].path && baseline.path != workers[1].path,
-            "baseline must be separate from workers"
-        );
-        ensure!(
-            !workers[0].path.starts_with(&workers[1].path)
-                && !workers[1].path.starts_with(&workers[0].path),
-            "worker roots must be separate"
-        );
+        let workers = workers
+            .iter()
+            .map(|path| Root::open(path))
+            .collect::<Result<Vec<_>>>()?;
+        for (index, worker) in workers.iter().enumerate() {
+            for other in &workers[..index] {
+                ensure!(
+                    !worker.path.starts_with(&other.path) && !other.path.starts_with(&worker.path),
+                    "worker roots must be separate"
+                );
+            }
+        }
         let state = run.join("board");
         for worker in &workers {
             ensure!(
@@ -83,7 +87,12 @@ impl Board {
                 guard.metadata()?.is_file(),
                 "board database must be a regular file"
             );
-            let db = Connection::open(&database)?;
+            let mut db = Connection::open(&database)?;
+            let roster_exists: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='workers')",
+                [],
+                |row| row.get(0),
+            )?;
             db.busy_timeout(Duration::from_secs(10))?;
             db.execute_batch(
                 "PRAGMA journal_mode=WAL;
@@ -94,13 +103,31 @@ impl Board {
                  CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, worker INTEGER NOT NULL, revision INTEGER NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL);
                  CREATE TABLE IF NOT EXISTS requests (worker INTEGER NOT NULL, key TEXT NOT NULL, name TEXT NOT NULL, digest TEXT NOT NULL, state TEXT NOT NULL, response TEXT, detail TEXT, PRIMARY KEY(worker,key));
                  CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, author INTEGER NOT NULL, owner INTEGER, state TEXT NOT NULL, body TEXT NOT NULL, updated INTEGER NOT NULL);
-                 CREATE TABLE IF NOT EXISTS workers (worker INTEGER PRIMARY KEY CHECK(worker IN (1,2)), state TEXT NOT NULL, summary TEXT NOT NULL, dependency TEXT, updated INTEGER NOT NULL);
-                 INSERT OR IGNORE INTO workers VALUES (1,'working','',NULL,0),(2,'working','',NULL,0);
+                 CREATE TABLE IF NOT EXISTS workers (worker INTEGER PRIMARY KEY CHECK(worker BETWEEN 1 AND 4), state TEXT NOT NULL, summary TEXT NOT NULL, dependency TEXT, updated INTEGER NOT NULL);
                  CREATE TABLE IF NOT EXISTS publications (id INTEGER PRIMARY KEY, worker INTEGER NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL);
                  CREATE TABLE IF NOT EXISTS publication_files (publication INTEGER NOT NULL REFERENCES publications(id), path TEXT NOT NULL, version TEXT NOT NULL, PRIMARY KEY(publication,path));
                  CREATE TABLE IF NOT EXISTS check_snapshots (id INTEGER PRIMARY KEY, worker INTEGER NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL);
                  CREATE TABLE IF NOT EXISTS check_receipts (id INTEGER PRIMARY KEY, worker INTEGER NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL);"
             )?;
+            if !roster_exists {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                for worker in 1..=workers.len() {
+                    tx.execute(
+                        "INSERT INTO workers VALUES (?,'working','',NULL,0)",
+                        [worker],
+                    )?;
+                }
+                tx.commit()?;
+            }
+            let roster = db
+                .prepare("SELECT worker FROM workers ORDER BY worker")?
+                .query_map([], |row| row.get::<_, usize>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            ensure!(
+                roster == (1..=workers.len()).collect::<Vec<_>>(),
+                "Saved board worker roster does not match this run"
+            );
+            let policies = vec![None; workers.len()];
             let object_dir = state.join("objects");
             create_owned_dir(&object_dir)?;
             Ok(Self {
@@ -109,11 +136,23 @@ impl Board {
                 objects: Root::open(&object_dir)?,
                 baseline,
                 workers,
-                policies: [None, None],
+                policies,
             })
         })();
         FileExt::unlock(&lock)?;
         initialized
+    }
+
+    pub fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    fn require_worker(&self, worker: usize) -> Result<()> {
+        ensure!(
+            (1..=self.worker_count()).contains(&worker),
+            "unbound worker identity"
+        );
+        Ok(())
     }
 
     /// Called only by the native owner when the user's request changes.
@@ -192,7 +231,7 @@ impl Board {
     /// Native lifecycle recovery only, after the owner's turn has stopped.
     /// This never claims that unpublished partial files were transferred.
     pub fn release_worker_claims(&mut self, worker: usize, reason: &str) -> Result<Vec<i64>> {
-        ensure!((1..=2).contains(&worker), "unbound worker identity");
+        self.require_worker(worker)?;
         ensure!(
             !reason.is_empty() && reason.len() <= 2048,
             "invalid release reason"
@@ -242,7 +281,7 @@ impl Board {
 
     /// Bind the native worker's filesystem profile to privileged board I/O.
     pub fn set_worker_policy(&mut self, worker: usize, config: &Value) -> Result<()> {
-        ensure!((1..=2).contains(&worker), "unbound worker identity");
+        self.require_worker(worker)?;
         let profile = config["default_permissions"]
             .as_str()
             .context("missing worker permission profile")?;
@@ -275,7 +314,7 @@ impl Board {
     /// Bind effective project scopes supplied by a native host adapter. An
     /// empty scope grants no board reads or writes; paths are never inferred.
     pub fn set_worker_scopes(&mut self, worker: usize, scopes: Vec<FilesystemScope>) -> Result<()> {
-        ensure!((1..=2).contains(&worker), "unbound worker identity");
+        self.require_worker(worker)?;
         let mut rules = Vec::new();
         for scope in scopes {
             let text = scope.path.to_string_lossy();
@@ -299,6 +338,7 @@ impl Board {
     }
 
     fn require_access(&self, worker: usize, relative: &str, write: bool) -> Result<()> {
+        self.require_worker(worker)?;
         files::validate_relative(relative)?;
         let rules = self.policies[worker - 1]
             .as_ref()
@@ -336,7 +376,7 @@ impl Board {
     }
 
     pub fn call(&mut self, worker: usize, name: &str, args: Value) -> Result<Value> {
-        ensure!((1..=2).contains(&worker), "unbound worker identity");
+        self.require_worker(worker)?;
         ensure!(args.is_object(), "tool arguments must be an object");
         for forbidden in [
             "worker",
@@ -1105,7 +1145,7 @@ fn complete(tx: &Transaction<'_>, worker: usize, args: &Value) -> Result<Value> 
 fn dependency_owner(db: &Connection, dependency: &str) -> Result<Option<usize>> {
     let (kind, id) = dependency
         .split_once(':')
-        .context("waiting dependency must be task:<id> or worker:<1|2>")?;
+        .context("waiting dependency must be task:<id> or worker:<team member ID>")?;
     ensure!(
         !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()),
         "invalid waiting dependency ID"
@@ -1114,7 +1154,12 @@ fn dependency_owner(db: &Connection, dependency: &str) -> Result<Option<usize>> 
     ensure!(id > 0, "waiting dependency ID must be positive");
     match kind {
         "worker" => {
-            ensure!((1..=2).contains(&id), "waiting worker must be 1 or 2");
+            let member: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workers WHERE worker=?)",
+                [id],
+                |row| row.get(0),
+            )?;
+            ensure!(member, "waiting worker must belong to this run");
             Ok(Some(id as usize))
         }
         "task" => db
@@ -1123,7 +1168,7 @@ fn dependency_owner(db: &Connection, dependency: &str) -> Result<Option<usize>> 
             })
             .optional()?
             .context("unknown waiting task"),
-        _ => bail!("waiting dependency must be task:<id> or worker:<1|2>"),
+        _ => bail!("waiting dependency must be task:<id> or worker:<team member ID>"),
     }
 }
 
@@ -1320,7 +1365,7 @@ pub fn tool_definitions() -> Vec<Value> {
     );
     define(
         "delm_list",
-        "Discover a bounded page of tasks, publications, findings, or check receipts, ordered by stable ID. Use the returned cursor to continue. Optional task_state and owner filters find current work; restart without a cursor if task ownership changed. This is read-only; it does not claim work or append context. Use delm_expand for a selected record's full details.",
+        "Discover a bounded page of tasks, publications, findings, or check receipts, ordered by stable ID. Use the returned cursor to continue. Optional task_state and owner filters find current work; owner=peer includes all other team members, excluding unclaimed work; restart without a cursor if task ownership changed. This is read-only; it does not claim work or append context. Use delm_expand for a selected record's full details.",
         json!({"collection":{"enum":["tasks","publications","findings","checks"]},"limit":{"type":"integer","minimum":1,"maximum":24},"cursor":{"type":"string","maxLength":1024},"task_state":{"enum":["available","claimed","done"]},"owner":{"enum":["self","peer"]}}),
         &["collection"],
     );
@@ -1350,14 +1395,14 @@ pub fn tool_definitions() -> Vec<Value> {
     );
     define(
         "delm_task_release",
-        "Release your claim with a concise handoff. Publish partially implemented files first and name their publication_id; the peer may then claim and continue.",
+        "Release your claim with a concise handoff. Publish partially implemented files first and name their publication_id; another peer may then claim and continue.",
         json!({"idempotency_key":text,"task_id":{"type":"integer","minimum":1},"expected_version":{"type":"integer","minimum":1},"summary":text,"publication_id":{"type":"integer","minimum":1}}),
         &["idempotency_key", "task_id", "expected_version", "summary"],
     );
     let task_schema = json!({"type":"object","properties":{"title":title,"description":description,"kind":{"enum":["implementation","verification","integration"]},"interface":interface,"dependencies":publication_ids,"earliest_contribution":task_note,"done_when":task_note},"required":["title","description"],"additionalProperties":false});
     define(
         "delm_task_split",
-        "Keep a smaller remaining portion and atomically expose independent work to your peer. remaining and tasks use the task-create fields; remaining keeps the current task kind.",
+        "Keep a smaller remaining portion and atomically expose independent work to your peers. remaining and tasks use the task-create fields; remaining keeps the current task kind.",
         json!({"idempotency_key":text,"task_id":{"type":"integer","minimum":1},"expected_version":{"type":"integer","minimum":1},"remaining":task_schema,"tasks":{"type":"array","minItems":1,"maxItems":16,"items":task_schema}}),
         &[
             "idempotency_key",
@@ -1399,8 +1444,8 @@ pub fn tool_definitions() -> Vec<Value> {
     );
     define(
         "delm_complete",
-        "Declare the one assembled result outcome with current board request_revision as expected_revision. artifacts lists every requested generated output file or directory, including Git-ignored outputs, relative to your private project; exclude dependency, cache and credential paths. Use [] explicitly for source-only work. Omitting artifacts leaves output accounting unconfirmed. checks are your native command IDs; shared_checks are validated receipt IDs from either peer whose scoped inputs still match. Then end your turn. Complete means the full result is ready. Waiting requires dependency task:<id> or worker:<other worker>; it cannot name your own work.",
-        json!({"idempotency_key":text,"expected_revision":{"type":"integer","minimum":1},"outcome":{"enum":["complete","partial","blocked","waiting"]},"summary":text,"checks":{"type":"array","items":{}},"shared_checks":ids,"artifacts":strings,"dependency":{"type":"string","description":"For waiting, task:<positive task ID> or worker:<1|2>; use the other worker, not yourself."}}),
+        "Declare the one assembled result outcome with current board request_revision as expected_revision. artifacts lists every requested generated output file or directory, including Git-ignored outputs, relative to your private project; exclude dependency, cache and credential paths. Use [] explicitly for source-only work. Omitting artifacts leaves output accounting unconfirmed. checks are your native command IDs; shared_checks are validated receipt IDs from any peer whose scoped inputs still match. Then end your turn. Complete means the full result is ready. Waiting requires dependency task:<id> or worker:<other worker>; it cannot name your own work.",
+        json!({"idempotency_key":text,"expected_revision":{"type":"integer","minimum":1},"outcome":{"enum":["complete","partial","blocked","waiting"]},"summary":text,"checks":{"type":"array","items":{}},"shared_checks":ids,"artifacts":strings,"dependency":{"type":"string","description":"For waiting, task:<positive task ID> or worker:<team member ID>; use another member of this run, not yourself."}}),
         &["idempotency_key", "expected_revision", "outcome", "summary"],
     );
     definitions

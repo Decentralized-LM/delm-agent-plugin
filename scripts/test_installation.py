@@ -51,7 +51,7 @@ def fixture_runtime(path, version="fixture", board=True):
 def fixture_source(path):
     for directory in (".codex-plugin", ".agents/plugins", "skills/run/agents", "hooks", "scripts"):
         (path / directory).mkdir(parents=True, exist_ok=True)
-    for name in (".codex-plugin/plugin.json", ".agents/plugins/marketplace.json",
+    for name in (".codex-plugin/plugin.json", ".mcp.json", ".agents/plugins/marketplace.json",
                  "skills/run/agents/openai.yaml", "hooks/hooks.json", "Cargo.toml", "Cargo.lock",
                  "rust-toolchain.toml", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.txt"):
         shutil.copy2(SOURCE / name, path / name)
@@ -428,7 +428,7 @@ class NativeInstallationTests(unittest.TestCase):
             self.assertTrue(skills[0]["enabled"])
             self.assertEqual(skills[0]["pluginId"], install_support.PLUGIN_ID)
             self.assertEqual(skills[0]["interface"]["displayName"], "DeLM")
-            self.assertEqual(skills[0]["interface"]["shortDescription"], "Build with two collaborating agents.")
+            self.assertEqual(skills[0]["interface"]["shortDescription"], "Choose 2–4 collaborating agents.")
             self.assertEqual(Path(skills[0]["path"]), Path(self.installation.receipt()["installed_path"]) / "skills/run/SKILL.md")
             send({"id": 3, "method": "hooks/list", "params": {"cwds": [str(self.cwd)]}})
             entries = response(3)["data"]
@@ -445,7 +445,12 @@ class NativeInstallationTests(unittest.TestCase):
                 self.assertTrue(hook["enabled"])
                 self.assertTrue(hook["currentHash"])
                 self.assertEqual(Path(hook["sourcePath"]), Path(self.installation.receipt()["installed_path"]) / "hooks/hooks.json")
-                self.assertIn("lifecycle-hook", hook["command"])
+                if hook["handlerType"] == "command":
+                    self.assertIn("lifecycle-hook", hook["command"])
+                else:
+                    self.assertEqual(hook["handlerType"], "mcpTool")
+                    self.assertEqual(hook["server"], "delm_selector")
+                    self.assertEqual(hook["tool"], "select_agents")
             self.assertNotIn("trusted_hash", (self.codex_home / "config.toml").read_text())
             # Model an explicit /hooks approval in this disposable home using
             # the same native config write as Codex's hook-review UI.
@@ -551,7 +556,7 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(catalog["name"], "delm")
             self.assertEqual(catalog["plugins"][0]["source"]["ref"], f"delm-plugin-v{version}")
             self.assertEqual(set(path.name for path in (output / "plugins/delm").iterdir()),
-                             {"bin", "skills", "hooks", ".codex-plugin", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.txt"})
+                             {"bin", "skills", "hooks", ".codex-plugin", ".mcp.json", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.txt"})
             self.assertEqual((output / "plugins/delm/bin/delm").stat().st_mode & 0o777, 0o755)
             self.assertFalse((output / "plugins/delm/skills/run/local-notes.txt").exists())
             metadata = json.loads((output / "release.json").read_text())

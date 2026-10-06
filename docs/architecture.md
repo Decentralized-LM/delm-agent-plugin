@@ -1,6 +1,6 @@
 # Architecture
 
-DeLM adds parallel execution to an explicitly requested Codex or Claude Code task. Two peers contribute to one result through a shared task queue, publications, and recorded checks.
+DeLM adds parallel execution to an explicitly requested Codex or Claude Code task. Peers contribute to one result through a shared task queue, publications, and recorded checks.
 
 ```mermaid
 flowchart LR
@@ -13,7 +13,7 @@ flowchart LR
   W2 <--> Board
   Board --> Result[One assembled result]
   Result --> Delivery[Guarded delivery to current project]
-  Delivery --> Cleanup[Remove both temporary workspaces]
+  Delivery --> Cleanup[Remove temporary workspaces]
 ```
 
 ## Source layout
@@ -23,7 +23,7 @@ flowchart LR
 | `plugin/worker.md` | Shared collaboration instructions for both hosts. |
 | `src/board/`, `src/evidence.rs`, `src/completion.rs`, `src/services.rs` | Task ownership, contributions, observed checks, completion, and preview coordination. |
 | `src/workspace/`, `src/run/state.rs`, `src/supervisor.rs` | Project capture, delivery, recovery, durable ownership, and process checks. |
-| `hooks/`, `skills/`, `src/run/`, `src/workers.rs`, `src/worker_tools.rs` | Codex hooks, skill, native app-server execution, and coordination transport. |
+| `hooks/`, `.mcp.json`, `skills/`, `src/selector.rs`, `src/run/`, `src/workers.rs`, `src/worker_tools.rs` | Codex hooks, skill, native app-server execution, and coordination transport. |
 | `hosts/claude/`, `src/claude/` | Claude skills, plugin module, native MCP sidecar, and lifecycle controller. |
 | `packages/installer/`, `scripts/` | Host selection, native installation, package assembly, and qualification. |
 | `src/diagnostics.rs` | Local run inventory, privacy-safe timing reports, and guarded diagnostic cleanup. |
@@ -34,7 +34,9 @@ Host adapters translate native identities, permissions, events, and command outc
 
 ### Codex
 
-The trusted UserPromptSubmit hook recognizes an explicit invocation, captures its exact text and native identity, and starts the runtime. Duplicate delivery reconnects to the same capture. The parent follows an event stream rather than regenerating the request or issuing a separate startup-admission command. Native-bound launches establish their control ownership during startup; the separate unbound CLI retains its explicit control admission.
+The trusted command UserPromptSubmit hook captures an explicit invocation and its native ownership without starting a runtime. A sibling MCP-tool hook opens a required native form with 2 (default), 3, and 4 agents. Only the exact form response can confirm the count. The capture, owner, session, turn, project, and installed executable must still match before one-use admission. The hooks may run concurrently; the selector allows at most two seconds for the local capture to arrive. The command hook allows ten seconds for the selector to connect, then up to five minutes for the user to answer; it detects a closed selector promptly. Waiting for the human response starts no model. The command hook remains the sole launcher, preserving the complete native process environment, including a custom `CODEX_HOME` and SDK settings; the MCP server records the choice and never starts the runtime. Cancellation, invalid responses, unsupported forms, and late confirmation fail without worker admission. Duplicate delivery cannot consume the same launch twice. The parent follows an event stream rather than regenerating the request or issuing a separate startup-admission command. Native-bound launches establish their control ownership during startup; the separate unbound CLI retains its explicit control admission.
+
+The confirmed count is immutable and defaults to two when reading older run records. Board membership, tool gateways, approvals, workspace ownership, recovery, and cleanup validate the actual run roster. `peer` discovery includes all other workers.
 
 The runtime forks the parent thread through Codex's native app-server interface. It supplies a private working directory and DeLM coordination instructions while retaining ordinary saved configuration, native permission settings, authentication, and process environment. Project-relative configuration is rebound to the copied project. DeLM's worker marker prevents recursive DeLM hooks without disabling other hooks or plugins.
 
@@ -62,7 +64,7 @@ Private working directories separate edits; they do not replace the user's nativ
 
 When a worker declares a dependency wait, the runtime records the board position internally and checks readiness again after the native turn ends. Task creation, released work, and relevant peer contributions can resume the existing worker. Event ordering cannot discard a useful change between the declaration and the end of the turn, and duplicate events cannot start duplicate resumptions. These internal cursors do not alter the shared board returned to agents. Worker instructions require useful independent work before yielding, prohibit shell sleeps for peer dependencies, and cap necessary timed polling intervals at 30 seconds. Runtime dependency wake-ups are event-driven.
 
-Both workers claim useful implementation work and expose follow-on tasks. Claims are versioned; updates, releases, and splits cannot let stale owners finish reassigned work. Either worker can temporarily own integration, with at most one active integration owner. The team owes one complete result, without a permanent manager or a requirement that both independently finish the whole task.
+Workers claim useful implementation work and expose follow-on tasks. Claims are versioned; updates, releases, and splits cannot let stale owners finish reassigned work. Any worker can temporarily own integration, with at most one active integration owner. The team owes one complete result, without a permanent manager or a requirement that every worker independently finish the whole task.
 
 Compact board responses include collection totals and truncation indicators. `delm_list` provides bounded worker discovery with cursors and optional task filters; it does not expand every record into every turn. A request revision change invalidates old cursors, and changed task ownership invalidates filtered task cursors. Stable task display numbers are separate from event-backed mutation IDs. Task dependencies refer to immutable publications.
 
@@ -80,7 +82,7 @@ A service claim coordinates preview ownership before a worker starts a server th
 
 The selected folder is the project boundary. If it has no Git administration, preparation initializes an independent repository there through an atomic no-replace publication; it never discovers an ancestor or replaces an existing `.git` entry. Partial capture failures clean only identity-checked directories recorded in the preparation journal.
 
-Updates and answers reach both existing worker sessions. Native interruption, explicit stop, owner exit, and the task deadline cancel work. Cleanup requires confirmed shutdown of owned execution. Unresolved shutdown preserves work and reports the cleanup limitation.
+Updates and answers reach every existing worker session. Native interruption, explicit stop, owner exit, and the task deadline cancel work. Cleanup requires confirmed shutdown of owned execution. Unresolved shutdown preserves work and reports the cleanup limitation.
 
 Codex owns separate app-server processes. Its supervisor stops the owned native turns, terminals, private hosts, and observed descendants before workspace removal. Claude shares the user's native host and does not terminate it. Its module stops recorded agents and background tasks through native APIs; terminal states and exact stop acknowledgments precede a scoped process-reference fence. That fence checks processes created since runtime startup and explicitly tracked processes, including registered services, without deriving kill authority from a working directory. It is a DeLM-scoped check, not a guarantee against arbitrary pre-existing external writers.
 
@@ -92,7 +94,7 @@ Completion captures one accepted file contract: source changes plus project-rela
 
 After confirming the selected result, delivery compares that delta against the captured starting working tree. It preserves the original Git index and unrelated files, merges compatible concurrent text edits, and reports conflicting edits without overwriting them. Binary files, contained symlinks, executable modes, and deletions are represented explicitly. Incompatible file/directory type transitions require recovery.
 
-A durable per-path journal precedes writes. Guarded replacements retain displaced original inodes in durable recovery, including after successful delivery, so writes through already-open descriptors are not discarded. Changed displaced entries detected before completion produce a recovery outcome. This does not provide global transaction isolation from external editors. Interrupted application never rolls back later user edits automatically. Conflict and cancellation recovery saves changed file blobs, before/after manifests, and any delivery journal before removing both worker trees and the baseline.
+A durable per-path journal precedes writes. Guarded replacements retain displaced original inodes in durable recovery, including after successful delivery, so writes through already-open descriptors are not discarded. Changed displaced entries detected before completion produce a recovery outcome. This does not provide global transaction isolation from external editors. Interrupted application never rolls back later user edits automatically. Conflict and cancellation recovery saves changed file blobs, before/after manifests, and any delivery journal before removing all selected worker trees and the baseline.
 
 Source delivery excludes newly created dependency environments. Changed dependency manifests, omitted worker-local dependency environments, or files merged with concurrent user edits set `verification_required`. The report lists omitted environments in `environment_directories_omitted`; their presence in a worker does not prove readiness in the original project. The parent must perform the necessary native setup or focused check in the original project before presenting it as ready. Matching transferred bytes alone does not certify relocation.
 

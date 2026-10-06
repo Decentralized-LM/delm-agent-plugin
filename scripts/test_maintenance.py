@@ -116,6 +116,31 @@ class MaintenanceTests(unittest.TestCase):
         guard.assert_called_once_with("claude", package=published)
         self.assertEqual((published / "existing").read_text(), "preserve installed adapter")
 
+    def test_recovery_worker_id_must_belong_to_declared_roster(self):
+        self.state("codex", status="recovery_required")
+        (self.run / "shutdown-report.json").write_text(json.dumps({
+            "ownership_resolved": True, "survivors": [], "errors": []}))
+        recovery = self.run / "workspace/recovery"
+        recovery.mkdir(parents=True)
+        bundle = {"version": 1, "original": str(self.home / "project"),
+                  "worker_count": 4, "workers": [{"worker": i, "changes": {}} for i in range(4)]}
+        manifest = recovery / "complete.json"
+        manifest.write_text(json.dumps(bundle))
+        self.check("codex")
+        for invalid in (None, True, 1, 2, 3, 5, "4"):
+            with self.subTest(worker_count=invalid):
+                manifest.write_text(json.dumps({**bundle, "worker_count": invalid}))
+                with self.assertRaises(RuntimeError):
+                    self.check("codex")
+        legacy = {key: value for key, value in bundle.items() if key != "worker_count"}
+        legacy["workers"] = legacy["workers"][:2]
+        manifest.write_text(json.dumps(legacy))
+        self.check("codex")
+        legacy["workers"][1]["worker"] = 3
+        manifest.write_text(json.dumps(legacy))
+        with self.assertRaises(RuntimeError):
+            self.check("codex")
+
     def test_unrelated_known_adapter_does_not_block_offline_build(self):
         package = self.home / "active-plugin"
         self.state(status="running", finished=False, package_root=str(package))

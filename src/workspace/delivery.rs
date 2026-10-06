@@ -72,6 +72,7 @@ thread_local! {
 }
 
 fn owned(prepared: &PreparedWorkspace) -> Result<Ownership> {
+    prepared.validate_layout()?;
     let workspace = prepared.run_dir.join("workspace");
     let ownership: Ownership =
         serde_json::from_slice(&fs::read(workspace.join("ownership.json"))?)?;
@@ -81,6 +82,7 @@ fn owned(prepared: &PreparedWorkspace) -> Result<Ownership> {
             && ownership.original == prepared.original,
         "workspace ownership does not match delivery"
     );
+    prepare::validate_ownership_roster(prepared, &ownership)?;
     for (name, expected) in &ownership.children {
         let path = workspace.join(name);
         if path.try_exists()? {
@@ -339,7 +341,8 @@ pub fn deliver_result(
     worker: usize,
     _policy: &ResultPolicy,
 ) -> Result<DeliveryReport> {
-    ensure!(worker < 2, "unknown result worker");
+    prepared.validate_layout()?;
+    ensure!(worker < prepared.workers.len(), "unknown result worker");
     if prepared
         .run_dir
         .join("workspace/delivery/result.json")
@@ -359,7 +362,8 @@ pub fn deliver_accepted_result(
     worker: usize,
     accepted: &AcceptedResult,
 ) -> Result<DeliveryReport> {
-    ensure!(worker < 2, "unknown result worker");
+    prepared.validate_layout()?;
+    ensure!(worker < prepared.workers.len(), "unknown result worker");
     deliver_internal(prepared, worker, Some(accepted))
 }
 
@@ -868,7 +872,11 @@ fn preserve_partial(prepared: &PreparedWorkspace, artifacts: &[String]) -> Resul
     }
     let destination = prepared.run_dir.join("workspace/recovery");
     if destination.join("complete.json").is_file() {
-        inspect_recovery(&destination)?;
+        let saved = inspect_recovery(&destination)?;
+        ensure!(
+            saved.original == prepared.original && saved.worker_count == prepared.workers.len(),
+            "saved recovery does not match the project and worker roster"
+        );
         return Ok(destination);
     }
     if !destination.exists() {
@@ -981,7 +989,8 @@ fn preserve_partial(prepared: &PreparedWorkspace, artifacts: &[String]) -> Resul
     write_json(
         &destination.join("complete.json"),
         &serde_json::json!({
-            "version":1, "original":prepared.original, "workers":deltas, "excluded_paths":excluded,
+            "version":1, "original":prepared.original, "worker_count":prepared.workers.len(),
+            "workers":deltas, "excluded_paths":excluded,
             "format":"File bytes are SHA-256 named blobs. Manifests record modes, deletions, and inert symlink targets. No Git index changes are applied.",
             "delivery_journal": prepared.run_dir.join("workspace/delivery/journal.json")
         }),

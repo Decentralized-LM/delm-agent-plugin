@@ -3,6 +3,9 @@
 
 All command targets are fixture processes created here. No user thread IDs,
 credentials, configuration, plugin installation, or UI sessions are touched.
+This qualifies the general ownership/interrupt protocol using a fixture-only
+run command. It does not qualify DeLM invocation or agent selection: use
+verify_codex_selector.py for the required native form.
 """
 import argparse
 import gzip
@@ -163,8 +166,9 @@ def main():
         directory.mkdir(parents=True)
     shutil.copy2(args.fixture, package / "bin/delm")
     shutil.copy2("hooks/hooks.json", package / "hooks/hooks.json")
+    shutil.copy2(".mcp.json", package / ".mcp.json")
     (package / ".codex-plugin/plugin.json").write_text(json.dumps({
-        "name": "native-lifecycle-fixture", "version": "0.1.0", "description": "No-model lifecycle qualification", "hooks": "./hooks/hooks.json"}))
+        "name": "native-lifecycle-fixture", "version": "0.1.0", "description": "No-model lifecycle qualification", "hooks": "./hooks/hooks.json", "mcpServers": "./.mcp.json"}))
     (root / "marketplace/.agents/plugins/marketplace.json").write_text(json.dumps({
         "name": "native-lifecycle-fixture", "plugins": [{"name": "native-lifecycle-fixture", "source": {"source": "local", "path": "./plugin"}}]}))
     env = {"PATH": os.environ["PATH"], "HOME": str(home), "CODEX_HOME": str(home), "SHELL": "/bin/zsh"}
@@ -193,7 +197,8 @@ unified_exec = true
 code_mode = false
 '''
     (home / "config.toml").write_text(config)
-    evidence = {"real_model_calls": 0, "case": args.case,
+    evidence = {"real_model_calls": 0, "case": args.case, "scope": "ownership_protocol_only",
+                "native_selector_qualified": False,
                 "host_version": subprocess.check_output([args.codex, "--version"], text=True).strip(),
                 "fixture_sha256": hashlib.sha256(args.fixture.read_bytes()).hexdigest(),
                 "lifecycle_source_sha256": hashlib.sha256(Path("src/lifecycle.rs").read_bytes()).hexdigest(),
@@ -208,7 +213,7 @@ code_mode = false
         listing = discovery.request("hooks/list", {"cwds": [str(root)]})
         evidence["untrusted_hooks"] = listing
         hooks = [hook for item in listing["data"] for hook in item["hooks"]]
-        assert len(hooks) == 4 and all(h["trustStatus"] == "untrusted" for h in hooks)
+        assert len(hooks) == 5 and all(h["trustStatus"] == "untrusted" for h in hooks)
         installed = Path(hooks[0]["sourcePath"]).parent.parent / "bin/delm"
         # Test-only simulation of explicit /hooks review. Never changes a real home.
         for hook in hooks:

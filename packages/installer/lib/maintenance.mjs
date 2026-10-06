@@ -14,12 +14,13 @@ async function verifiedRecovery(path) {
   const root = join(path, 'workspace', 'recovery');
   if (!(await metadata(root))?.isDirectory()) return false;
   const bundle = await record(join(root, 'complete.json'), 64 * 1024 * 1024);
-  if (bundle?.version !== 1 || typeof bundle.original !== 'string' || !bundle.original.startsWith('/') || !Array.isArray(bundle.workers) || bundle.workers.length > 2) return false;
+  const workerCount = bundle?.worker_count === undefined ? 2 : bundle.worker_count;
+  if (bundle?.version !== 1 || !Number.isSafeInteger(workerCount) || workerCount < 2 || workerCount > 4 || typeof bundle.original !== 'string' || !bundle.original.startsWith('/') || !Array.isArray(bundle.workers) || bundle.workers.length > workerCount) return false;
   const verified = new Set();
   const workers = new Set();
   let entries = 0;
   for (const worker of bundle.workers) {
-    if (!worker || ![0, 1].includes(worker.worker) || workers.has(worker.worker) || !worker.changes || typeof worker.changes !== 'object' || Array.isArray(worker.changes)) return false;
+    if (!worker || !Number.isSafeInteger(worker.worker) || worker.worker < 0 || worker.worker >= workerCount || workers.has(worker.worker) || !worker.changes || typeof worker.changes !== 'object' || Array.isArray(worker.changes)) return false;
     workers.add(worker.worker);
     for (const [relative, pair] of Object.entries(worker.changes)) {
       const parts = relative.split('/');

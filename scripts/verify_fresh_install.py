@@ -130,8 +130,62 @@ class EvidenceRPC(RPC):
         super().__init__(*args)
 
     def send(self, value):
+        if value.get("method") == "initialize":
+            # Current app-server clients receive standard MCP form requests.
+            # Declare its documented form extension as well; never use the
+            # model's request-user-input tool to choose a team size.
+            value = json.loads(json.dumps(value))
+            value["params"]["capabilities"].update({
+                "experimentalApi": True, "extensions": {"openai/form": {}}})
         self.outgoing.append(redacted(value))
         super().send(value)
+
+
+def qualification_hooks(listing, trust):
+    hooks = [hook for entry in listing["data"] for hook in entry["hooks"]]
+    expected = {("preToolUse", "command"), ("userPromptSubmit", "command"),
+                ("userPromptSubmit", "mcpTool"), ("interrupt", "command"), ("stop", "command")}
+    if (len(hooks) != 5 or {(hook.get("eventName"), hook.get("handlerType")) for hook in hooks} != expected
+            or any(hook.get("trustStatus") != trust or not hook.get("enabled") for hook in hooks)):
+        raise RuntimeError("The complete native DeLM hook and selector contract was not registered")
+    selector = next(hook for hook in hooks if hook["handlerType"] == "mcpTool")
+    if selector.get("server") != "delm_selector" or selector.get("tool") != "select_agents":
+        raise RuntimeError("The native DeLM selector hook does not identify the installed selector")
+    for hook in hooks:
+        timeout = 330 if hook["eventName"] == "userPromptSubmit" else 3 if hook["eventName"] == "interrupt" else 5
+        if hook.get("timeoutSec") != timeout:
+            raise RuntimeError("The native DeLM hook timeout does not match the selection contract")
+    return hooks
+
+
+def selector_response(message, agents, thread, turn):
+    """Replay only this qualification's explicitly chosen native form answer.
+
+    Other permissions, forms, threads, and changed schemas are never approved.
+    This function is a test client, not part of the installed plugin.
+    """
+    if type(agents) is not int or agents not in (2, 3, 4):
+        raise ValueError("Choose 2, 3, or 4 qualification agents")
+    if message.get("method") != "mcpServer/elicitation/request":
+        raise ValueError("Expected the native MCP selector request")
+    request_id, params = message.get("id"), message.get("params", {})
+    if (type(request_id) not in (str, int) or not isinstance(params, dict)
+            or params.get("serverName") != "delm_selector" or params.get("threadId") != thread
+            or params.get("turnId") not in (None, turn) or params.get("mode") != "form"
+            or params.get("message") != "How many agents?"):
+        raise ValueError("Refusing a form outside this DeLM invocation")
+    schema = params.get("requestedSchema")
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    field = properties.get("agents") if isinstance(properties, dict) else None
+    if (not isinstance(schema, dict) or schema.get("type") != "object"
+            or not set(schema).issubset({"type", "properties", "required", "$schema"})
+            or schema.get("required") != ["agents"] or not isinstance(properties, dict) or set(properties) != {"agents"}
+            or not isinstance(field, dict) or field.get("type") != "string"
+            or not set(field).issubset({"type", "title", "description", "enum", "enumNames", "default"})
+            or field.get("enum") != ["2", "3", "4"] or field.get("default") != "2"
+            or field.get("enumNames") != ["2 agents (default)", "3 agents", "4 agents"]):
+        raise ValueError("The native DeLM selector schema changed")
+    return {"id": request_id, "result": {"action": "accept", "content": {"agents": str(agents)}}}
 
 
 def inspect_run(run, evidence_root):
@@ -140,6 +194,7 @@ def inspect_run(run, evidence_root):
     result = {"run_id": run.name, "status": saved["status"],
               "task": saved["request"]["task"], "model": saved["request"]["model"],
               "reasoning_effort": saved["request"]["reasoning_effort"],
+              "worker_count": saved["request"].get("worker_count", 2),
               "worker_threads": [worker.get("thread") for worker in workers],
               "worker_paths": saved["workspace"]["workers"],
               "capability_report": saved["request"].get("auth_settings", {}).get("capability_report")}
@@ -191,6 +246,8 @@ def main():
     parser.add_argument("--codex", default=shutil.which("codex"))
     parser.add_argument("--model", required=True)
     parser.add_argument("--effort", required=True, choices=["none", "minimal", "low", "medium", "high", "xhigh"])
+    parser.add_argument("--agents", type=int, choices=[2, 3, 4], default=2,
+                        help="Explicit qualification choice replayed through the native selector (default: 2)")
     parser.add_argument("--service-tier", default="default")
     parser.add_argument("--task-file", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=int, default=1100)
@@ -250,7 +307,7 @@ def main():
     config = (f"model = {json.dumps(args.model)}\nmodel_reasoning_effort = {json.dumps(args.effort)}\n"
               f"service_tier = {json.dumps(args.service_tier)}\n"
               'model_provider = "openai"\ncli_auth_credentials_store = "file"\n'
-              'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
+              'approval_policy = "on-request"\nsandbox_mode = "danger-full-access"\n'
               'web_search = "live"\nallow_login_shell = false\n'
               '[features]\nplugins = true\nhooks = true\nmemories = false\n'
               'shell_snapshot = false\nmulti_agent = false\nmulti_agent_v2 = false\n'
@@ -266,7 +323,7 @@ def main():
                 "helper_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 "host_version": subprocess.check_output([args.codex, "--version"], text=True).strip(),
                 "runtime_sha256": hashlib.sha256(args.runtime.read_bytes()).hexdigest(),
-                "model": args.model, "reasoning_effort": args.effort, "status": "preparing",
+                "model": args.model, "reasoning_effort": args.effort, "agents": args.agents, "status": "preparing",
                 "new_account_login_qualified": False, "source_identity": source_identity}
     clients = []
     owner = None
@@ -288,8 +345,7 @@ def main():
         clients.append(discovery)
         listing = discovery.request("hooks/list", {"cwds": [str(project)]})
         evidence["untrusted_hooks"] = listing
-        hooks = [hook for entry in listing["data"] for hook in entry["hooks"]]
-        assert len(hooks) == 4 and all(hook["trustStatus"] == "untrusted" for hook in hooks)
+        hooks = qualification_hooks(listing, "untrusted")
         config = (home / "config.toml").read_text()
         for hook in hooks:
             config += f"\n[hooks.state.{json.dumps(hook['key'])}]\ntrusted_hash = {json.dumps(hook['currentHash'])}\n"
@@ -298,8 +354,7 @@ def main():
         owner = EvidenceRPC(args.codex, home, root, "parent")
         clients.append(owner)
         evidence["trusted_hooks"] = owner.request("hooks/list", {"cwds": [str(project)]})
-        trusted = [hook for entry in evidence["trusted_hooks"]["data"] for hook in entry["hooks"]]
-        assert len(trusted) == 4 and all(hook["trustStatus"] == "trusted" for hook in trusted)
+        qualification_hooks(evidence["trusted_hooks"], "trusted")
         account = owner.request("account/read", {"refreshToken": False})
         assert account.get("account", {}).get("type") == "chatgpt", "Native account was not available"
         evidence["native_login_reused"] = True
@@ -309,7 +364,7 @@ def main():
                     if skill.get("pluginId") == "delm@delm-local" and skill["enabled"]]
         assert len(selected) == 1
         created = owner.request("thread/start", {"cwd": str(project), "model": args.model,
-                "modelProvider": "openai", "approvalPolicy": "never", "sandbox": "danger-full-access",
+                "modelProvider": "openai", "approvalPolicy": "on-request", "sandbox": "danger-full-access",
                 "ephemeral": False,
                 "developerInstructions": f"This is an authorized isolated qualification. The user task applies only to {project}. Use the installed DeLM skill and native invocation capture. Deliver the assembled source into this original project and perform only necessary focused follow-up checks there. Do not stage or commit changes. Do not modify any existing repository, user configuration, installed plugin, or browser profile outside {root}; do not read credentials. Native Codex alone may use its configured login store."})
         thread = created["thread"]["id"]
@@ -323,7 +378,22 @@ def main():
         evidence["status"] = "running"
         save(root / "result.json", evidence)
         last_summary = None
+        observed_messages, selector_id = 0, None
         while time.monotonic() - started < args.timeout_seconds:
+            messages = owner.messages[observed_messages:]
+            observed_messages += len(messages)
+            for message in messages:
+                if message.get("method") == "mcpServer/elicitation/request":
+                    if selector_id is not None and message.get("id") == selector_id:
+                        continue
+                    if selector_id is not None:
+                        raise RuntimeError("Qualification received more than one selector request")
+                    response = selector_response(message, args.agents, thread, turn)
+                    assert not list(runs_root.glob("*/run.json")), "A run started before agent-count confirmation"
+                    selector_id = message["id"]
+                    owner.send(response)
+                    evidence["agent_selection"] = {"request": message, "response": response,
+                        "elapsed_seconds": round(time.monotonic() - started, 3)}
             runs = list(runs_root.glob("*/run.json"))
             if runs:
                 assert len(runs) == 1, "Qualification launched more than one DeLM run"
@@ -352,8 +422,9 @@ def main():
         assert evidence["git_state_preserved"], "Original Git administration or staging changed"
         assert (project.stat().st_dev, project.stat().st_ino) == source_identity, "Original project identity changed"
         assert len(evidence["runs"]) == 1, "Expected exactly one native DeLM invocation"
+        assert selector_id is not None, "The mandatory native selector was not observed"
         run = evidence["runs"][0]
-        assert len(set(run["worker_threads"])) == 2 and all(run["worker_threads"]), "Expected two native workers"
+        assert run["worker_count"] == args.agents and len(set(run["worker_threads"])) == args.agents and all(run["worker_threads"]), "Native worker roster did not match the selected count"
         assert run["model"] == args.model and run["reasoning_effort"] == args.effort, "Worker model selection changed"
         registration = Path("/tmp").resolve() / f"delm-{os.getuid()}/lifecycle/session-{thread}.json"
         evidence["lifecycle_binding"] = json.loads(registration.read_text())

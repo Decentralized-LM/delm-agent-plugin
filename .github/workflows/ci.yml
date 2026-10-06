@@ -67,6 +67,11 @@ jobs:
         run: npm --prefix packages/installer run test:native:claude
       - name: Verify native configuration inheritance without model calls
         run: DELM_TEST_HOST="$(command -v codex)" cargo test --locked --test native_inheritance -- --ignored
+      - name: Verify required native agent selection without model calls
+        run: |
+          python3 scripts/verify_codex_selector.py --case cancel --out "$RUNNER_TEMP/delm-selector-cancel"
+          python3 scripts/verify_codex_selector.py --case positive --agents 3 --out "$RUNNER_TEMP/delm-selector-three"
+          python3 scripts/verify_codex_selector.py --case positive --agents 4 --out "$RUNNER_TEMP/delm-selector-four"
       - name: Verify native cancellation and lifecycle ownership without model calls
         run: |
           cargo build --locked --example native-lifecycle-fixture

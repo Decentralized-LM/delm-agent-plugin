@@ -12,9 +12,13 @@ Preparation uses native macOS copy-on-write cloning on the same local filesystem
 
 ## Codex setup and capability inheritance
 
-Use stock Codex CLI on `PATH` with an existing native login. A desktop or IDE installation without the CLI is insufficient.
+Use stock Codex CLI 0.160.0 or later on `PATH` with an existing native login. A desktop or IDE installation without the CLI is insufficient.
 
 Installation uses Codex's native plugin manager. Restart after installation, review and trust DeLM in `/hooks`, then restart to load those definitions. Invoke `$delm:run`; a bare `/delm` command is not registered.
+
+Each invocation opens **How many agents?** in your existing Codex terminal. **2 agents (default)** is selected; press Enter to confirm, or use the arrows to choose 3 or 4 before pressing Enter. Esc cancels. The native form adds no model call, and no workers start before confirmation. Use an approval mode that permits native questions, such as `codex --ask-for-approval on-request`; `never` automatically declines the form. A frontend without MCP form support cannot launch this required selection. DeLM does not change your saved approval policy.
+
+If the menu does not appear, check that both the command and MCP-tool UserPromptSubmit hooks are trusted in `/hooks`, then restart Codex. A cancelled or unavailable selector leaves the original project unchanged. Agent count is fixed for that run; each new invocation again defaults to 2.
 
 Workers fork the parent conversation and preserve ordinary saved skills, plugins, hooks, MCP configuration, native permissions, and process environment. DeLM adds its coordination tools and prevents its own hooks from recursively launching another team. It does not substitute a stripped-down Codex setup or require a special private browser installation.
 

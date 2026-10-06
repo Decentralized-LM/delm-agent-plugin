@@ -4,7 +4,7 @@
 //! guessed active thread. Supported native-bound runs use events and exact owner
 //! identity without a chat heartbeat. Hooks must stay enabled and trusted.
 use crate::supervisor::ProcessIdentity;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -99,7 +99,7 @@ pub struct Delivery {
 pub struct HookAction {
     pub output: Option<Value>,
     pub delivery: Option<Delivery>,
-    pub launch: Option<CapturedInvocation>,
+    pub selection: Option<CapturedInvocation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +112,10 @@ pub struct CapturedInvocation {
     pub path: PathBuf,
     #[serde(default)]
     pub captured_at_ms: u64,
+    #[serde(default)]
+    pub worker_count: Option<usize>,
+    #[serde(default)]
+    selection_owner: Option<ProcessIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -501,7 +505,7 @@ pub fn prepare_hook(input: HookInput, executable: &Path) -> Result<HookAction> {
                 "Repeated native invocation changed its input"
             );
             return Ok(HookAction {
-                output: Some(capture_context(&capture, executable)),
+                selection: Some(capture),
                 ..Default::default()
             });
         }
@@ -527,12 +531,14 @@ pub fn prepare_hook(input: HookInput, executable: &Path) -> Result<HookAction> {
             task: task.into(),
             path: capture_path,
             captured_at_ms,
+            worker_count: None,
+            selection_owner: None,
         };
         write_private(&capture.path, &capture)?;
         record_capture_launch(&capture, &CaptureLaunch::Pending)?;
         return Ok(HookAction {
-            output: Some(capture_context(&capture, executable)),
-            launch: Some(capture),
+            output: None,
+            selection: Some(capture),
             ..Default::default()
         });
     }
@@ -735,7 +741,7 @@ pub fn prepare_hook(input: HookInput, executable: &Path) -> Result<HookAction> {
             run_id,
             signal: registration.pending.unwrap(),
         }),
-        launch: None,
+        selection: None,
     })
 }
 
@@ -748,10 +754,257 @@ fn explicit_task(prompt: &str) -> Option<&str> {
     (!task.is_empty()).then_some(task)
 }
 
-fn capture_context(capture: &CapturedInvocation, executable: &Path) -> Value {
+pub fn selection_context(capture: &CapturedInvocation, executable: &Path) -> Value {
     let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"));
     serde_json::json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":format!(
-        "DeLM captured this explicit invocation and is starting its runtime. Do not reconstruct the task, start another run, or implement it in the parent. Monitor with: {} follow --capture {}. Read progress and relay actual worker questions/approval requests. The runtime forwards the native user input and inherited context. Follow the DeLM skill for updates and the final project handoff.",quote(executable),quote(&capture.path))}})
+        "DeLM received the user-confirmed agent count and is starting its runtime. Do not reconstruct the task, start another run, or implement it in the parent. Monitor with: {} follow --capture {}. Read progress and relay actual worker questions/approval requests. The runtime forwards the native user input and inherited context. Follow the DeLM skill for updates and the final project handoff.",quote(executable),quote(&capture.path))}})
+}
+
+/// Only the trusted command hook can create a capture. The MCP hook may race
+/// that command by a few milliseconds, so None means it has not arrived yet.
+/// Both hooks must belong to the same live native host process.
+pub fn selection_capture(
+    input: &HookInput,
+    executable: &Path,
+) -> Result<Option<CapturedInvocation>> {
+    ensure_not_worker()?;
+    ensure!(
+        input.hook_event_name == "UserPromptSubmit"
+            && input.agent_id.as_deref().is_none_or(str::is_empty),
+        "Selection is only available for a parent submission"
+    );
+    let task = input
+        .prompt
+        .as_deref()
+        .and_then(explicit_task)
+        .context("An explicit DeLM task is required")?;
+    validate_id(&input.session_id)?;
+    let turn = input
+        .turn_id
+        .as_deref()
+        .context("Native selection turn is missing")?;
+    validate_id(turn)?;
+    let Some(root) = root(false)? else {
+        return Ok(None);
+    };
+    let path = root.join(format!("input-{}-{turn}.json", input.session_id));
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    let _capture_lock = capture_lock(&root, &input.session_id, turn)?;
+    let _session_lock = lock(&root, &input.session_id)?;
+    let mut capture = read_capture(&path)?;
+    let registration: Registration = read_private(&session_path(&root, &input.session_id))?;
+    validate_selection_binding(&capture, &registration, executable)?;
+    ensure!(
+        capture.task == task
+            && Some(&capture.project)
+                == input
+                    .cwd
+                    .as_ref()
+                    .and_then(|p| p.canonicalize().ok())
+                    .as_ref(),
+        "Selection input differs from the trusted native capture"
+    );
+    ensure!(
+        capture.worker_count.is_none(),
+        "This invocation already has a confirmed agent count"
+    );
+    let selector = ProcessIdentity::capture(std::process::id())?;
+    ensure!(
+        capture
+            .selection_owner
+            .is_none_or(|owner| owner == selector),
+        "This invocation already belongs to another selector; cancel it and submit a new DeLM request"
+    );
+    capture.selection_owner = Some(selector);
+    write_private(&path, &capture)?;
+    Ok(Some(capture))
+}
+
+fn validate_selection_binding(
+    capture: &CapturedInvocation,
+    registration: &Registration,
+    executable: &Path,
+) -> Result<()> {
+    ensure!(
+        registration.binding.invocation_id == capture.invocation_id
+            && registration.binding.session_id == capture.session_id
+            && registration.binding.turn_id == capture.turn_id,
+        "This selection belongs to an earlier invocation"
+    );
+    ensure!(
+        !registration.consumed && !registration.finished && registration.pending.is_none(),
+        "This native invocation is no longer awaiting selection"
+    );
+    ensure!(
+        registration.binding.owner == ProcessIdentity::capture(unsafe { libc::getppid() } as u32)?,
+        "The selector does not belong to this native host"
+    );
+    ensure!(
+        registration.binding.executable == executable.canonicalize()?,
+        "The selector belongs to a different plugin installation"
+    );
+    registration.binding.check_resources()?;
+    Ok(())
+}
+
+pub fn confirm_selection(
+    capture: &CapturedInvocation,
+    executable: &Path,
+    count: usize,
+) -> Result<CapturedInvocation> {
+    crate::config::validate_worker_count(count)?;
+    let root = root(false)?.context("Missing native selection")?;
+    let _capture_lock = capture_lock(&root, &capture.session_id, &capture.turn_id)?;
+    let _session_lock = lock(&root, &capture.session_id)?;
+    let mut stored = read_capture(&capture.path)?;
+    let registration: Registration = read_private(&session_path(&root, &capture.session_id))?;
+    validate_selection_binding(&stored, &registration, executable)?;
+    ensure!(
+        stored.invocation_id == capture.invocation_id
+            && stored.selection_owner == Some(ProcessIdentity::capture(std::process::id())?),
+        "Selection is not owned by this native selector"
+    );
+    ensure!(
+        stored.worker_count.is_none(),
+        "This selection was already confirmed"
+    );
+    stored.worker_count = Some(count);
+    write_private(&stored.path, &stored)?;
+    Ok(stored)
+}
+
+/// Keep the command hook's complete native environment for launch. MCP stdio
+/// deliberately filters environment variables, so the form server must never
+/// launch the runtime or attempt to reconstruct the user's environment.
+pub(crate) fn selected_launch(
+    capture: &CapturedInvocation,
+    executable: &Path,
+) -> Result<Option<(CapturedInvocation, File)>> {
+    let root = root(false)?.context("Missing native invocation")?;
+    let guard = capture_lock(&root, &capture.session_id, &capture.turn_id)?;
+    let stored = read_capture(&capture.path)?;
+    let registration: Registration = read_private(&session_path(&root, &capture.session_id))?;
+    ensure!(
+        stored.invocation_id == capture.invocation_id,
+        "Captured invocation changed"
+    );
+    if let Some(CaptureLaunch::Started { .. }) = capture_launch(&stored)? {
+        return Ok(None);
+    }
+    validate_selection_binding(&stored, &registration, executable)?;
+    crate::config::validate_worker_count(
+        stored
+            .worker_count
+            .context("Agent selection is not confirmed")?,
+    )?;
+    ensure!(
+        matches!(capture_launch(&stored)?, Some(CaptureLaunch::Pending)),
+        "This invocation cannot be launched again"
+    );
+    Ok(Some((stored, guard)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelectionProgress {
+    WaitingForSelector,
+    WaitingForUser,
+    Ready,
+}
+
+/// Observe and expire under the same locks used by confirmation. A confirmed
+/// count always wins a simultaneous timeout or selector-exit observation.
+pub(crate) fn selection_progress(
+    capture: &CapturedInvocation,
+    executable: &Path,
+    claim_expired: bool,
+    form_expired: bool,
+) -> Result<SelectionProgress> {
+    let root = root(false)?.context("Missing native invocation")?;
+    let _capture_lock = capture_lock(&root, &capture.session_id, &capture.turn_id)?;
+    let _session_lock = lock(&root, &capture.session_id)?;
+    let stored = read_capture(&capture.path)?;
+    ensure!(
+        stored.invocation_id == capture.invocation_id,
+        "Captured invocation changed"
+    );
+    let path = session_path(&root, &capture.session_id);
+    let mut registration: Registration = read_private(&path)?;
+    ensure!(
+        registration.binding.invocation_id == stored.invocation_id
+            && registration.binding.session_id == stored.session_id
+            && registration.binding.turn_id == stored.turn_id
+            && registration.binding.owner
+                == ProcessIdentity::capture(unsafe { libc::getppid() } as u32)?
+            && registration.binding.executable == executable.canonicalize()?,
+        "Selection no longer belongs to this native invocation"
+    );
+    registration.binding.check_resources()?;
+    match capture_launch(&stored)? {
+        Some(CaptureLaunch::Started { .. }) => return Ok(SelectionProgress::Ready),
+        Some(CaptureLaunch::Failed { message }) => bail!(message),
+        _ => {}
+    }
+    validate_selection_binding(&stored, &registration, executable)?;
+    if let Some(count) = stored.worker_count {
+        crate::config::validate_worker_count(count)?;
+        return Ok(SelectionProgress::Ready);
+    }
+    let reason = match stored.selection_owner {
+        None if !claim_expired => return Ok(SelectionProgress::WaitingForSelector),
+        None => {
+            "DeLM's agent selector did not open. Review DeLM in /hooks and retry; no workers started"
+        }
+        Some(owner) if !owner.is_running()? => {
+            "DeLM's agent selector closed before confirmation; no workers started"
+        }
+        Some(_) if !form_expired => return Ok(SelectionProgress::WaitingForUser),
+        Some(_) => "Agent selection expired; no workers started",
+    };
+    // Validation above establishes the exact still-unadmitted capture. Do not
+    // alter a newer invocation, a running runtime, or a concurrently confirmed choice.
+    registration.finished = true;
+    write_private(&path, &registration)?;
+    record_capture_launch(
+        &stored,
+        &CaptureLaunch::Failed {
+            message: reason.into(),
+        },
+    )?;
+    bail!(reason)
+}
+
+pub fn cancel_selection(capture: &CapturedInvocation, executable: &Path) -> Result<()> {
+    let root = root(false)?.context("Missing native selection")?;
+    let _capture_lock = capture_lock(&root, &capture.session_id, &capture.turn_id)?;
+    let _session_lock = lock(&root, &capture.session_id)?;
+    let stored = read_capture(&capture.path)?;
+    let path = session_path(&root, &capture.session_id);
+    let mut registration: Registration = read_private(&path)?;
+    // An Interrupt may already have cancelled this invocation; never change a
+    // newer invocation or a confirmed launch while handling a late response.
+    ensure!(
+        registration.binding.invocation_id == capture.invocation_id
+            && stored.invocation_id == capture.invocation_id
+            && stored.worker_count.is_none()
+            && !registration.consumed,
+        "Cannot cancel a different or admitted invocation"
+    );
+    ensure!(
+        registration.binding.owner == ProcessIdentity::capture(unsafe { libc::getppid() } as u32)?
+            && registration.binding.executable == executable.canonicalize()?
+            && stored.selection_owner == Some(ProcessIdentity::capture(std::process::id())?),
+        "Selection cancellation has no matching owner"
+    );
+    registration.finished = true;
+    write_private(&path, &registration)?;
+    record_capture_launch(
+        &stored,
+        &CaptureLaunch::Failed {
+            message: "Agent selection cancelled; no workers started".into(),
+        },
+    )
 }
 
 pub fn read_capture(path: &Path) -> Result<CapturedInvocation> {
@@ -784,6 +1037,21 @@ pub fn ensure_not_worker() -> Result<()> {
 }
 
 pub fn consume_capture(capture: &CapturedInvocation) -> Result<Binding> {
+    let stored = read_capture(&capture.path)?;
+    ensure!(
+        stored.invocation_id == capture.invocation_id
+            && stored.session_id == capture.session_id
+            && stored.turn_id == capture.turn_id
+            && stored.project == capture.project
+            && stored.task == capture.task
+            && stored.worker_count == capture.worker_count,
+        "Captured invocation changed before admission"
+    );
+    crate::config::validate_worker_count(
+        stored
+            .worker_count
+            .context("Confirm the native agent-count selector before starting DeLM")?,
+    )?;
     let root = root(false)?.context("Missing native invocation")?;
     let registration: Registration = read_private(&session_path(&root, &capture.session_id))?;
     consume_launch_for(
@@ -1013,12 +1281,34 @@ pub fn validate_hook_listing(listing: &Value, executable: &Path) -> Result<()> {
                 && hook["enabled"] == true
                 && hook["async"] == false
                 && hook["matcher"].is_null()
-                && hook["timeoutSec"] == if event == "interrupt" { 3 } else { 5 }
+                && hook["timeoutSec"]
+                    == if event == "interrupt" {
+                        3
+                    } else if event == "userPromptSubmit" {
+                        330
+                    } else {
+                        5
+                    }
                 && matches!(hook["trustStatus"].as_str(), Some("trusted" | "managed"))
                 && hook["command"] == format!("exec \"{}\" lifecycle-hook", executable.display())),
             "Required DeLM {event} hook is missing, disabled, changed, or untrusted; review /hooks in Codex"
         );
     }
+    ensure!(
+        hooks
+            .iter()
+            .any(|hook| hook["eventName"] == "userPromptSubmit"
+                && hook["source"] == "plugin"
+                && hook["sourcePath"] == source.to_string_lossy().as_ref()
+                && hook["handlerType"] == "mcpTool"
+                && hook["server"] == "delm_selector"
+                && hook["tool"] == "select_agents"
+                && hook["enabled"] == true
+                && hook["matcher"].is_null()
+                && hook["timeoutSec"] == 330
+                && matches!(hook["trustStatus"].as_str(), Some("trusted" | "managed"))),
+        "Required DeLM agent selector is missing, disabled, changed, or untrusted; review /hooks in Codex"
+    );
     Ok(())
 }
 
@@ -1100,6 +1390,19 @@ pub(crate) mod tests {
                 turn: uuid::Uuid::new_v4().to_string(),
             }
         }
+        pub fn submission(&self) -> HookInput {
+            let mut event = input("UserPromptSubmit", &self.session, &self.turn);
+            event.cwd = Some(self.project.clone());
+            event.prompt = Some("$delm:run Do a small task".into());
+            event
+        }
+        pub fn selected_capture(&self, count: usize) -> CapturedInvocation {
+            self.submit();
+            let capture = selection_capture(&self.submission(), &self.executable)
+                .unwrap()
+                .unwrap();
+            confirm_selection(&capture, &self.executable, count).unwrap()
+        }
         pub fn submit(&self) -> HookAction {
             let mut event = input("UserPromptSubmit", &self.session, &self.turn);
             event.cwd = Some(self.project.clone());
@@ -1127,7 +1430,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn duplicate_native_invocation_has_one_launch_and_stable_capture() {
+    fn duplicate_native_invocation_captures_once_without_launching() {
         let fixture = CaptureFixture::new();
         let results: Vec<_> = std::thread::scope(|scope| {
             let pending: Vec<_> = (0..8).map(|_| scope.spawn(|| fixture.submit())).collect();
@@ -1139,18 +1442,17 @@ pub(crate) mod tests {
         assert_eq!(
             results
                 .iter()
-                .filter(|result| result.launch.is_some())
+                .filter(|result| result.selection.is_some())
                 .count(),
-            1
+            8
         );
         assert!(
             results
                 .iter()
                 .all(|result| result.output == results[0].output)
         );
-        let capture = results
-            .into_iter()
-            .find_map(|result| result.launch)
+        let capture = selection_capture(&fixture.submission(), &fixture.executable)
+            .unwrap()
             .unwrap();
         assert!(capture.captured_at_ms > 0);
         assert_eq!(
@@ -1162,6 +1464,185 @@ pub(crate) mod tests {
             Some(CaptureLaunch::Pending)
         ));
         assert!(capture_run_id(&capture).unwrap().is_none());
+    }
+
+    #[test]
+    fn selected_count_is_required_exact_and_one_use() {
+        for count in 2..=4 {
+            let fixture = CaptureFixture::new();
+            assert!(fixture.submit().selection.is_some());
+            let capture = selection_capture(&fixture.submission(), &fixture.executable)
+                .unwrap()
+                .unwrap();
+            assert!(consume_capture(&capture).is_err());
+            assert!(confirm_selection(&capture, &fixture.executable, 1).is_err());
+            assert!(confirm_selection(&capture, &fixture.executable, 5).is_err());
+            let confirmed = confirm_selection(&capture, &fixture.executable, count).unwrap();
+            assert_eq!(confirmed.worker_count, Some(count));
+            assert!(confirm_selection(&capture, &fixture.executable, count).is_err());
+            assert!(cancel_selection(&capture, &fixture.executable).is_err());
+            assert!(consume_capture(&capture).is_err());
+            consume_capture(&confirmed).unwrap();
+            assert!(consume_capture(&confirmed).is_err());
+        }
+    }
+
+    #[test]
+    fn cancelled_selector_cannot_launch_or_capture_later_chat() {
+        let fixture = CaptureFixture::new();
+        fixture.submit();
+        let capture = selection_capture(&fixture.submission(), &fixture.executable)
+            .unwrap()
+            .unwrap();
+        cancel_selection(&capture, &fixture.executable).unwrap();
+        assert!(confirm_selection(&capture, &fixture.executable, 2).is_err());
+        assert!(consume_capture(&capture).is_err());
+        let mut ordinary = fixture.submission();
+        ordinary.prompt = Some("Continue normal conversation".into());
+        ordinary.turn_id = Some(uuid::Uuid::new_v4().to_string());
+        let action = prepare_hook(ordinary, &fixture.executable).unwrap();
+        assert!(action.selection.is_none() && action.output.is_none());
+    }
+
+    #[test]
+    fn selector_rejects_changed_input_and_late_confirmation_after_interrupt() {
+        let fixture = CaptureFixture::new();
+        assert!(
+            selection_capture(&fixture.submission(), &fixture.executable)
+                .unwrap()
+                .is_none()
+        );
+        fixture.submit();
+        let mut changed = fixture.submission();
+        changed.prompt = Some("$delm:run different task".into());
+        assert!(selection_capture(&changed, &fixture.executable).is_err());
+        let capture = selection_capture(&fixture.submission(), &fixture.executable)
+            .unwrap()
+            .unwrap();
+        prepare_hook(
+            input("Interrupt", &fixture.session, &fixture.turn),
+            &fixture.executable,
+        )
+        .unwrap();
+        assert!(confirm_selection(&capture, &fixture.executable, 4).is_err());
+    }
+
+    #[test]
+    fn absent_selector_expires_without_blocking_later_conversation() {
+        let fixture = CaptureFixture::new();
+        let capture = fixture.submit().selection.unwrap();
+        assert_eq!(
+            selection_progress(&capture, &fixture.executable, false, false).unwrap(),
+            SelectionProgress::WaitingForSelector
+        );
+        let error = selection_progress(&capture, &fixture.executable, true, false).unwrap_err();
+        assert!(error.to_string().contains("selector did not open"));
+        assert!(matches!(
+            capture_launch(&capture).unwrap(),
+            Some(CaptureLaunch::Failed { .. })
+        ));
+        assert!(selection_capture(&fixture.submission(), &fixture.executable).is_err());
+        let mut ordinary = fixture.submission();
+        ordinary.prompt = Some("Continue ordinary conversation".into());
+        ordinary.turn_id = Some(uuid::Uuid::new_v4().to_string());
+        let action = prepare_hook(ordinary, &fixture.executable).unwrap();
+        assert!(action.selection.is_none() && action.output.is_none());
+    }
+
+    #[test]
+    fn live_selector_gets_human_time_and_dead_selector_stops_immediately() {
+        let fixture = CaptureFixture::new();
+        fixture.submit();
+        let mut capture = selection_capture(&fixture.submission(), &fixture.executable)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            selection_progress(&capture, &fixture.executable, true, false).unwrap(),
+            SelectionProgress::WaitingForUser
+        );
+        // A mismatched birth identity represents a dead/replaced selector even
+        // when the OS has reused its PID. No subprocess or real wait is needed.
+        capture.selection_owner.as_mut().unwrap().started_seconds += 1;
+        write_private(&capture.path, &capture).unwrap();
+        let error = selection_progress(&capture, &fixture.executable, false, false).unwrap_err();
+        assert!(error.to_string().contains("closed before confirmation"));
+        assert!(confirm_selection(&capture, &fixture.executable, 3).is_err());
+    }
+
+    #[test]
+    fn confirmed_selection_survives_expiry_or_selector_exit_before_launch() {
+        let fixture = CaptureFixture::new();
+        let mut capture = fixture.selected_capture(4);
+        capture.selection_owner.as_mut().unwrap().started_seconds += 1;
+        write_private(&capture.path, &capture).unwrap();
+        assert_eq!(
+            selection_progress(&capture, &fixture.executable, true, true).unwrap(),
+            SelectionProgress::Ready
+        );
+        assert!(
+            selected_launch(&capture, &fixture.executable)
+                .unwrap()
+                .is_some()
+        );
+        assert!(matches!(
+            capture_launch(&capture).unwrap(),
+            Some(CaptureLaunch::Pending)
+        ));
+        consume_capture(&capture).unwrap();
+    }
+
+    #[test]
+    fn expiry_and_confirmation_are_atomic_and_never_orphan_a_confirmed_count() {
+        for _ in 0..8 {
+            let fixture = CaptureFixture::new();
+            fixture.submit();
+            let capture = selection_capture(&fixture.submission(), &fixture.executable)
+                .unwrap()
+                .unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            let (confirmation, progress) = std::thread::scope(|scope| {
+                let confirmation = scope.spawn(|| {
+                    barrier.wait();
+                    confirm_selection(&capture, &fixture.executable, 3)
+                });
+                let progress = scope.spawn(|| {
+                    barrier.wait();
+                    selection_progress(&capture, &fixture.executable, true, true)
+                });
+                (confirmation.join().unwrap(), progress.join().unwrap())
+            });
+            if let Ok(confirmed) = confirmation {
+                assert_eq!(progress.unwrap(), SelectionProgress::Ready);
+                assert!(
+                    selected_launch(&confirmed, &fixture.executable)
+                        .unwrap()
+                        .is_some()
+                );
+                consume_capture(&confirmed).unwrap();
+            } else {
+                assert!(progress.unwrap_err().to_string().contains("expired"));
+                assert!(read_capture(&capture.path).unwrap().worker_count.is_none());
+                assert!(matches!(
+                    capture_launch(&capture).unwrap(),
+                    Some(CaptureLaunch::Failed { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn selection_wait_preserves_explicit_cancellation_reason() {
+        let fixture = CaptureFixture::new();
+        fixture.submit();
+        let capture = selection_capture(&fixture.submission(), &fixture.executable)
+            .unwrap()
+            .unwrap();
+        cancel_selection(&capture, &fixture.executable).unwrap();
+        let error = selection_progress(&capture, &fixture.executable, false, false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Agent selection cancelled; no workers started"
+        );
     }
 
     #[test]
@@ -1285,10 +1766,12 @@ pub(crate) mod tests {
             .map(|event| {
                 json!({"eventName":event,"source":"plugin",
             "sourcePath":"/tmp/plugin/hooks/hooks.json","handlerType":"command","enabled":true,
-            "async":false,"matcher":null,"timeoutSec":if *event == "interrupt" {3}else{5},
+            "async":false,"matcher":null,"timeoutSec":if *event == "interrupt" {3}else if *event == "userPromptSubmit" {330}else{5},
             "trustStatus":"trusted","command":"exec \"/tmp/plugin/bin/delm\" lifecycle-hook"})
             })
             .collect::<Vec<_>>();
+        hooks.push(json!({"eventName":"userPromptSubmit","source":"plugin","sourcePath":"/tmp/plugin/hooks/hooks.json",
+            "handlerType":"mcpTool","server":"delm_selector","tool":"select_agents","enabled":true,"matcher":null,"timeoutSec":330,"trustStatus":"trusted"}));
         assert!(validate_hook_listing(&json!({"data":[{"hooks":hooks}]}), executable).is_ok());
         for index in 0..hooks.len() {
             hooks[index]["trustStatus"] = json!("untrusted");
