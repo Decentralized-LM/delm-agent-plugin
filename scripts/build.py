@@ -93,12 +93,46 @@ def validate_claude_runtime(runtime):
         raise RuntimeError("The prebuilt runtime does not provide the Claude board observer; rebuild DeLM first.")
 
 
+def host_version(executable):
+    try:
+        result = subprocess.run([str(executable), "--version"], text=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def claude_executable(claude="claude"):
+    """Locate the Claude Code host for checks that replace HOME.
+
+    A launcher script may find its host through HOME, which isolated checks replace. When the
+    command is such a script, prefer the native installation reporting the launcher's exact version.
+    """
+    found = shutil.which(str(claude))
+    if not found:
+        return None
+    executable = Path(found).resolve()
+    try:
+        with executable.open("rb") as handle:
+            if handle.read(2) != b"#!":
+                return str(executable)
+        candidates = sorted((path for path in (Path.home() / ".local/share/claude/versions").iterdir()
+                             if path.is_file() and os.access(path, os.X_OK)),
+                            key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
+        return str(executable)
+    version = host_version(executable)
+    if version:
+        for candidate in candidates:
+            if host_version(candidate) == version:
+                return str(candidate.resolve())
+    return str(executable)
+
+
 def validate_claude_package(package, claude="claude"):
     """Native static validation only: no session, login, tools, or model calls."""
-    executable = shutil.which(str(claude))
+    executable = claude_executable(claude)
     if not executable:
         raise RuntimeError("Claude Code CLI is required to validate the Claude plugin; select it with --claude PATH.")
-    executable = str(Path(executable).resolve())
     package = package.resolve()
     before = package_files(package)
     with tempfile.TemporaryDirectory(prefix="delm-claude-validate-") as temporary:
