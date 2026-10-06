@@ -69,9 +69,9 @@ The workflow requires these gates:
 | Exact release runtimes | Deterministic completion and cancellation with two workers, delivery to the original project, preserved original Git state, durable partial recovery on stop, removal of both temporary workspaces, and no surviving fixture hosts. No model calls. |
 | Native Claude task | Matching manual records from both native architectures: two native forks, both workers publish useful files, matching tool pools, preserved original files/index, checked delivered output, and both temporary workspaces removed. Exact runtime, source, adapter, and fixture hashes are bound. |
 | Universal assembly | Each extracted architecture slice must match the hash of its tested native binary. Both qualification records identify the same clean source revision and runtime sources. |
-| Signing | Developer ID, hardened runtime, timestamp, an accepted Apple notarization submission, and verification of the online notarization record. Plugin resources must match the qualified unsigned package. |
-| Signed ARM and Intel execution | The final universal binary runs the same completion/cancellation smoke under quarantine on both native architectures. Reports identify the final signed bytes. |
-| Publication | The publisher itself rechecks the expected repository and source revision, clean tagged source, package integrity, both native qualifications, signed smoke reports, and notarization before writing any remote refs. |
+| Signing | Developer ID, hardened runtime, timestamp, and signature verification. Plugin resources must match the qualified unsigned package. |
+| Signed ARM and Intel execution | The final universal binary runs the same completion/cancellation smoke on both native architectures. Reports identify the final signed bytes. |
+| Publication | The publisher itself rechecks the expected repository and source revision, clean tagged source, package integrity, both native qualifications, signed smoke reports, and signature verification before writing any remote refs. |
 
 Codex native inheritance evidence includes the production metadata-fork request, inherited settings, and an actual DeLM gateway call. Production startup evidence additionally installs the actual plugin in a disposable home and invokes it through the real Codex terminal with a local scripted provider. The success case must deliver its output through two native worker forks and remove their workspaces. The failure case must report the injected provider failure, clean up its run, and allow an ordinary prompt in the same conversation. Each startup case has a 60-second total limit and makes no remote model calls.
 
@@ -80,14 +80,18 @@ The release recorder requires both startup results through `--startup-root`, con
 When ready to publish:
 
 1. Create the source tag matching the package version. Protect source tags and `delm-plugin-*` tags against replacement, and protect the `marketplace` branch.
-2. Configure the GitHub `release` environment with a required reviewer and these environment secrets: `APPLE_CERTIFICATE_BASE64` (Developer ID Application certificate as a base64-encoded P12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD`.
+2. Configure the GitHub `release` environment with a required reviewer and these environment secrets: `APPLE_CERTIFICATE_BASE64` (Developer ID Application certificate as a base64-encoded P12), `APPLE_CERTIFICATE_PASSWORD`, and `APPLE_SIGNING_IDENTITY`.
 3. Obtain matching manual Claude candidate qualification records for native Apple Silicon and Intel as described above.
 4. Dispatch **Prepare macOS release** with that tag as `source_ref`, `release_repository: jerry2247/delm-agent-plugin`, `previous_repositories: []`, the records in `claude_qualifications`, and `publish` enabled. The signing job uses the protected environment. After approval, successful signing and both signed native qualification jobs gate the publisher automatically; the publisher receives repository write permission but no Apple credentials.
 5. Publish the prepared npm tarball from that successful workflow, following the commands below. Verify installation, update, status, and removal through both hosts before announcing the release.
 
-Failed native checks retain their evidence, and the notarization response is retained when available. Standalone Mach-O binaries cannot carry a stapled notarization ticket; the workflow checks Apple's online record. Never disable Gatekeeper or remove quarantine to bypass a failure.
+Failed native checks retain their evidence. Publication requires a valid signature, not Apple notarization. Release metadata records signing separately from notarization; signed-only packages never claim to be notarized. The supported installation path uses the hosts' Git-based plugin managers. Browser-downloaded copies can encounter additional macOS checks. Never disable Gatekeeper or remove quarantine to bypass a failure.
 
-The build deployment target is macOS 13.0. CI executes on native ARM `macos-15` and native Intel `macos-15-intel`; building with an older deployment target does not establish runtime support on that older system. Qualify the signed package on the oldest advertised system before announcing support. Local development checks do not establish that native Intel CI, signing, notarization, or the GitHub workflow have succeeded. Apple credentials and a protected release environment must be configured separately.
+The build deployment target is macOS 13.0. CI executes on native ARM `macos-15` and native Intel `macos-15-intel`; building with an older deployment target does not establish runtime support on that older system. Qualify the signed package on the oldest advertised system before announcing support. Local development checks do not establish that native Intel CI, signing, or the GitHub workflow have succeeded. Apple credentials and a protected release environment must be configured separately.
+
+## Promote an existing candidate
+
+Use **Publish verified macOS candidate** to publish an already-qualified build without rebuilding it. Set `source_ref` to its original version tag, `candidate_run` to the successful preparation run, and `qualification_run` to the run containing both successful Claude proof artifacts. This reuses the existing native build and model evidence, signs the same runtime, checks signed execution, and prepares the npm tarball. Current release tooling runs separately from the unchanged source checkout, preserving the candidate's provenance.
 
 ## Publish and install
 

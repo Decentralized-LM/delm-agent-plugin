@@ -16,7 +16,7 @@ import time
 from build import HOST_PACKAGE_FILES, SOURCE, package_source
 from install_support import fingerprint, package_files
 from package_release import (ARCHITECTURES, CODEX_STARTUP_CASES, LIFECYCLE_CASES, source_state,
-                             source_version, valid_startup_case, verify, write_json)
+                             source_version, valid_startup_case, verify, write_json, is_signed)
 
 
 INHERITANCE_INPUTS = ["tests/native_inheritance.rs", "src/workers.rs", "src/worker_tools.rs", "src/compatibility.rs"]
@@ -235,14 +235,14 @@ def smoke(runtime, output, architecture, signed=False):
     if command([str(runtime), "--version"]).stdout.strip() != "delm " + source_version(SOURCE):
         raise RuntimeError("Release runtime version differs from source.")
     if signed:
-        command(["codesign", "--verify", "--strict", "--check-notarization", "-R=notarized", str(runtime)])
+        command(["codesign", "--verify", "--strict", str(runtime)])
     output.mkdir(parents=True, exist_ok=False)
     cases = [smoke_case(runtime, output / mode, mode) for mode in ["complete", "wait"]]
     if fingerprint(runtime) != before:
         raise RuntimeError("Release runtime changed during qualification.")
     evidence = {"schema": 1, "kind": "release-runtime-smoke", "architecture": architecture,
                 "macOS": platform.mac_ver()[0], "runtimeSha256": before["sha256"],
-                "signedAndNotarized": signed, "modelCalls": 0, "passed": True,
+                "signed": signed, "signedAndNotarized": False, "modelCalls": 0, "passed": True,
                 "cases": cases, **source_state(SOURCE)}
     write_json(output / "result.json", evidence)
     return evidence
@@ -302,19 +302,19 @@ def record(runtime, output, target, smoke_path, inheritance_path, lifecycle_root
 
 def verify_signed(package, reports):
     metadata = verify(package, require_qualified=True)
-    if not metadata["signedAndNotarized"]:
+    if not is_signed(metadata):
         raise RuntimeError("Signed qualification requires a signed package.")
     runtime_hash = metadata["files"]["bin/delm"]["sha256"]
     for arch in ARCHITECTURES:
         report = json.loads((reports / ("signed-qualification-" + arch) / "result.json").read_text())
         if (report.get("kind") != "release-runtime-smoke" or report.get("architecture") != arch
                 or report.get("runtimeSha256") != runtime_hash or report.get("passed") is not True
-                or report.get("signedAndNotarized") is not True or report.get("modelCalls") != 0
+                or not is_signed(report) or report.get("modelCalls") != 0
                 or report.get("sourceDirty") is not False
                 or report.get("runtimeSourcesSha256") != metadata["runtimeSourcesSha256"]
                 or report.get("cases") != expected_smoke_cases()):
             raise RuntimeError(f"Signed runtime qualification does not match the package: {arch}")
-    command(["codesign", "--verify", "--strict", "--check-notarization", "-R=notarized",
+    command(["codesign", "--verify", "--strict",
              str(package / "plugins/delm/bin/delm")])
     return {"kind": "signed-release-qualified", "architecture": "+".join(ARCHITECTURES),
             "runtimeSha256": runtime_hash, "sourceDirty": False, "passed": True}

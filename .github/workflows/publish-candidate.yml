@@ -126,16 +126,13 @@ jobs:
           node-version: '22'
       - name: Install the native Claude payload validator
         run: npm install --global @anthropic-ai/claude-code@2.1.289
-      - name: Sign and notarize the qualified package
+      - name: Sign the qualified package
         env:
           RELEASE_PUBLISH: 'true'
           SOURCE_REF: ${{ inputs.source_ref }}
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
           export RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
@@ -168,13 +165,6 @@ jobs:
           name: signed-macos-release-candidate
           path: signed-macos-release.tar
           if-no-files-found: error
-      - name: Retain notarization response
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: notarization-response
-          path: ${{ runner.temp }}/delm-notarization.json
-          if-no-files-found: ignore
   qualify-signed:
     needs: [sign]
     strategy:
@@ -192,10 +182,15 @@ jobs:
         with:
           ref: ${{ inputs.source_ref }}
           persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signed-macos-release-candidate
-      - name: Verify and exercise the signed universal binary under quarantine
+      - name: Verify and exercise the signed universal binary
         env:
           RELEASE_REPOSITORY: ${{ github.repository }}
           BUILD_ARCHITECTURE: ${{ matrix.architecture }}
@@ -203,9 +198,8 @@ jobs:
           export RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
           mkdir candidate
           tar -xf signed-macos-release.tar -C candidate
-          python3 scripts/package_release.py --verify candidate --revision "$RELEASE_SOURCE_SHA" --repository "$RELEASE_REPOSITORY" --require-qualified
-          xattr -w com.apple.quarantine '0081;00000000;DeLMReleaseQualification;' candidate/plugins/delm/bin/delm
-          python3 scripts/qualify_release.py smoke --runtime candidate/plugins/delm/bin/delm --architecture "$BUILD_ARCHITECTURE" --signed --out "$RUNNER_TEMP/signed-qualification"
+          python3 release-tooling/scripts/release_tool.py package_release.py --verify candidate --revision "$RELEASE_SOURCE_SHA" --repository "$RELEASE_REPOSITORY" --require-qualified
+          python3 release-tooling/scripts/release_tool.py qualify_release.py smoke --runtime candidate/plugins/delm/bin/delm --architecture "$BUILD_ARCHITECTURE" --signed --out "$RUNNER_TEMP/signed-qualification"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -223,6 +217,11 @@ jobs:
         with:
           ref: ${{ inputs.source_ref }}
           fetch-depth: 0
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signed-macos-release-candidate
@@ -239,8 +238,8 @@ jobs:
           export RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
           mkdir signed-release
           tar -xf signed-macos-release.tar -C signed-release
-          python3 scripts/publish_release.py signed-release signed-evidence
-          python3 scripts/prepare_installer.py --repository "$RELEASE_REPOSITORY" --native-release signed-release/release.json --out prepared-installer
+          python3 release-tooling/scripts/release_tool.py publish_release.py signed-release signed-evidence
+          python3 release-tooling/scripts/release_tool.py prepare_installer.py --repository "$RELEASE_REPOSITORY" --native-release signed-release/release.json --out prepared-installer
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: prepared-npm-installer-not-published

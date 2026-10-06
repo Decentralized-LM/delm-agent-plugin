@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from package_release import verify
+from package_release import verify, is_signed
 from qualify_release import verify_signed
 from release_identity import main as verify_identity
 
@@ -39,7 +39,7 @@ def main():
         raise SystemExit("Usage: publish_release.py PACKAGE SIGNED_QUALIFICATION_REPORTS")
     package = Path(sys.argv[1]).resolve()
     metadata = verify(package, revision=revision, repository=repository, require_qualified=True)
-    if not metadata["signedAndNotarized"]:
+    if not is_signed(metadata):
         raise SystemExit("Unsigned review packages cannot be published.")
     verify_signed(package, Path(sys.argv[2]).resolve())
     verify_destination(repository)
