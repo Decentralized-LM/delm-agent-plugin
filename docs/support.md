@@ -14,11 +14,15 @@ Preparation uses native macOS copy-on-write cloning on the same local filesystem
 
 Use stock Codex CLI on `PATH` with an existing native login. A desktop or IDE installation without the CLI is insufficient.
 
+Codex compatibility depends on its native API behavior, including how request options interact. DeLM checks protocol capabilities and resolves inherited settings before starting workers. Release qualification also exercises the actual plugin invocation, successful delivery, and return to an ordinary conversation after failure against the exact recorded host version and architecture. Installing a newer Codex version or passing a schema check alone does not establish support; see the [native verification steps](development.md#focused-verification).
+
 Installation uses Codex's native plugin manager. Restart after installation, review and trust DeLM in `/hooks`, then restart to load those definitions. Invoke `$delm:run`; a bare `/delm` command is not registered.
 
 Workers fork the parent conversation and preserve ordinary saved skills, plugins, hooks, MCP configuration, native permissions, and process environment. DeLM adds its coordination tools and prevents its own hooks from recursively launching another team. It does not substitute a stripped-down Codex setup or require a special private browser installation.
 
 Skill contents and MCP inventories are checked rather than assuming equal names mean equal capabilities. The runtime records the inherited model, reasoning effort, and service tier. Explicit requested overrides are separate from ordinary inheritance.
+
+Before taking the source inventory and preparing worker forks, DeLM waits for Codex's native plugin-bundle initialization. A failed initialization is reported before worker execution. This boundary does not certify that every tool is connected or ready; the subsequent native settings, skill-content, and MCP-inventory checks remain authoritative.
 
 **Exact live-session parity is not met yet.** A native fixture demonstrates that a parent-process CLI override is absent from a separate fork host. The host API also does not expose every live tool connection or instruction-provider state. The runtime reports these gaps. Saved configuration and a native conversation fork do not establish that those live resources are identical. Do not describe a comparison as fully matched until its capability evidence establishes that.
 

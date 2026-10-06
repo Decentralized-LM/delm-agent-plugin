@@ -16,6 +16,7 @@ from install_support import fingerprint, package_files
 
 ARCHITECTURES = {"arm64": "aarch64-apple-darwin", "x86_64": "x86_64-apple-darwin"}
 LIFECYCLE_CASES = ["interrupt", "preflight", "stop", "owner-death", "plugin-remove"]
+CODEX_STARTUP_CASES = ("scripted", "failure")
 REPOSITORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
 HOST_PATHS = {"codex": "plugins/delm", "claude": "plugins/delm-claude"}
 HOST_MANIFESTS = {"codex": ".codex-plugin/plugin.json", "claude": ".claude-plugin/plugin.json"}
@@ -70,6 +71,7 @@ def verify_qualification(metadata, runtime=None):
         raise RuntimeError("Both native macOS architectures must pass release qualification.")
     for arch, record in records.items():
         inheritance = record.get("nativeInheritance", {})
+        startup = record.get("nativeStartup", {})
         evidence = record.get("evidenceSha256", {})
         if (record.get("schema") != 1 or record.get("kind") != "native-release-build"
                 or record.get("architecture") != arch or record.get("target") != ARCHITECTURES[arch]
@@ -80,13 +82,18 @@ def verify_qualification(metadata, runtime=None):
                 or record.get("lifecycleCases") != LIFECYCLE_CASES
                 or record.get("exactLiveSessionParity") is not False
                 or not record.get("codexVersion")
-                or set(evidence) != {"smoke", "inheritance", *LIFECYCLE_CASES}
+                or set(evidence) != {"smoke", "inheritance", *LIFECYCLE_CASES,
+                                     *("startup-" + case for case in CODEX_STARTUP_CASES)}
                 or not all(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
                            for digest in evidence.values())
                 or inheritance.get("runtimeSha256") != record.get("runtimeSha256")
                 or inheritance.get("architecture") != arch
                 or inheritance.get("hostVersion") != record.get("codexVersion")
                 or inheritance.get("gatewayToolCalled") is not True
+                or inheritance.get("metadataForkValidated") is not True
+                or inheritance.get("metadataSettingsMatch") is not True
+                or inheritance.get("invalidEphemeralGoalCombinationRejected") is not True
+                or inheritance.get("nativePluginInitializationValidated") is not True
                 or inheritance.get("parentCliOverridesNotExported") is not True
                 or inheritance.get("exactLiveSessionParity") is not False
                 or not all(isinstance(inheritance.get(key), str)
@@ -94,12 +101,45 @@ def verify_qualification(metadata, runtime=None):
                            for key in ["nativeTestSha256", "sourceDigest"])
                 or not re.fullmatch(r"[0-9a-f]{64}", record.get("runtimeSha256", ""))):
             raise RuntimeError(f"Invalid native release qualification for {arch}.")
+        if (not isinstance(startup, dict) or set(startup) != set(CODEX_STARTUP_CASES)
+                or any(not valid_startup_case(case, proof, record, arch)
+                       for case, proof in startup.items())
+                or any(len({proof[key] for proof in startup.values()}) != 1
+                       for key in ["sourceDigest", "harnessSha256", "packagePayloadSha256"])):
+            raise RuntimeError(f"Invalid native production startup qualification for {arch}.")
         if runtime is not None:
             with tempfile.TemporaryDirectory(prefix="delm-slice-") as directory:
                 sliced = Path(directory) / "delm"
                 subprocess.run(["lipo", str(runtime), "-thin", arch, "-output", str(sliced)], check=True)
                 if fingerprint(sliced)["sha256"] != record["runtimeSha256"]:
                     raise RuntimeError(f"The {arch} release slice differs from the tested binary.")
+
+
+def valid_startup_case(case, proof, record, architecture):
+    """Check the sanitized production-startup proof retained in release metadata."""
+    if not isinstance(proof, dict):
+        return False
+    common = ["nativeInvocation", "installedPackageMatches", "nativeHostMatches", "originalGitPreserved",
+              "workspacesRemoved", "ownedProcessesStopped", "authLinkRemoved"]
+    elapsed = proof.get("elapsedSeconds")
+    if (proof.get("case") != case or proof.get("passed") is not True
+            or proof.get("runtimeSha256") != record.get("runtimeSha256")
+            or proof.get("hostVersion") != record.get("codexVersion")
+            or proof.get("architecture") != architecture
+            or proof.get("modelCalls") != 0
+            or proof.get("model") != "gpt-6-astra" or proof.get("effort") != "medium"
+            or proof.get("workerCount") != 2 or proof.get("workerForksStarted") != 2
+            or not all(proof.get(key) is True for key in common)
+            or type(elapsed) not in (int, float) or not 0 < elapsed < 60
+            or not all(isinstance(proof.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", proof[key])
+                       for key in ["sourceDigest", "harnessSha256", "packagePayloadSha256"])):
+        return False
+    if case == "scripted":
+        return all(proof.get(key) is True for key in ["resultDelivered", "deliveryCleanupComplete", "exactResult", "nativeCheckPassed",
+                                                     "sharedPublicationObserved", "completionObserved"])
+    return (case == "failure" and proof.get("resultDelivered") is False
+            and all(proof.get(key) is True for key in
+                    ["explicitFailure", "ordinaryConversationUsable", "ordinaryResponseRendered", "originalPreserved"]))
 
 
 

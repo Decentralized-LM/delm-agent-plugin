@@ -13,9 +13,10 @@ import sys
 import threading
 import time
 
-from build import SOURCE
+from build import HOST_PACKAGE_FILES, SOURCE, package_source
 from install_support import fingerprint, package_files
-from package_release import ARCHITECTURES, LIFECYCLE_CASES, source_state, source_version, verify, write_json
+from package_release import (ARCHITECTURES, CODEX_STARTUP_CASES, LIFECYCLE_CASES, source_state,
+                             source_version, valid_startup_case, verify, write_json)
 
 
 INHERITANCE_INPUTS = ["tests/native_inheritance.rs", "src/workers.rs", "src/worker_tools.rs", "src/compatibility.rs"]
@@ -38,7 +39,9 @@ def validate_inheritance(evidence, source, runtime_hash, architecture, host_vers
     if (evidence.get("kind") != "native-inheritance" or evidence.get("model_turns") != 0
             or not all(evidence.get(key) is True for key in ["saved_skill_contents_match",
                 "saved_mcp_tools_match", "native_permission_profile_match", "mcp_tool_called",
-                "delm_gateway_tool_called", "parent_cli_overrides_not_exported"])
+                "delm_gateway_tool_called", "parent_cli_overrides_not_exported",
+                "metadata_fork_validated", "metadata_settings_match",
+                "invalid_ephemeral_goal_combination_rejected", "native_plugin_initialization_validated"])
             or evidence.get("exact_live_session_parity") is not False
             or evidence.get("runtime_sha256") != runtime_hash
             or evidence.get("host_version") != host_version
@@ -50,7 +53,54 @@ def validate_inheritance(evidence, source, runtime_hash, architecture, host_vers
     return {"runtimeSha256": runtime_hash, "hostVersion": host_version, "architecture": architecture,
             "nativeTestSha256": evidence["native_test_sha256"], "sourceDigest": evidence["source_digest"],
             "gatewayToolCalled": True, "parentCliOverridesNotExported": True,
+            "metadataForkValidated": True, "metadataSettingsMatch": True,
+            "invalidEphemeralGoalCombinationRejected": True,
+            "nativePluginInitializationValidated": True,
             "exactLiveSessionParity": False}
+
+
+def codex_payload_digest(source):
+    files = {name: fingerprint(package_source(source, name, "codex"))
+             for name in HOST_PACKAGE_FILES["codex"]}
+    return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+
+
+def validate_startup(evidence, source, runtime_hash, architecture, host_version, case):
+    from verify_codex_startup import startup_source_digest
+
+    proof = {"case": case, "passed": evidence.get("passed"), "runtimeSha256": evidence.get("runtime_sha256"),
+             "hostVersion": evidence.get("host_version"), "architecture": evidence.get("architecture"),
+             "modelCalls": evidence.get("model_calls"), "workerCount": evidence.get("worker_count"),
+             "model": evidence.get("model"), "effort": evidence.get("effort"),
+             "workerForksStarted": evidence.get("worker_forks_started"),
+             "elapsedSeconds": evidence.get("elapsed_seconds"), "sourceDigest": evidence.get("source_digest"),
+             "harnessSha256": evidence.get("harness_sha256"),
+             "packagePayloadSha256": evidence.get("package_payload_sha256")}
+    proof["architecture"] = {"aarch64": "arm64"}.get(proof["architecture"], proof["architecture"])
+    for target, name in [("nativeInvocation", "native_invocation"), ("resultDelivered", "result_delivered"),
+                         ("deliveryCleanupComplete", "delivery_cleanup_complete"),
+                         ("installedPackageMatches", "installed_package_matches"),
+                         ("nativeHostMatches", "native_host_matches"),
+                         ("originalGitPreserved", "original_git_preserved"),
+                         ("exactResult", "exact_result"), ("nativeCheckPassed", "native_check_passed"),
+                         ("sharedPublicationObserved", "shared_publication_observed"),
+                         ("completionObserved", "completion_observed"),
+                         ("workspacesRemoved", "workspaces_removed"), ("ownedProcessesStopped", "owned_processes_stopped"),
+                         ("authLinkRemoved", "auth_link_removed"), ("explicitFailure", "explicit_failure"),
+                         ("ordinaryConversationUsable", "ordinary_conversation_usable"),
+                         ("ordinaryResponseRendered", "ordinary_response_rendered")]:
+        proof[target] = evidence.get(name)
+    proof["originalPreserved"] = (evidence.get("original_unchanged") is True
+                                   and evidence.get("original_git_preserved") is True)
+    record = {"runtimeSha256": runtime_hash, "codexVersion": host_version}
+    if (evidence.get("kind") != "native-codex-startup" or evidence.get("schema_version") != 1
+            or evidence.get("case") != case or evidence.get("cleanup_errors") != []
+            or not valid_startup_case(case, proof, record, architecture)
+            or evidence.get("source_digest") != startup_source_digest(source)
+            or evidence.get("harness_sha256") != fingerprint(source / "scripts/verify_codex_startup.py")["sha256"]
+            or evidence.get("package_payload_sha256") != codex_payload_digest(source)):
+        raise RuntimeError(f"Native production startup evidence is missing or mismatched: {case}.")
+    return proof
 
 
 def native_architecture(expected):
@@ -198,7 +248,7 @@ def smoke(runtime, output, architecture, signed=False):
     return evidence
 
 
-def record(runtime, output, target, smoke_path, inheritance_path, lifecycle_root):
+def record(runtime, output, target, smoke_path, inheritance_path, lifecycle_root, startup_root):
     architecture = next((arch for arch, triple in ARCHITECTURES.items() if triple == target), None)
     if architecture is None:
         raise RuntimeError("Unsupported macOS release target.")
@@ -231,12 +281,19 @@ def record(runtime, output, target, smoke_path, inheritance_path, lifecycle_root
         raise RuntimeError("Lifecycle qualification mixed native hosts or fixture binaries.")
     host_version = versions.pop()
     native_inheritance = validate_inheritance(inheritance, SOURCE, runtime_hash, architecture, host_version)
+    native_startup = {}
+    for case in CODEX_STARTUP_CASES:
+        path = startup_root / case / "result.json"
+        native_startup[case] = validate_startup(json.loads(path.read_text()), SOURCE,
+                                               runtime_hash, architecture, host_version, case)
+        evidence_hashes["startup-" + case] = fingerprint(path)["sha256"]
     revision = command(["git", "rev-parse", "HEAD"], cwd=SOURCE).stdout.strip()
     evidence = {"schema": 1, "kind": "native-release-build", "architecture": architecture,
                 "target": target, "macOS": platform.mac_ver()[0], "runtimeSha256": runtime_hash,
                 "sourceRevision": revision, **provenance, "passed": True, "modelCalls": 0,
                 "codexVersion": host_version, "lifecycleCases": LIFECYCLE_CASES,
                 "nativeInheritance": native_inheritance,
+                "nativeStartup": native_startup,
                 "exactLiveSessionParity": False,
                 "lifecycleFixtureSha256": fixture_hashes.pop(), "evidenceSha256": evidence_hashes}
     write_json(output, evidence)
@@ -278,6 +335,7 @@ def main():
     record_parser.add_argument("--smoke", type=Path, required=True)
     record_parser.add_argument("--inheritance", type=Path, required=True)
     record_parser.add_argument("--lifecycle-root", type=Path, required=True)
+    record_parser.add_argument("--startup-root", type=Path, required=True)
     verify_parser = subparsers.add_parser("verify-signed")
     verify_parser.add_argument("--package", type=Path, required=True)
     verify_parser.add_argument("--reports", type=Path, required=True)
@@ -285,7 +343,8 @@ def main():
     if args.operation == "smoke":
         evidence = smoke(args.runtime, args.out.resolve(), args.architecture, args.signed)
     elif args.operation == "record":
-        evidence = record(args.runtime, args.out, args.target, args.smoke, args.inheritance, args.lifecycle_root)
+        evidence = record(args.runtime, args.out, args.target, args.smoke, args.inheritance,
+                          args.lifecycle_root, args.startup_root)
     else:
         evidence = verify_signed(args.package, args.reports)
     print(json.dumps({key: evidence[key] for key in ["kind", "architecture", "runtimeSha256", "sourceDirty", "passed"]}))

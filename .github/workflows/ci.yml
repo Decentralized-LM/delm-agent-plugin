@@ -31,10 +31,10 @@ jobs:
       matrix:
         include:
           - runner: macos-15
-            codex: '0.160.0'
+            codex: '0.160.1'
             claude: '2.1.289'
           - runner: macos-15-intel
-            codex: '0.160.0'
+            codex: '0.160.1'
             claude: '2.1.289'
           - runner: macos-15
             codex: latest
@@ -67,6 +67,19 @@ jobs:
         run: npm --prefix packages/installer run test:native:claude
       - name: Verify native configuration inheritance without model calls
         run: DELM_TEST_HOST="$(command -v codex)" cargo test --locked --test native_inheritance -- --ignored
+      - name: Verify production Codex startup, delivery and failure recovery without model calls
+        run: |
+          python3 -B scripts/test_verify_codex_startup.py
+          for scenario in scripted failure; do
+            python3 -B scripts/verify_codex_startup.py --runtime target/debug/delm --case "$scenario" --out "$RUNNER_TEMP/delm-startup/$scenario"
+          done
+      - name: Retain native Codex startup evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: codex-startup-${{ matrix.runner }}-${{ matrix.codex }}
+          path: ${{ runner.temp }}/delm-startup
+          if-no-files-found: ignore
       - name: Verify native cancellation and lifecycle ownership without model calls
         run: |
           cargo build --locked --example native-lifecycle-fixture

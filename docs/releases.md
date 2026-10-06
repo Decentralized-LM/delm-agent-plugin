@@ -61,7 +61,7 @@ The workflow requires these gates:
 
 | Gate | Required evidence |
 | --- | --- |
-| Native ARM and Intel builds | Locked dependencies, regular verification, release-profile tests, both native installer fixtures, Claude adapter tests and strict package validation, Codex saved-configuration inheritance, and all five native Codex lifecycle cases: interrupt, preflight, stop, owner death, plugin removal. |
+| Native ARM and Intel builds | Locked dependencies, regular verification, release-profile tests, both native installer fixtures, Claude adapter tests and strict package validation, Codex metadata-fork and saved-configuration inheritance checks, production Codex startup success and failure cases, and all five native Codex lifecycle cases: interrupt, preflight, stop, owner death, plugin removal. |
 | Exact release runtimes | Deterministic completion and cancellation with two workers, delivery to the original project, preserved original Git state, durable partial recovery on stop, removal of both temporary workspaces, and no surviving fixture hosts. No model calls. |
 | Native Claude task | Matching manual records from both native architectures: two native forks, both workers publish useful files, matching tool pools, preserved original files/index, checked delivered output, and both temporary workspaces removed. Exact runtime, source, adapter, and fixture hashes are bound. |
 | Universal assembly | Each extracted architecture slice must match the hash of its tested native binary. Both qualification records identify the same clean source revision and runtime sources. |
@@ -69,7 +69,9 @@ The workflow requires these gates:
 | Signed ARM and Intel execution | The final universal binary runs the same completion/cancellation smoke under quarantine on both native architectures. Reports identify the final signed bytes. |
 | Publication | The publisher itself rechecks the expected repository and source revision, clean tagged source, package integrity, both native qualifications, signed smoke reports, and notarization before writing any remote refs. |
 
-Codex native inheritance evidence includes an actual DeLM gateway call and binds the tested adapter sources, native fixture, host version, architecture, and runtime binary. Release validation rejects missing or mismatched inheritance records. These checks qualify saved configuration and the gateway, while retaining the explicit `exactLiveSessionParity: false` limitation described in [support](support.md#codex-setup-and-capability-inheritance).
+Codex native inheritance evidence includes the production metadata-fork request, inherited settings, and an actual DeLM gateway call. Production startup evidence additionally installs the actual plugin in a disposable home and invokes it through the real Codex terminal with a local scripted provider. The success case must deliver its output through two native worker forks and remove their workspaces. The failure case must report the injected provider failure, clean up its run, and allow an ordinary prompt in the same conversation. Each startup case has a 60-second total limit and makes no remote model calls.
+
+The release recorder requires both startup results through `--startup-root`, containing `scripted/result.json` and `failure/result.json`. It binds them to the source, harness, package resources, runtime binary, native architecture, and exact Codex version. Missing, mismatched, failed, or over-budget results cannot qualify a release. Native process cleanup evidence covers the fixture's recorded owned processes. These checks retain the explicit `exactLiveSessionParity: false` limitation described in [support](support.md#codex-setup-and-capability-inheritance); they do not establish support on untested host versions or platforms.
 
 When ready to publish:
 

@@ -11,6 +11,7 @@ python3 -B scripts/test_installation.py
 python3 -B scripts/test_maintenance.py
 python3 -B scripts/test_release.py
 python3 -B scripts/test_verify_fresh_install.py
+python3 -B scripts/test_verify_codex_startup.py
 python3 -B scripts/test_verify_claude_native.py
 python3 -B scripts/test_dependency_notices.py
 npm --prefix packages/installer test
