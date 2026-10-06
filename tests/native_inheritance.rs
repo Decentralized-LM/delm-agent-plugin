@@ -3,7 +3,8 @@
 use delm::{
     protocol::StartRequest,
     workers::{
-        RpcClient, mcp_manifest, skill_manifest, verify_thread_response, worker_thread_request,
+        RpcClient, mcp_manifest, metadata_thread_request, skill_manifest, verify_thread_response,
+        worker_thread_request,
     },
 };
 use serde_json::json;
@@ -68,6 +69,12 @@ async fn native_fork_preserves_saved_skill_tools_and_approval_policy() {
         json!({"shell_environment_policy":{"set":{"DELM_TRANSIENT_FIXTURE":"parent-only"}}});
     let mut parent = RpcClient::spawn(&request, &root).await.unwrap();
     parent.initialize().await.unwrap();
+    let parent_plugins = parent.reconcile_plugins().await.unwrap();
+    assert_eq!(parent_plugins["failedRemotePluginIds"], json!([]));
+    assert_eq!(
+        parent_plugins["failedMaterializationRemotePluginIds"],
+        json!([])
+    );
     let parent_config = parent
         .request("config/read", json!({"cwd":project,"includeLayers":true}))
         .await
@@ -113,6 +120,12 @@ async fn native_fork_preserves_saved_skill_tools_and_approval_policy() {
         .remove("native_config_overrides");
     let mut child = RpcClient::spawn(&request, &root.join("run")).await.unwrap();
     child.initialize().await.unwrap();
+    let child_plugins = child.reconcile_plugins().await.unwrap();
+    assert_eq!(child_plugins["failedRemotePluginIds"], json!([]));
+    assert_eq!(
+        child_plugins["failedMaterializationRemotePluginIds"],
+        json!([])
+    );
     let child_config = child
         .request("config/read", json!({"cwd":worker,"includeLayers":true}))
         .await
@@ -123,6 +136,54 @@ async fn native_fork_preserves_saved_skill_tools_and_approval_policy() {
             .is_none(),
         "Separate app-server config unexpectedly copied a parent-only CLI override; requalify live-session support"
     );
+    // Exercise the production settings-resolution request across the same
+    // app-server boundary as a plugin invocation, before any worker is created.
+    let (metadata_method, metadata_params) =
+        metadata_thread_request(&project, json!({}), Some(&parent_id), None, None);
+    assert_eq!(metadata_method, "thread/fork");
+    assert_eq!(metadata_params["ephemeral"], true);
+    assert_eq!(metadata_params["excludeTurns"], true);
+    assert!(metadata_params.get("deferGoalContinuation").is_none());
+    let mut invalid_params = metadata_params.clone();
+    invalid_params["deferGoalContinuation"] = json!(true);
+    let rejected = child
+        .request(metadata_method, invalid_params)
+        .await
+        .expect_err("Native Codex accepted deferred goal continuation on an ephemeral fork");
+    let reason = format!("{rejected:#}");
+    assert!(
+        reason.contains("deferGoalContinuation") && reason.contains("ephemeral"),
+        "Metadata fork was rejected for a different reason: {reason}"
+    );
+    let metadata = child
+        .request(metadata_method, metadata_params)
+        .await
+        .expect("Production metadata fork must resolve settings without a model turn");
+    for field in [
+        "model",
+        "modelProvider",
+        "reasoningEffort",
+        "serviceTier",
+        "approvalPolicy",
+        "approvalsReviewer",
+        "activePermissionProfile",
+        "sandbox",
+        "disabledPluginIds",
+    ] {
+        assert_eq!(
+            metadata[field], source[field],
+            "Metadata fork changed {field}"
+        );
+    }
+    assert_eq!(metadata["thread"]["turns"], json!([]));
+    let metadata_id = metadata["thread"]["id"]
+        .as_str()
+        .expect("Metadata fork omitted its thread identity");
+    assert_ne!(metadata_id, parent_id);
+    child
+        .request("thread/unsubscribe", json!({"threadId":metadata_id}))
+        .await
+        .unwrap();
     let mut gateway =
         delm::worker_tools::Gateway::start(&uuid::Uuid::new_v4().to_string()).unwrap();
     let mut coordination_config = gateway.config(0).unwrap();
@@ -204,6 +265,9 @@ async fn native_fork_preserves_saved_skill_tools_and_approval_policy() {
             "saved_skill_contents_match":true,"saved_mcp_tools_match":true,
             "native_permission_profile_match":true,"mcp_tool_called":true,
             "delm_gateway_tool_called":true,
+            "metadata_fork_validated":true,"metadata_settings_match":true,
+            "invalid_ephemeral_goal_combination_rejected":true,
+            "native_plugin_initialization_validated":true,
             "host_version":delm::compatibility::host_version(&request.host_executable).await.unwrap(),
             "architecture":std::env::consts::ARCH,
             "native_test_sha256":format!("{:x}", Sha256::digest(include_bytes!("native_inheritance.rs"))),

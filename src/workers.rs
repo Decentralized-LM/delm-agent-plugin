@@ -104,6 +104,33 @@ impl Drop for ProbeDirectory {
     }
 }
 
+/// Resolve settings without persisting a new thread or starting a model turn.
+pub fn metadata_thread_request(
+    project: &Path,
+    overrides: Value,
+    parent: Option<&str>,
+    model: Option<String>,
+    effort: Option<String>,
+) -> (&'static str, Value) {
+    let mut params = json!({"cwd":project,"config":overrides,"ephemeral":true});
+    let method = if let Some(parent) = parent {
+        params["threadId"] = json!(parent);
+        params["excludeTurns"] = json!(true);
+        // Ephemeral forks do not inherit goals. Native Codex rejects deferred
+        // goal continuation here; persistent worker forks retain that option.
+        "thread/fork"
+    } else {
+        "thread/start"
+    };
+    if let Some(model) = model {
+        params["model"] = json!(model);
+    }
+    if let Some(effort) = effort {
+        params["config"]["model_reasoning_effort"] = json!(effort);
+    }
+    (method, params)
+}
+
 /// Read current native hook trust without opening a thread or generating tokens.
 /// A fresh listing does not prove what the parent session already loaded, so it
 /// supplements the invocation handshake and monitoring lease, never replaces them.
@@ -202,8 +229,14 @@ pub async fn stock_request_with_parent_turn(
         seconds,
         policy: json!({}),
     };
+    crate::compatibility::qualify(&request).await.with_context(|| {
+        format!("Installed {version} did not pass DeLM compatibility checks. No model turn was started. Update Codex or DeLM and retry; your Codex installation was not changed")
+    })?;
     let mut rpc = RpcClient::spawn(&request, &probe.0).await?;
+    let mut metadata_thread = None;
+    let resolved: Result<()> = async {
     rpc.initialize().await?;
+    request.auth_settings["plugin_reconciliation"] = rpc.reconcile_plugins().await?;
     let (account, project_config, requirements, hooks) = tokio::try_join!(
         rpc.request("account/read", json!({"refreshToken":false})),
         rpc.request("config/read", json!({"includeLayers":true,"cwd":project})),
@@ -266,25 +299,15 @@ pub async fn stock_request_with_parent_turn(
     } else {
         "native-saved-project-config"
     });
-    let mut fork_params = json!({"cwd":project,"config":project_overrides,"ephemeral":true});
-    let method = if let Some(parent) = &parent {
-        fork_params["threadId"] = json!(parent);
-        fork_params["excludeTurns"] = json!(true);
-        fork_params["deferGoalContinuation"] = json!(true);
-        "thread/fork"
-    } else {
-        "thread/start"
-    };
-    if let Some(model) = model {
-        fork_params["model"] = json!(model);
-    }
-    if let Some(effort) = effort {
-        fork_params["config"]["model_reasoning_effort"] = json!(effort);
-    }
+    let (method, fork_params) = metadata_thread_request(
+        &project, project_overrides, parent.as_deref(), model, effort,
+    );
     let inherited = rpc
         .request(method, fork_params)
         .await
         .context("Codex could not resolve native session settings without starting a model turn")?;
+    metadata_thread = Some(inherited.pointer("/thread/id")
+        .and_then(Value::as_str).context("Codex omitted metadata fork identity")?.to_owned());
     request.model = inherited["model"]
         .as_str()
         .context("Codex omitted inherited model")?
@@ -339,14 +362,40 @@ pub async fn stock_request_with_parent_turn(
         "mcp_servers":request.auth_settings["mcp_manifest"],
         "note":if parent.is_some() { "This host does not export the active parent process configuration. Saved native configuration is preserved; exact live-session parity is not established." } else { "Standalone invocation uses the native saved project configuration; there is no live parent session to compare." }
     });
-    // The metadata fork never receives turn/start and cannot spend model tokens.
-    rpc.request("thread/unsubscribe", json!({"threadId":fork_id}))
-        .await?;
-    rpc.shutdown(&[]).await?;
-    crate::compatibility::qualify(&request).await.with_context(|| {
-        format!("Installed {version} did not pass DeLM compatibility checks. No model turn was started. Update Codex or DeLM and retry; your Codex installation was not changed")
-    })?;
+    Ok(())
+    }.await;
+    close_metadata_host(&mut rpc, metadata_thread.as_deref(), resolved).await?;
     Ok(request)
+}
+
+async fn close_metadata_host(
+    rpc: &mut RpcClient,
+    thread: Option<&str>,
+    resolved: Result<()>,
+) -> Result<()> {
+    let unsubscribe = if let Some(thread) = thread {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            rpc.request("thread/unsubscribe", json!({"threadId":thread})),
+        )
+        .await
+        .context("Metadata unsubscribe timed out")
+        .and_then(|result| result)
+        .map(|_| ())
+    } else {
+        Ok(())
+    };
+    // Run this even after a rejected request or failed unsubscribe. No model
+    // turn is requested in this host, and only its owned process group is closed.
+    let shutdown = rpc.shutdown(&[]).await;
+    let cleanup = unsubscribe.and(shutdown);
+    match (resolved, cleanup) {
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("Metadata cleanup also failed: {cleanup:#}")))
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), cleanup) => cleanup,
+    }
 }
 
 /// Wait only for the host to persist the submitted turn. Hooks can run before
@@ -507,6 +556,10 @@ pub async fn mcp_manifest(rpc: &RpcClient, thread: &str) -> Result<Value> {
 /// deliberately absent from the code snapshot. Ordinary files remain accessed
 /// through native Codex permissions, not a manufactured private HOME.
 pub async fn prepare_worker_capabilities(rpc: &RpcClient, request: &StartRequest) -> Result<()> {
+    // Each native app-server has its own installed-plugin snapshot. Sharing
+    // CODEX_HOME or reloading skills does not await asynchronous bundle loading.
+    // Resolve this host's inventory before creating either worker thread.
+    rpc.reconcile_plugins().await?;
     if let Some(roots) = request.auth_settings["project_skill_roots"]
         .as_array()
         .filter(|roots| !roots.is_empty())
@@ -916,6 +969,30 @@ impl RpcClient {
     pub async fn initialize(&self) -> Result<()> {
         self.request("initialize", json!({"clientInfo":{"name":"delm","title":"DeLM","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
         self.notify("initialized", json!({})).await
+    }
+
+    /// Await native installed-bundle reconciliation before taking a capability
+    /// snapshot. This is not runtime readiness: skill/MCP/hook checks still run.
+    pub async fn reconcile_plugins(&self) -> Result<Value> {
+        let response = tokio::time::timeout(
+            Duration::from_secs(20),
+            self.request("plugin/reconcile", json!({"reason":"delm-startup"})),
+        )
+        .await
+        .context("Codex plugin initialization exceeded 20 seconds; no worker turn was started")??;
+        for field in [
+            "failedRemotePluginIds",
+            "failedMaterializationRemotePluginIds",
+        ] {
+            let failures = response[field].as_array().with_context(|| {
+                format!("Codex omitted plugin initialization evidence: {field}")
+            })?;
+            ensure!(
+                failures.is_empty(),
+                "Codex could not initialize installed plugins ({field}: {failures:?}); no worker turn was started"
+            );
+        }
+        Ok(response)
     }
 
     pub async fn verify_account(&self, request: &StartRequest) -> Result<()> {
@@ -1510,4 +1587,149 @@ pub fn verify_thread_response(
         "Codex omitted native thread identity"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn production_metadata_request_is_accepted_without_model_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let host = root.join("codex");
+        fs::write(&host, include_str!("../tests/fixtures/worker_host.py")).unwrap();
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(host.with_extension("json"), r#"{"mode":"metadata_only"}"#).unwrap();
+        let request: StartRequest = serde_json::from_value(json!({
+            "project":root,"task":"metadata only","model":"fixture",
+            "auth_home":root,"host_executable":host,"policy":{}
+        }))
+        .unwrap();
+        let mut rpc = RpcClient::spawn(&request, &root).await.unwrap();
+        rpc.initialize().await.unwrap();
+        for parent in [None, Some("parent")] {
+            let (method, params) = metadata_thread_request(&root, json!({}), parent, None, None);
+            let result = rpc.request(method, params).await.unwrap();
+            rpc.request(
+                "thread/unsubscribe",
+                json!({"threadId":result["thread"]["id"]}),
+            )
+            .await
+            .unwrap();
+        }
+        rpc.shutdown(&[]).await.unwrap();
+        let wire = fs::read_to_string(host.with_extension("jsonl")).unwrap();
+        for line in wire.lines() {
+            let record: Value = serde_json::from_str(line).unwrap();
+            if record["direction"] == "in" {
+                assert!(
+                    matches!(
+                        record["message"]["method"].as_str(),
+                        Some(
+                            "initialize"
+                                | "initialized"
+                                | "thread/start"
+                                | "thread/fork"
+                                | "thread/unsubscribe"
+                        )
+                    ),
+                    "{record}"
+                );
+            }
+        }
+        assert!(
+            !host.with_extension("state.json").exists(),
+            "metadata must not persist a worker"
+        );
+    }
+    #[tokio::test]
+    async fn metadata_failure_closes_host_even_when_unsubscribe_fails() {
+        for mode in ["metadata_only", "unsubscribe_error"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let host = root.join("codex");
+            fs::write(&host, include_str!("../tests/fixtures/worker_host.py")).unwrap();
+            fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(
+                host.with_extension("json"),
+                json!({"mode":mode}).to_string(),
+            )
+            .unwrap();
+            let request: StartRequest = serde_json::from_value(json!({
+                "project":root,"task":"metadata only","model":"fixture",
+                "auth_home":root,"host_executable":host,"policy":{}
+            }))
+            .unwrap();
+            let mut rpc = RpcClient::spawn(&request, &root).await.unwrap();
+            let identity = crate::supervisor::ProcessIdentity::capture(rpc.pid).unwrap();
+            rpc.initialize().await.unwrap();
+            let (method, params) =
+                metadata_thread_request(&root, json!({}), Some("parent"), None, None);
+            let response = rpc.request(method, params).await.unwrap();
+            let error = close_metadata_host(
+                &mut rpc,
+                response["thread"]["id"].as_str(),
+                Err(anyhow::anyhow!("original metadata discovery failed")),
+            )
+            .await
+            .unwrap_err();
+            let error = format!("{error:#}");
+            assert!(
+                error.contains("original metadata discovery failed"),
+                "{error}"
+            );
+            if mode == "unsubscribe_error" {
+                assert!(error.contains("injected unsubscribe failure"), "{error}");
+            }
+            assert!(
+                !identity.is_running().unwrap(),
+                "metadata host survived failed discovery"
+            );
+            assert!(
+                rpc.child.try_wait().unwrap().is_some(),
+                "metadata host was not reaped"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_reconciliation_requires_complete_native_success() {
+        for outcome in [
+            json!({"changedPlugins":[],"failedRemotePluginIds":[],"failedMaterializationRemotePluginIds":[]}),
+            json!({"changedPlugins":[],"failedRemotePluginIds":["unavailable"],"failedMaterializationRemotePluginIds":[]}),
+            json!({"changedPlugins":[],"failedRemotePluginIds":[],"failedMaterializationRemotePluginIds":["unavailable"]}),
+            json!({}),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let host = root.join("codex");
+            fs::write(&host, include_str!("../tests/fixtures/worker_host.py")).unwrap();
+            fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(host.with_extension("json"), json!({"mode":"metadata_only", "require_plugin_reconciliation":true,"plugin_reconciliation":outcome}).to_string()).unwrap();
+            let request: StartRequest = serde_json::from_value(json!({
+                "project":root,"task":"metadata only","model":"fixture",
+                "auth_home":root,"host_executable":host,"policy":{}
+            }))
+            .unwrap();
+            let mut rpc = RpcClient::spawn(&request, &root).await.unwrap();
+            rpc.initialize().await.unwrap();
+            assert!(
+                rpc.request("skills/list", json!({"cwds":[root],"forceReload":true}))
+                    .await
+                    .is_err(),
+                "forceReload is not plugin readiness"
+            );
+            let result = prepare_worker_capabilities(&rpc, &request).await;
+            let expected = outcome["failedRemotePluginIds"] == json!([])
+                && outcome["failedMaterializationRemotePluginIds"] == json!([]);
+            assert_eq!(result.is_ok(), expected, "{result:?}");
+            if expected {
+                rpc.request("skills/list", json!({"cwds":[root],"forceReload":true}))
+                    .await
+                    .unwrap();
+            }
+            rpc.shutdown(&[]).await.unwrap();
+        }
+    }
 }

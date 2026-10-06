@@ -91,6 +91,7 @@ const CLIENT_METHODS: &[(&str, &[&str])] = &[
     ("thread/unsubscribe", &["threadId"]),
     ("config/read", &["cwd", "includeLayers"]),
     ("configRequirements/read", &[]),
+    ("plugin/reconcile", &["reason"]),
     ("skills/list", &["cwds", "forceReload"]),
     ("hooks/list", &["cwds"]),
     ("skills/extraRoots/set", &["extraRoots"]),

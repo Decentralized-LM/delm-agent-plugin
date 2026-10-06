@@ -26,6 +26,7 @@ if "generate-json-schema" in sys.argv:
         "thread/unsubscribe": ["threadId"],
         "config/read": ["cwd", "includeLayers"],
         "configRequirements/read": [],
+        "plugin/reconcile": ["reason"],
         "skills/list": ["cwds", "forceReload"],
         "hooks/list": ["cwds"],
         "skills/extraRoots/set": ["extraRoots"],
@@ -197,6 +198,7 @@ def create_wake_work():
         }, "wake-created")
 
 
+plugins_reconciled = False
 for line in sys.stdin:
     message = json.loads(line)
     log("in", message)
@@ -217,6 +219,10 @@ for line in sys.stdin:
         send({"id": request_id, "result": {"config": effective_config, "layers": []}})
     elif method == "configRequirements/read":
         send({"id": request_id, "result": {"requirements": None}})
+    elif method == "plugin/reconcile":
+        plugins_reconciled = True
+        send({"id": request_id, "result": config.get("plugin_reconciliation", {
+            "changedPlugins": [], "failedRemotePluginIds": [], "failedMaterializationRemotePluginIds": []})})
     elif method == "hooks/list":
         send({"id": request_id, "result": config.get("hook_listing", {"data": []})})
     elif method == "experimentalFeature/list":
@@ -226,6 +232,9 @@ for line in sys.stdin:
     elif method == "thread/read":
         send({"id": request_id, "result": config.get("parent_history", {"thread":{"id":params["threadId"],"turns":[]}})})
     elif method == "skills/list":
+        if config.get("require_plugin_reconciliation") and not plugins_reconciled:
+            send({"id":request_id,"error":{"code":-32000,"message":"plugin snapshot is not initialized"}})
+            continue
         send({"id": request_id, "result": config.get("skill_listing", {"data":[{"cwd":params.get("cwds", [""])[0], "skills":[], "errors":[]}]})})
     elif method == "skills/extraRoots/set":
         send({"id": request_id, "result": {}})
@@ -240,6 +249,10 @@ for line in sys.stdin:
             (pathlib.Path(environment[key]) / "canary").write_text("probe write\n")
         send({"id": request_id, "result": {"exitCode": 0, "stdout": "delm-isolation-ok\n", "stderr": "", "futureField": True}})
     elif method in ("thread/start", "thread/resume", "thread/fork"):
+        if method == "thread/fork" and params.get("ephemeral") and params.get("deferGoalContinuation"):
+            send({"id": request_id, "error": {"code": -32600,
+                  "message": "`deferGoalContinuation` cannot be combined with `ephemeral`"}})
+            continue
         if params.get("environments") == []:
             send({"id": request_id, "error": {"code": -32602,
                                               "message": "Empty environments disables native filesystem and exec tools"}})
@@ -311,6 +324,9 @@ for line in sys.stdin:
         else:
             status(thread, turn)
     elif method in ("turn/interrupt", "thread/backgroundTerminals/clean", "thread/archive", "thread/unsubscribe"):
+        if method == "thread/unsubscribe" and mode == "unsubscribe_error":
+            send({"id":request_id,"error":{"code":-32000,"message":"injected unsubscribe failure"}})
+            continue
         send({"id": request_id, "result": {}})
     elif method is None and request_id in calls:
         thread, turn, stage = calls.pop(request_id)

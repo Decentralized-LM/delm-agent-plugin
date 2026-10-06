@@ -370,33 +370,37 @@ pub async fn execute(command: Command) -> Result<()> {
             );
             let result = async {
                 let binding = crate::lifecycle::consume_capture(&captured)?;
-                print_event(&Event::new(
-                    "status",
-                    "Starting DeLM with your Codex setup.",
-                ))?;
-                let mut request = crate::workers::stock_request_with_parent_turn(
-                    project,
-                    captured.task.clone(),
-                    String::new(),
-                    None,
-                    None,
-                    crate::config::DEFAULT_RUN_SECONDS,
-                    Some(captured.turn_id.clone()),
-                )
+                let (request, binding) = prepare_startup(Some(binding.clone()), async {
+                    print_event(&Event::new(
+                        "status",
+                        "Starting DeLM with your Codex setup.",
+                    ))?;
+                    let mut request = crate::workers::stock_request_with_parent_turn(
+                        project,
+                        captured.task.clone(),
+                        String::new(),
+                        None,
+                        None,
+                        crate::config::DEFAULT_RUN_SECONDS,
+                        Some(captured.turn_id.clone()),
+                    )
+                    .await?;
+                    if captured.captured_at_ms > 0 {
+                        request.auth_settings["invocation_received_at_ms"] =
+                            json!(captured.captured_at_ms);
+                    }
+                    crate::workers::verify_lifecycle_hooks(&request, &binding).await?;
+                    request
+                        .auth_settings
+                        .as_object_mut()
+                        .context("Missing native settings")?
+                        .remove("startup_hook_listing");
+                    record_own_skill(&mut request, &binding)?;
+                    print_configuration(&request)?;
+                    Ok(request)
+                })
                 .await?;
-                if captured.captured_at_ms > 0 {
-                    request.auth_settings["invocation_received_at_ms"] =
-                        json!(captured.captured_at_ms);
-                }
-                crate::workers::verify_lifecycle_hooks(&request, &binding).await?;
-                request
-                    .auth_settings
-                    .as_object_mut()
-                    .context("Missing native settings")?
-                    .remove("startup_hook_listing");
-                record_own_skill(&mut request, &binding)?;
-                print_configuration(&request)?;
-                run(request, Some(binding)).await
+                run(request, binding).await
             }
             .await;
             if let Err(error) = &result {
@@ -423,51 +427,55 @@ pub async fn execute(command: Command) -> Result<()> {
         } => {
             crate::lifecycle::ensure_not_worker()?;
             let binding = launch_token.as_deref().map(crate::lifecycle::consume_launch).transpose().context("Native launch was not confirmed. Trust DeLM in /hooks and restart Codex before invoking the skill again")?;
-            ensure!(
-                binding.is_some() || std::env::var_os("CODEX_THREAD_ID").is_none(),
-                "DeLM's native launch hook is not active. Review and trust DeLM in /hooks, restart Codex, and invoke $delm:run again. No worker was started."
-            );
-            let task = read_text(&task_file)?;
-            ensure!(!task.trim().is_empty(), "The task is empty");
-            let context = context_file
-                .as_deref()
-                .map(read_text)
-                .transpose()?
-                .unwrap_or_default();
-            let project = project.canonicalize().context("Project is unavailable")?;
-            ensure!(
-                !control_root()?.starts_with(&project),
-                "Select a repository that does not contain DeLM control storage"
-            );
-            print_event(&Event::new(
-                "status",
-                "Checking your Codex account, configuration, and private workspace permissions.",
-            ))?;
-            let mut request = crate::workers::stock_request_with_parent_turn(
-                project,
-                task,
-                context,
-                model,
-                effort,
-                seconds,
-                binding.as_ref().map(|b| b.turn_id.clone()),
-            )
-            .await?;
-            request.attachments = read_inputs(inputs_file.as_deref())?;
-            if let Some(binding) = &binding {
+            let (request, binding) = prepare_startup(binding.clone(), async {
+                ensure!(
+                    binding.is_some() || std::env::var_os("CODEX_THREAD_ID").is_none(),
+                    "DeLM's native launch hook is not active. Review and trust DeLM in /hooks, restart Codex, and invoke $delm:run again. No worker was started."
+                );
+                let task = read_text(&task_file)?;
+                ensure!(!task.trim().is_empty(), "The task is empty");
+                let context = context_file
+                    .as_deref()
+                    .map(read_text)
+                    .transpose()?
+                    .unwrap_or_default();
+                let project = project.canonicalize().context("Project is unavailable")?;
+                ensure!(
+                    !control_root()?.starts_with(&project),
+                    "Select a repository that does not contain DeLM control storage"
+                );
                 print_event(&Event::new(
                     "status",
-                    "Checking native DeLM lifecycle hooks.",
+                    "Checking your Codex account, configuration, and private workspace permissions.",
                 ))?;
-                crate::workers::verify_lifecycle_hooks(&request, binding).await?;
-                request
-                    .auth_settings
-                    .as_object_mut()
-                    .context("Missing native settings")?
-                    .remove("startup_hook_listing");
-                record_own_skill(&mut request, binding)?;
-            }
-            print_configuration(&request)?;
+                let mut request = crate::workers::stock_request_with_parent_turn(
+                    project,
+                    task,
+                    context,
+                    model,
+                    effort,
+                    seconds,
+                    binding.as_ref().map(|b| b.turn_id.clone()),
+                )
+                .await?;
+                request.attachments = read_inputs(inputs_file.as_deref())?;
+                if let Some(binding) = &binding {
+                    print_event(&Event::new(
+                        "status",
+                        "Checking native DeLM lifecycle hooks.",
+                    ))?;
+                    crate::workers::verify_lifecycle_hooks(&request, binding).await?;
+                    request
+                        .auth_settings
+                        .as_object_mut()
+                        .context("Missing native settings")?
+                        .remove("startup_hook_listing");
+                    record_own_skill(&mut request, binding)?;
+                }
+                print_configuration(&request)?;
+                Ok(request)
+            })
+            .await?;
             run(request, binding).await
         }
         Command::Status {
@@ -538,6 +546,56 @@ pub async fn execute(command: Command) -> Result<()> {
                 serde_json::to_string(&control(&run_id, Control::Stop).await?)?
             );
             Ok(())
+        }
+    }
+}
+
+struct StartupBinding(Option<crate::lifecycle::Binding>);
+
+impl StartupBinding {
+    fn finish(&mut self) -> Result<()> {
+        if let Some(binding) = self.0.take() {
+            binding.finish_startup()?;
+        }
+        Ok(())
+    }
+
+    fn register(&mut self, run_id: &str) -> Result<()> {
+        if let Some(binding) = &self.0 {
+            binding.register(run_id)?;
+        }
+        // The registered run now owns shutdown. Keep startup ownership on a
+        // rejected registration so an early return still retires this attempt.
+        self.0.take();
+        Ok(())
+    }
+}
+
+impl Drop for StartupBinding {
+    fn drop(&mut self) {
+        // Dropping a cancelled preflight future must release its registration
+        // just as an ordinary metadata error does. Successful preflight takes
+        // the binding before this guard drops and transfers it to run().
+        if let Err(error) = self.finish() {
+            eprintln!("DeLM could not finish startup ownership: {error:#}");
+        }
+    }
+}
+
+async fn prepare_startup<T>(
+    binding: Option<crate::lifecycle::Binding>,
+    preparation: impl std::future::Future<Output = Result<T>>,
+) -> Result<(T, Option<crate::lifecycle::Binding>)> {
+    let mut startup = StartupBinding(binding);
+    match preparation.await {
+        Ok(request) => Ok((request, startup.0.take())),
+        Err(error) => {
+            if let Err(cleanup) = startup.finish() {
+                return Err(error.context(format!(
+                    "DeLM could not finish startup ownership: {cleanup:#}"
+                )));
+            }
+            Err(error)
         }
     }
 }
@@ -1149,9 +1207,11 @@ async fn run(
     request: crate::protocol::StartRequest,
     binding: Option<crate::lifecycle::Binding>,
 ) -> Result<()> {
+    let mut startup = StartupBinding(binding.clone());
     let _output_guard = NonblockingOutput::new()?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let control_executable = std::env::current_exe()?;
     let (commands, input) = mpsc::channel(64);
     let (output, mut events) = mpsc::unbounded_channel();
     let (cancel, signal) = watch::channel(false);
@@ -1167,7 +1227,7 @@ async fn run(
             status: "preparing".into(),
             request_revision: 1,
             monitoring_lease_seconds: binding.is_none().then_some(MONITOR_LEASE_SECONDS),
-            control_executable: Some(std::env::current_exe()?),
+            control_executable: Some(control_executable),
             ..Default::default()
         },
         expected_revision: 1,
@@ -1230,7 +1290,7 @@ async fn run(
                             }));
                             saved_path = Some(path);
                             monitor.lock().await.snapshot.run_id.clone_from(id);
-                            if let Some(binding) = &binding { binding.register(id)?; }
+                            startup.register(id)?;
                             // Native ownership and the control listener are established
                             // in this operation. No model-driven status call is needed.
                             if let Some(binding) = &binding {
@@ -1514,6 +1574,108 @@ mod tests {
         fn drop(&mut self) {
             crate::lifecycle::tests::cleanup(&self.0);
         }
+    }
+
+    #[tokio::test]
+    async fn startup_error_retires_ownership_and_preserves_native_error() {
+        let native = NativeTest::new();
+        let error = prepare_startup::<()>(Some(native.0.clone()), async {
+            Err(anyhow::anyhow!("native fork rejected").context("metadata probe failed"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "metadata probe failed: native fork rejected"
+        );
+        assert!(native.0.pending_signal().unwrap().is_none());
+        assert!(
+            native
+                .0
+                .register(&uuid::Uuid::new_v4().to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled during preflight")
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_cancellation_retires_its_consumed_invocation() {
+        let native = NativeTest::new();
+        let binding = native.0.clone();
+        let (entered, waiting) = oneshot::channel();
+        let task = tokio::spawn(prepare_startup(Some(binding), async {
+            entered.send(()).unwrap();
+            std::future::pending::<Result<()>>().await
+        }));
+        waiting.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            native
+                .0
+                .register(&uuid::Uuid::new_v4().to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled during preflight")
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_success_preserves_binding_for_the_run_lifecycle() {
+        let native = NativeTest::new();
+        let (value, binding) = prepare_startup(Some(native.0.clone()), async { Ok(42) })
+            .await
+            .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(binding.as_ref(), Some(&native.0));
+        binding
+            .unwrap()
+            .register(&uuid::Uuid::new_v4().to_string())
+            .unwrap();
+    }
+
+    #[test]
+    fn startup_run_guard_transfers_only_after_registration_succeeds() {
+        let failed = NativeTest::new();
+        let mut startup = StartupBinding(Some(failed.0.clone()));
+        assert!(startup.register("invalid-run-id").is_err());
+        drop(startup);
+        assert!(
+            failed
+                .0
+                .register(&uuid::Uuid::new_v4().to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled during preflight")
+        );
+
+        let registered = NativeTest::new();
+        let mut startup = StartupBinding(Some(registered.0.clone()));
+        startup.register(&uuid::Uuid::new_v4().to_string()).unwrap();
+        drop(startup);
+        registered.0.ensure_admissible().unwrap();
+        registered.0.unregister().unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_cleanup_failure_keeps_original_error_and_other_owner() {
+        let native = NativeTest::new();
+        let mut wrong_owner = native.0.clone();
+        wrong_owner.owner.pid += 1;
+        let error = prepare_startup::<()>(Some(wrong_owner), async {
+            Err(anyhow::anyhow!("native metadata error"))
+        })
+        .await
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("Only the owning startup process"));
+        assert!(message.contains("native metadata error"));
+        // The real owner still has an admissible registration.
+        native
+            .0
+            .register(&uuid::Uuid::new_v4().to_string())
+            .unwrap();
     }
 
     async fn status_reply(

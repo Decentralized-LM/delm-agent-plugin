@@ -83,7 +83,7 @@ impl Fixture {
         fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(
             host.with_extension("json"),
-            json!({"mode":mode}).to_string(),
+            json!({"mode":mode,"require_plugin_reconciliation":true}).to_string(),
         )
         .unwrap();
         fs::write(
@@ -381,7 +381,12 @@ fn missing_capability_stops_before_task_workers() {
         );
         assert!(fixture.requests("thread/start").is_empty());
         assert!(fixture.requests("turn/start").is_empty());
-        fixture.assert_preserved_and_stopped();
+        // Protocol qualification now precedes even the metadata app-server.
+        assert!(
+            fixture.wire().is_empty(),
+            "an incompatible host was started"
+        );
+        assert_eq!(snapshot(&fixture.project), fixture.before);
     }
 }
 

@@ -986,6 +986,37 @@ impl Binding {
         }
         Ok(())
     }
+
+    /// Retire a consumed invocation that failed before a run was registered.
+    /// A delayed startup finalizer must never finish a replacement invocation
+    /// or take over the existing run's shutdown path.
+    pub(crate) fn finish_startup(&self) -> Result<()> {
+        let Some(root) = root(false)? else {
+            return Ok(());
+        };
+        let _lock = lock(&root, &self.session_id)?;
+        let path = session_path(&root, &self.session_id);
+        if !path.try_exists()? {
+            return Ok(());
+        }
+        let mut current: Registration = read_private(&path)?;
+        if current.binding.invocation_id != self.invocation_id
+            || current.finished
+            || current.run_id.is_some()
+        {
+            return Ok(());
+        }
+        ensure!(
+            current.binding.session_id == self.session_id
+                && current.binding.owner == self.owner
+                && current.consumed
+                && current.runtime == Some(ProcessIdentity::capture(std::process::id())?),
+            "Only the owning startup process may finish this native invocation"
+        );
+        current.finished = true;
+        current.pending = None;
+        write_private(&path, &current)
+    }
 }
 
 /// This validates native discovery, not an active session's cached hook engine.
@@ -1162,6 +1193,90 @@ pub(crate) mod tests {
             Some(CaptureLaunch::Pending)
         ));
         assert!(capture_run_id(&capture).unwrap().is_none());
+    }
+
+    #[test]
+    fn startup_finish_releases_failed_invocation_for_chat_and_fresh_launch() {
+        let mut fixture = CaptureFixture::new();
+        let capture = fixture.submit().launch.unwrap();
+        let binding = consume_capture(&capture).unwrap();
+        prepare_hook(
+            input("Stop", &fixture.session, &fixture.turn),
+            &fixture.executable,
+        )
+        .unwrap();
+        assert!(binding.pending_signal().unwrap().is_some());
+        binding.finish_startup().unwrap();
+
+        let root = root(false).unwrap().unwrap();
+        let record: Registration = read_private(&session_path(&root, &fixture.session)).unwrap();
+        assert!(record.finished);
+        assert!(record.pending.is_none() && record.run_id.is_none());
+        let ordinary_turn = uuid::Uuid::new_v4().to_string();
+        let ordinary = prepare_hook(
+            input("UserPromptSubmit", &fixture.session, &ordinary_turn),
+            &fixture.executable,
+        )
+        .unwrap();
+        assert!(
+            ordinary.output.is_none() && ordinary.launch.is_none() && ordinary.delivery.is_none()
+        );
+
+        // The failed runtime is still this live test process. Explicit startup
+        // completion, rather than waiting for its death, permits the new turn.
+        fixture.turn = uuid::Uuid::new_v4().to_string();
+        let fresh = fixture.submit().launch.unwrap();
+        assert_ne!(fresh.invocation_id, capture.invocation_id);
+        assert!(consume_capture(&fresh).is_ok());
+    }
+
+    #[test]
+    fn startup_finish_cannot_retire_a_concurrent_replacement() {
+        let mut fixture = CaptureFixture::new();
+        let capture = fixture.submit().launch.unwrap();
+        let binding = consume_capture(&capture).unwrap();
+        binding.finish_startup().unwrap();
+        fixture.turn = uuid::Uuid::new_v4().to_string();
+        let fresh = std::thread::scope(|scope| {
+            let stale = scope.spawn(|| {
+                for _ in 0..8 {
+                    binding.finish_startup().unwrap();
+                }
+            });
+            let fresh = fixture.submit().launch.unwrap();
+            consume_capture(&fresh).unwrap();
+            stale.join().unwrap();
+            fresh
+        });
+        binding.finish_startup().unwrap();
+        let root = root(false).unwrap().unwrap();
+        let record: Registration = read_private(&session_path(&root, &fixture.session)).unwrap();
+        assert_eq!(record.binding.invocation_id, fresh.invocation_id);
+        assert!(record.consumed && !record.finished);
+    }
+
+    #[test]
+    fn startup_finish_requires_its_runtime_and_preserves_registered_run() {
+        let fixture = CaptureFixture::new();
+        let capture = fixture.submit().launch.unwrap();
+        let binding = consume_capture(&capture).unwrap();
+        let root = root(false).unwrap().unwrap();
+        let path = session_path(&root, &fixture.session);
+        let mut record: Registration = read_private(&path).unwrap();
+        let own_runtime = record.runtime;
+        record.runtime = Some(binding.owner);
+        write_private(&path, &record).unwrap();
+        assert!(binding.finish_startup().is_err());
+        assert!(!read_private::<Registration>(&path).unwrap().finished);
+
+        record.runtime = own_runtime;
+        write_private(&path, &record).unwrap();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        binding.register(&run_id).unwrap();
+        binding.finish_startup().unwrap();
+        let record: Registration = read_private(&path).unwrap();
+        assert_eq!(record.run_id.as_deref(), Some(run_id.as_str()));
+        assert!(!record.finished);
     }
 
     #[test]

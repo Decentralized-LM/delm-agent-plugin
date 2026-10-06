@@ -44,7 +44,7 @@ The native manager reads this local package in place. To load source changes, st
 
 This runs Rust formatting, linting, and tests; Python packaging and qualification-helper tests; installer tests; and Claude module tests. The deterministic suites cover task ownership, publication/import checks, shared verification, service ownership, guarded original-project delivery, recovery, and cleanup.
 
-CI tests the qualified Codex and Claude versions on native Apple Silicon and Intel runners, and their latest versions together on Apple Silicon. Host upgrades must pass the same model-free checks. The latest-version job detects compatibility changes; it does not establish support before it passes.
+CI tests the configured Codex and Claude versions on native Apple Silicon and Intel runners, and their latest versions together on Apple Silicon. Host upgrades must pass the same model-free checks, including the production Codex invocation below. A passing schema or installation check alone does not establish working startup. Support applies to the exact host version, architecture, source, and runtime covered by passing evidence; a latest-version job does not establish support before it passes.
 
 Run the relevant native boundary checks when changing installation, inheritance, or lifecycle behavior:
 
@@ -57,7 +57,18 @@ node --test examples/task-board/task.test.mjs
 
 The installer commands exercise Codex and Claude Code respectively, using disposable host configurations and local repositories. They do not use an account or start model turns. The task-board example is a separate, model-free fixture.
 
-The Codex native inheritance check creates metadata-only parent and forked sessions in disposable storage, compares a project skill and local documentation MCP, calls that local tool, and verifies the returned native permission settings. It starts no model turn and opens no browser. This establishes the tested saved-configuration path, not exact parity with every override and live connection in an existing user session.
+The Codex native inheritance check first exercises the production ephemeral metadata-fork builder against the installed host. It checks the inherited settings, verifies that no turn was created, and checks the host's rejection of deferred goal continuation on an ephemeral fork. It then creates the persistent worker fork, compares a project skill and local documentation MCP, calls that local tool, and verifies the returned native permission settings. It starts no model turn and opens no browser. This establishes the tested saved-configuration path, not exact parity with every override and live connection in an existing user session.
+
+Run the complete production invocation with a local scripted provider when changing Codex launch behavior:
+
+```sh
+python3 scripts/verify_codex_startup.py --case scripted --runtime target/debug/delm --out .validation/codex-startup/scripted
+python3 scripts/verify_codex_startup.py --case failure --runtime target/debug/delm --out .validation/codex-startup/failure
+```
+
+Both cases install the actual package in disposable storage and submit `$delm:run` through the real Codex terminal. The scripted provider replaces model responses; the plugin, metadata lookup, two native worker forks, coordination tools, delivery, and cleanup use production code. The success case checks delivery into the original disposable project. The failure case checks an explicit native provider failure and a subsequent ordinary prompt in the same conversation. Each invocation includes cleanup within a 60-second limit, uses no account or remote model, and retains its evidence. Native lifecycle fixtures remain separate ownership checks.
+
+Production startup synchronizes Codex's native plugin bundles before reading the source configuration and inventories, and before preparing worker forks. Reconciliation establishes completion of bundle initialization, not tool readiness. Required reconciliation errors fail startup; the existing skill and MCP comparisons still check the resulting worker capabilities.
 
 The [Codex native lifecycle fixtures](native-lifecycle-qualification.md) cover interruption, startup cancellation, parent completion, owner-process death, and plugin removal. Their scripted provider does not call a real model. Claude's module and controller tests cover its native event routing and lifecycle contract; the account-backed fixture below separately exercises real forks and collaboration. Run native checks from a terminal that permits local sockets and nested native processes.
 
@@ -82,6 +93,17 @@ Release architecture, signing, and publication requirements are documented in [r
 ## Optional real-task qualification
 
 ### Codex
+
+For a bounded account-backed startup check, use:
+
+```sh
+python3 scripts/verify_codex_startup.py --case live \
+  --out .validation/codex-startup-live \
+  --auth-home "${CODEX_HOME:-$HOME/.codex}" \
+  --runtime target/debug/delm
+```
+
+This explicitly uses `gpt-6-astra` at medium effort for one small file task, with the same 60-second total limit. It requires authorization to use the existing account and removes its temporary login reference after confirming that its recorded native processes have stopped. A timeout or startup failure is a failed check; it does not justify extending the deadline or reporting the task complete. This smoke check does not measure application quality or parallel speedup.
 
 Only run this when real account use has been authorized. Supply a small task beginning with `$delm:run `:
 

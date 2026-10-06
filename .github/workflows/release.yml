@@ -82,7 +82,7 @@ jobs:
       - name: Install build and qualification tools
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
-          npm install --global @openai/codex@0.160.0 @anthropic-ai/claude-code@2.1.289
+          npm install --global @openai/codex@0.160.1 @anthropic-ai/claude-code@2.1.289
       - name: Verify source, native installation, and release packaging
         run: ./scripts/verify.sh
       - name: Build and test release binaries on the native architecture
@@ -98,6 +98,10 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/qualification"
           DELM_TEST_HOST="$(command -v codex)" DELM_TEST_EVIDENCE="$RUNNER_TEMP/qualification/inheritance.json" cargo test --locked --release --target "$BUILD_TARGET" --test native_inheritance -- --ignored
+          python3 -B scripts/test_verify_codex_startup.py
+          for scenario in scripted failure; do
+            python3 -B scripts/verify_codex_startup.py --runtime "target/$BUILD_TARGET/release/delm" --case "$scenario" --out "$RUNNER_TEMP/qualification/startup/$scenario"
+          done
           for scenario in interrupt preflight stop owner-death plugin-remove; do
             python3 scripts/verify_native_lifecycle.py --fixture "target/$BUILD_TARGET/release/examples/native-lifecycle-fixture" --case "$scenario" --out "$RUNNER_TEMP/qualification/$scenario"
           done
@@ -106,7 +110,7 @@ jobs:
           python3 scripts/qualify_release.py smoke --runtime "target/$BUILD_TARGET/release/delm" --architecture "$BUILD_ARCHITECTURE" --out "$RUNNER_TEMP/qualification/smoke"
           mkdir runtime-artifact
           cp "target/$BUILD_TARGET/release/delm" runtime-artifact/delm
-          python3 scripts/qualify_release.py record --runtime runtime-artifact/delm --target "$BUILD_TARGET" --smoke "$RUNNER_TEMP/qualification/smoke/result.json" --inheritance "$RUNNER_TEMP/qualification/inheritance.json" --lifecycle-root "$RUNNER_TEMP/qualification" --out runtime-artifact/qualification.json
+          python3 scripts/qualify_release.py record --runtime runtime-artifact/delm --target "$BUILD_TARGET" --smoke "$RUNNER_TEMP/qualification/smoke/result.json" --inheritance "$RUNNER_TEMP/qualification/inheritance.json" --lifecycle-root "$RUNNER_TEMP/qualification" --startup-root "$RUNNER_TEMP/qualification/startup" --out runtime-artifact/qualification.json
           tar -cf runtime.tar -C runtime-artifact .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

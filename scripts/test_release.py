@@ -56,13 +56,32 @@ def qualifications(root, source, runtime, revision):
             "runtimeSha256": fingerprint(runtime)["sha256"], "passed": True,
             "modelCalls": 0, "lifecycleCases": package_release.LIFECYCLE_CASES,
             "codexVersion": "fixture 1", "exactLiveSessionParity": False,
-            "evidenceSha256": {name: "a" * 64 for name in ["smoke", "inheritance", *package_release.LIFECYCLE_CASES]},
+            "evidenceSha256": {name: "a" * 64 for name in ["smoke", "inheritance", *package_release.LIFECYCLE_CASES,
+                *("startup-" + case for case in package_release.CODEX_STARTUP_CASES)]},
             "nativeInheritance": {
                 "runtimeSha256": fingerprint(runtime)["sha256"], "architecture": architecture,
                 "hostVersion": "fixture 1", "gatewayToolCalled": True,
+                "metadataForkValidated": True, "metadataSettingsMatch": True,
+                "invalidEphemeralGoalCombinationRejected": True,
+                "nativePluginInitializationValidated": True,
                 "parentCliOverridesNotExported": True, "exactLiveSessionParity": False,
                 "nativeTestSha256": "b" * 64, "sourceDigest": "c" * 64,
             },
+            "nativeStartup": {case: {
+                "case": case, "passed": True, "runtimeSha256": fingerprint(runtime)["sha256"],
+                "hostVersion": "fixture 1", "architecture": architecture, "modelCalls": 0,
+                "model": "gpt-6-astra", "effort": "medium",
+                "workerCount": 2, "workerForksStarted": 2, "elapsedSeconds": 12.5,
+                "sourceDigest": "d" * 64, "harnessSha256": "e" * 64, "packagePayloadSha256": "f" * 64,
+                "nativeInvocation": True, "resultDelivered": case == "scripted",
+                "deliveryCleanupComplete": case == "scripted",
+                "installedPackageMatches": True, "nativeHostMatches": True, "originalGitPreserved": True,
+                "exactResult": case == "scripted", "nativeCheckPassed": case == "scripted",
+                "sharedPublicationObserved": case == "scripted", "completionObserved": case == "scripted",
+                "workspacesRemoved": True, "ownedProcessesStopped": True, "authLinkRemoved": True,
+                "explicitFailure": case == "failure", "ordinaryConversationUsable": True, "ordinaryResponseRendered": True,
+                "originalPreserved": True,
+            } for case in package_release.CODEX_STARTUP_CASES},
         })
         result.append(path)
     return result
@@ -255,6 +274,9 @@ class ReleaseTests(unittest.TestCase):
                 "saved_skill_contents_match": True, "saved_mcp_tools_match": True,
                 "native_permission_profile_match": True, "mcp_tool_called": True,
                 "delm_gateway_tool_called": True, "parent_cli_overrides_not_exported": True,
+                "metadata_fork_validated": True, "metadata_settings_match": True,
+                "invalid_ephemeral_goal_combination_rejected": True,
+                "native_plugin_initialization_validated": True,
                 "exact_live_session_parity": False, "runtime_sha256": "a" * 64,
                 "host_version": "codex fixture", "architecture": "aarch64",
                 "native_test_sha256": fingerprint(source / "tests/native_inheritance.rs")["sha256"],
@@ -266,7 +288,10 @@ class ReleaseTests(unittest.TestCase):
             for key, value in [("runtime_sha256", "b" * 64), ("architecture", "x86_64"),
                                ("host_version", "different"), ("native_test_sha256", "c" * 64),
                                ("source_digest", "d" * 64), ("exact_live_session_parity", True),
-                               ("delm_gateway_tool_called", False)]:
+                               ("delm_gateway_tool_called", False), ("metadata_fork_validated", False),
+                               ("metadata_settings_match", False),
+                               ("invalid_ephemeral_goal_combination_rejected", False),
+                               ("native_plugin_initialization_validated", False)]:
                 with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "inheritance evidence"):
                     qualify_release.validate_inheritance(dict(proof, **{key: value}), source,
                                                          "a" * 64, "arm64", "codex fixture")
@@ -286,7 +311,90 @@ class ReleaseTests(unittest.TestCase):
                 incomplete["qualification"]["arm64"].pop(key)
                 with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "native release qualification"):
                     package_release.verify_qualification(incomplete)
+            for key in ["metadataForkValidated", "metadataSettingsMatch",
+                        "invalidEphemeralGoalCombinationRejected", "nativePluginInitializationValidated"]:
+                incomplete = json.loads(json.dumps(metadata))
+                incomplete["qualification"]["arm64"]["nativeInheritance"].pop(key)
+                with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "native release qualification"):
+                    package_release.verify_qualification(incomplete)
 
+    def test_package_qualification_requires_both_production_startup_outcomes(self):
+        with fixture() as (root, source, runtime, revision):
+            records = qualifications(root, source, runtime, revision)
+            metadata = {"sourceRevision": revision, **package_release.source_state(source),
+                        "qualification": {json.loads(path.read_text())["architecture"]:
+                                          json.loads(path.read_text()) for path in records}}
+            for case in package_release.CODEX_STARTUP_CASES:
+                incomplete = json.loads(json.dumps(metadata))
+                incomplete["qualification"]["arm64"]["nativeStartup"].pop(case)
+                with self.subTest(case=case), self.assertRaisesRegex(RuntimeError, "production startup qualification"):
+                    package_release.verify_qualification(incomplete)
+                for key, value in [("passed", False), ("modelCalls", 1), ("workerCount", 1),
+                                   ("workerForksStarted", 1), ("runtimeSha256", "0" * 64),
+                                   ("hostVersion", "different"), ("architecture", "x86_64"),
+                                   ("model", "different"), ("effort", "high"), ("nativeHostMatches", False),
+                                   ("nativeInvocation", False), ("workspacesRemoved", False),
+                                   ("installedPackageMatches", False), ("originalGitPreserved", False),
+                                   ("ownedProcessesStopped", False), ("authLinkRemoved", False),
+                                   ("elapsedSeconds", 60), ("elapsedSeconds", float("nan")),
+                                   ("sourceDigest", ""), ("harnessSha256", ""), ("packagePayloadSha256", "")]:
+                    changed = json.loads(json.dumps(metadata))
+                    changed["qualification"]["arm64"]["nativeStartup"][case][key] = value
+                    with self.subTest(case=case, key=key, value=value), \
+                         self.assertRaisesRegex(RuntimeError, "production startup qualification"):
+                        package_release.verify_qualification(changed)
+            for key in ["explicitFailure", "ordinaryConversationUsable", "ordinaryResponseRendered", "originalPreserved"]:
+                changed = json.loads(json.dumps(metadata))
+                changed["qualification"]["arm64"]["nativeStartup"]["failure"][key] = False
+                with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "production startup qualification"):
+                    package_release.verify_qualification(changed)
+            for key in ["resultDelivered", "deliveryCleanupComplete", "exactResult", "nativeCheckPassed", "sharedPublicationObserved", "completionObserved"]:
+                changed = json.loads(json.dumps(metadata))
+                changed["qualification"]["arm64"]["nativeStartup"]["scripted"][key] = False
+                with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "production startup qualification"):
+                    package_release.verify_qualification(changed)
+
+    def test_production_startup_proof_rejects_stale_source_payload_and_incomplete_outcomes(self):
+        from verify_codex_startup import startup_source_digest
+
+        with fixture() as (_, source, runtime, _):
+            for name in ["verify_codex_startup.py", "verify_fresh_install.py", "verify_native_lifecycle.py"]:
+                shutil.copy2(package_release.SOURCE / "scripts" / name, source / "scripts" / name)
+            for case in package_release.CODEX_STARTUP_CASES:
+                proof = {"kind": "native-codex-startup", "schema_version": 1, "case": case,
+                         "passed": True, "runtime_sha256": fingerprint(runtime)["sha256"],
+                         "host_version": "codex fixture", "architecture": "aarch64", "model_calls": 0,
+                         "model": "gpt-6-astra", "effort": "medium",
+                         "worker_count": 2, "worker_forks_started": 2, "elapsed_seconds": 12.5,
+                         "source_digest": startup_source_digest(source),
+                         "harness_sha256": fingerprint(source / "scripts/verify_codex_startup.py")["sha256"],
+                         "package_payload_sha256": qualify_release.codex_payload_digest(source),
+                         "native_invocation": True, "installed_package_matches": True,
+                         "native_host_matches": True,
+                         "original_git_preserved": True, "workspaces_removed": True,
+                         "owned_processes_stopped": True, "auth_link_removed": True, "cleanup_errors": [],
+                         "result_delivered": case == "scripted", "exact_result": case == "scripted",
+                         "delivery_cleanup_complete": case == "scripted",
+                         "native_check_passed": case == "scripted", "shared_publication_observed": case == "scripted",
+                         "completion_observed": case == "scripted", "explicit_failure": case == "failure",
+                         "ordinary_conversation_usable": True, "original_unchanged": case == "failure",
+                         "ordinary_response_rendered": True,
+                         "run_id": "private-run", "project": "/private/project"}
+                runtime_hash = fingerprint(runtime)["sha256"]
+                checked = qualify_release.validate_startup(proof, source, runtime_hash, "arm64", "codex fixture", case)
+                self.assertNotIn("private", json.dumps(checked))
+                for key, value in [("case", "live"), ("cleanup_errors", ["failed"]), ("passed", False),
+                                   ("runtime_sha256", "b" * 64), ("host_version", "different"),
+                                   ("architecture", "x86_64"), ("source_digest", "c" * 64),
+                                   ("harness_sha256", "d" * 64), ("package_payload_sha256", "e" * 64),
+                                   ("elapsed_seconds", 60), ("model_calls", 1), ("worker_forks_started", 1),
+                                   ("owned_processes_stopped", False), ("auth_link_removed", False)]:
+                    with self.subTest(case=case, key=key), self.assertRaisesRegex(RuntimeError, "startup evidence"):
+                        qualify_release.validate_startup(dict(proof, **{key: value}), source, runtime_hash,
+                                                         "arm64", "codex fixture", case)
+            (source / "src/workers.rs").write_text("changed runtime source")
+            with self.assertRaisesRegex(RuntimeError, "startup evidence"):
+                qualify_release.validate_startup(proof, source, runtime_hash, "arm64", "codex fixture", case)
     def test_untracked_installer_inputs_mark_source_dirty(self):
         with fixture() as (_, source, _, _):
             self.assertFalse(package_release.source_state(source)["sourceDirty"])
@@ -435,6 +543,8 @@ class ReleaseTests(unittest.TestCase):
             record = json.loads(records[1].read_text())
             record["runtimeSha256"] = "0" * 64
             record["nativeInheritance"]["runtimeSha256"] = "0" * 64
+            for proof in record["nativeStartup"].values():
+                proof["runtimeSha256"] = "0" * 64
             package_release.write_json(records[1], record)
             with self.assertRaisesRegex(RuntimeError, "differs from the tested binary"):
                 package_release.assemble(source, runtime, root / "mismatch", "example/delm", revision,
