@@ -13,6 +13,20 @@ fn fixture() -> (TempDir, PathBuf) {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn fresh_empty_repository_capture_keeps_admin_identities_stable() {
+    for count in 2..=4 {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        git_command(&project, &["init", "--quiet", "--template="]);
+        let prepared =
+            prepare_with_workers(&project, &temp.path().join("run"), u64::MAX, count).unwrap();
+        assert_eq!(prepared.workers.len(), count);
+    }
+}
+
+#[test]
 fn invalid_worker_count_is_rejected_before_project_or_run_changes() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("new-project");
@@ -278,6 +292,56 @@ fn cached_baseline_inventory_rejects_file_replacement() {
     .unwrap_err();
     assert!(error.to_string().contains("source changed before clone"));
     assert!(!destination.join("file").exists());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn document_tracking_transition_revalidates_contents_before_clone() {
+    for changed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let path = source.join("file");
+        fs::write(&path, "original").unwrap();
+        let file = fs::File::open(&path).unwrap();
+        assert_eq!(unsafe { libc::fchflags(file.as_raw_fd(), 0) }, 0);
+        let original_times = file.metadata().unwrap();
+        let root = open_dir(&source).unwrap();
+        let captured = inventory(&root, u64::MAX, deadline(), true).unwrap();
+        if changed {
+            // Same inode, size, mode and mtime: the tracking exception must
+            // still notice different contents, not just trust stat fields.
+            fs::write(&path, "modified").unwrap();
+            file.set_times(fs::FileTimes::new().set_modified(original_times.modified().unwrap()))
+                .unwrap();
+        }
+        assert_eq!(
+            unsafe { libc::fchflags(file.as_raw_fd(), libc::UF_TRACKED) },
+            0
+        );
+        let result = clone_selected(
+            &root,
+            &destination,
+            &captured,
+            &BTreeSet::from(["file".into()]),
+            deadline(),
+        );
+        if changed {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("source changed before clone")
+            );
+            assert!(!destination.join("file").exists());
+        } else {
+            result.unwrap();
+            assert_eq!(fs::read(destination.join("file")).unwrap(), b"original");
+            assert_eq!(manifest(&destination).unwrap().files["file"].flags, 0);
+        }
+    }
 }
 
 #[test]

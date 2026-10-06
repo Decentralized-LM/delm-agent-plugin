@@ -89,6 +89,9 @@ impl PreparedWorkspace {
     }
 }
 
+// Darwin sys/stat.h: UF_TRACKED marks filesystem document-ID bookkeeping.
+const DOCUMENT_TRACKING_FLAG: u32 = 0x40;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Identity {
     dev: u64,
@@ -103,6 +106,19 @@ struct Identity {
     flags: u32,
 }
 impl Identity {
+    /// Darwin can attach document IDs asynchronously under Documents. Only
+    /// this bookkeeping flag may explain a ctime change; callers must still
+    /// revalidate all captured contents and semantic metadata.
+    fn tracking_transition(&self, actual: &Self) -> bool {
+        if self.flags ^ actual.flags != DOCUMENT_TRACKING_FLAG {
+            return false;
+        }
+        let mut normalized = actual.clone();
+        normalized.flags = self.flags;
+        normalized.ctime = self.ctime;
+        normalized == *self
+    }
+
     fn read(file: &File) -> Result<Self> {
         let m = file.metadata()?;
         ensure!(
@@ -468,7 +484,9 @@ fn inspect(
         xattrs_sha256: format!("{:x}", attr_hash.finalize()),
         xattrs_bytes: bytes - before.size,
         acl_sha256: acl_digest(file)?,
-        flags: before.flags,
+        // UF_TRACKED belongs to the filesystem's document identity, not the
+        // contents or permissions of an independently cloned file.
+        flags: before.flags & !DOCUMENT_TRACKING_FLAG,
     };
     ensure!(
         before == Identity::read(file)?,

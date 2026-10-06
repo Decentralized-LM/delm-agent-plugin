@@ -629,6 +629,29 @@ fn validate_input_format(root: &File, path: &str, entry: &FileEntry) -> Result<(
     Ok(())
 }
 
+fn verify_clone_source(
+    file: &File,
+    expected: &Identity,
+    entry: &FileEntry,
+    until: Instant,
+) -> Result<()> {
+    let actual = Identity::read(file)?;
+    if actual == *expected {
+        return Ok(());
+    }
+    ensure!(
+        expected.tracking_transition(&actual),
+        "source identity changed; expected {expected:?}, observed {actual:?}"
+    );
+    let (checked, contents, _) =
+        inspect(file, entry.kind.clone(), entry.link_target.clone(), until)?;
+    ensure!(
+        checked == actual && contents == *entry,
+        "source contents or metadata changed with document tracking"
+    );
+    Ok(())
+}
+
 fn clone_selected(
     source: &File,
     destination: &Path,
@@ -669,15 +692,13 @@ fn clone_selected(
         };
         if entry.kind == FileKind::File {
             let file = open_relative(source, relative, false)?;
-            ensure!(
-                Identity::read(&file)? == *expected,
-                "source changed before clone: {relative}"
-            );
+            verify_clone_source(&file, expected, entry, until)
+                .with_context(|| format!("source changed before clone: {relative}"))?;
             clone_file_to_dir(&file, &parent, parts.last().unwrap())?;
-            ensure!(
-                Identity::read(&file)? == *expected,
-                "source changed during clone: {relative}"
-            );
+            // Reinspection uses an independent descriptor offset.
+            let file = open_relative(source, relative, false)?;
+            verify_clone_source(&file, expected, entry, until)
+                .with_context(|| format!("source changed during clone: {relative}"))?;
         } else {
             let source_parent = if parts.len() == 1 {
                 source.try_clone()?

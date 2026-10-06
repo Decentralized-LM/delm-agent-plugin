@@ -22,6 +22,8 @@ If the menu does not appear, check that both the command and MCP-tool UserPrompt
 
 Workers fork the parent conversation and preserve ordinary saved skills, plugins, hooks, MCP configuration, native permissions, and process environment. DeLM adds its coordination tools and prevents its own hooks from recursively launching another team. It does not substitute a stripped-down Codex setup or require a special private browser installation.
 
+Confirming a DeLM run authorizes its internal collaboration. Each worker's private coordination connection approves the exact DeLM board and service-bookkeeping tools, so exchanging tasks and contributions does not repeatedly ask for approval. Native commands, file edits, and unrelated MCP tools retain their inherited permission handling. These grants are per-run; DeLM does not write them into your saved Codex configuration.
+
 Skill contents and MCP inventories are checked rather than assuming equal names mean equal capabilities. The runtime records the inherited model, reasoning effort, and service tier. Explicit requested overrides are separate from ordinary inheritance.
 
 **Exact live-session parity is not met yet.** A native fixture demonstrates that a parent-process CLI override is absent from a separate fork host. The host API also does not expose every live tool connection or instruction-provider state. The runtime reports these gaps. Saved configuration and a native conversation fork do not establish that those live resources are identical. Do not describe a comparison as fully matched until its capability evidence establishes that.

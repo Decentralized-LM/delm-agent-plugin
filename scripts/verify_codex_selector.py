@@ -6,7 +6,8 @@ refusal; --case normal checks ordinary conversation against a loopback scripted
 provider. --case worker verifies nested-worker suppression. --case positive
 checks real native forks and inherited environment with scripted responses only.
 --case live explicitly uses the existing account for one tiny task.
-Every invocation has a 60-second hard ceiling, including owned-process cleanup.
+The default ceiling is 60 seconds, including owned-process cleanup. Explicit
+real-model qualification can use --timeout-seconds up to 180.
 Raw terminal output is evidence from real Codex, not a UI mock.
 """
 import argparse
@@ -24,6 +25,7 @@ import re
 import select
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import termios
@@ -104,6 +106,17 @@ def stop_process_group(process, remaining):
                 raise
 
 
+def wait_for_owned_shutdown(runs, project, deadline):
+    """Let the runtime acknowledge native shutdown before forcing its children."""
+    while True:
+        identities = owned_identities(runs, project)
+        if all(not identity_running(item) for item in identities):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(.05)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, required=True)
@@ -112,7 +125,10 @@ def main():
     parser.add_argument('--case', choices=['cancel', 'never', 'normal', 'worker', 'positive', 'live'], default='cancel')
     parser.add_argument('--agents', type=int, choices=[2, 3, 4], default=2)
     parser.add_argument('--auth-home', type=Path)
+    parser.add_argument('--timeout-seconds', type=int, default=60)
     args = parser.parse_args()
+    if not 60 <= args.timeout_seconds <= 180 or (args.case != 'live' and args.timeout_seconds != 60):
+        parser.error('Timeout must be 60 seconds, or 60..180 for an explicitly authorized live test')
     if not args.codex or not args.runtime.is_file():
         parser.error('Installed Codex and a built --runtime are required')
     if args.case == 'live' and (not args.auth_home or not (args.auth_home / 'auth.json').is_file()):
@@ -128,7 +144,9 @@ def main():
     requests, raw, clients = [], bytearray(), []
     provider_stop = threading.Event()
     worker_tools_observed = set()
+    worker_coordination_observed = set()
     scripted_turns = {}
+    status_revisions = {}
     child = provider = master = None
     started = time.monotonic()
     evidence = {'case': args.case, 'agents': args.agents, 'host_version': subprocess.check_output(
@@ -143,10 +161,10 @@ def main():
     if args.case == 'worker':
         environment['DELM_WORKER_SESSION'] = '1'
     def hard_deadline(_signum, _frame):
-        raise TimeoutError('Native selector qualification stopped work to preserve its 60-second total budget')
+        raise TimeoutError('Native selector qualification stopped work to preserve its total budget')
     signal.signal(signal.SIGALRM, hard_deadline)
     # Reserve ten seconds for bounded cleanup even if setup blocks.
-    signal.setitimer(signal.ITIMER_REAL, 50)
+    signal.setitimer(signal.ITIMER_REAL, args.timeout_seconds - 10)
     try:
         subprocess.run(['/usr/bin/git', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
                         'init', '-q', '--template=', str(project)], env=dict(environment,
@@ -174,6 +192,10 @@ def main():
                         for item in payload.get('input', []) if isinstance(item, dict))
                     if worker and observed:
                         worker_tools_observed.add(worker)
+                    if worker and any(item.get('type') in ['function_call_output', 'custom_tool_call_output']
+                            and all(key in str(item.get('output', '')) for key in ['recent_commands', 'request_revision', 'workers'])
+                            for item in payload.get('input', []) if isinstance(item, dict)):
+                        worker_coordination_observed.add(worker)
                     requests.append({'at_seconds': time.monotonic() - started,
                                      'path': self.path, 'request_bytes': len(body), 'worker': worker,
                                      'model': payload.get('model'),
@@ -200,6 +222,11 @@ def main():
                             events.append({'type':'response.output_item.done','item':{'type':'function_call',
                                 'call_id':f'fixture-native-{worker}','name':'exec_command',
                                 'arguments':json.dumps({'cmd':command,'yield_time_ms':1000,'max_output_tokens':1000})}})
+                        elif worker and scripted_turns[worker] == 2:
+                            events.append({'type':'response.output_item.done','item':{'type':'custom_tool_call',
+                                'call_id':f'fixture-board-{worker}',
+                                'name':'exec', 'namespace':'functions',
+                                'input':f'text(await tools.mcp__delm_coordination_{worker}__delm_status({{}}));'}})
                         else:
                             # Keep the native turn open while the bounded harness
                             # observes all workers, rather than triggering Stop.
@@ -253,7 +280,7 @@ def main():
                                  stdin=slave, stdout=slave, stderr=slave, env=environment, start_new_session=True)
         os.close(slave)
         form_at = answer_at = None
-        while time.monotonic() - started < (45 if args.case == 'live' else 20):
+        while time.monotonic() - started < args.timeout_seconds - 15:
             if select.select([master], [], [], .03)[0]:
                 try:
                     data = os.read(master, 65536)
@@ -278,6 +305,14 @@ def main():
             if args.case in ['cancel', 'never'] and b'No agents started' in raw:
                 break
             if args.case in ['positive', 'live']:
+                for status_path in runs.glob('*/runtime-status.json'):
+                    status = read_json(status_path) or {}
+                    revision = status.get('update_sequence')
+                    if revision is not None and status_revisions.get(str(status_path)) != revision:
+                        status_revisions[str(status_path)] = revision
+                        evidence.setdefault('status_changes', []).append({
+                            'at_seconds': time.monotonic() - started,
+                            'status': status.get('status'), 'message': status.get('message')})
                 startup_errors = []
                 for capture_path, capture in invocation_records(project):
                     evidence['confirmed_count'] = capture.get('worker_count')
@@ -294,15 +329,25 @@ def main():
                     evidence['runtime_start_errors'] = startup_errors
                     break
                 saved_runs = [value for path in runs.glob('*/run.json') if (value := read_json(path))]
-                if args.case == 'positive' and worker_tools_observed == set(range(1, args.agents + 1)):
+                if (args.case == 'positive' and 'metadata_refresh_seconds' not in evidence
+                        and any(run.get('status') == 'running' for run in saved_runs)):
+                    # Reproduce filesystem/Finder bookkeeping on this fixture's
+                    # installed resources, without changing their trusted bytes.
+                    for relative in ['hooks/hooks.json', 'bin/delm']:
+                        resource = next((home / 'plugins/cache/selector-proof/delm').glob(f'*/{relative}'))
+                        os.chflags(resource, resource.stat().st_flags ^ stat.UF_HIDDEN)
+                    evidence['metadata_refresh_seconds'] = time.monotonic() - started
+                if (args.case == 'positive'
+                        and worker_tools_observed == worker_coordination_observed == set(range(1, args.agents + 1))
+                        and time.monotonic() - started > evidence.get('metadata_refresh_seconds', float('inf')) + .5):
                     break
-                if saved_runs and saved_runs[-1].get('status') in ['complete', 'completed', 'failed', 'stopped']:
+                if saved_runs and saved_runs[-1].get('status') in ['delivered', 'complete', 'completed', 'failed', 'stopped', 'recovery_required']:
                     evidence['runtime_status'] = saved_runs[-1]['status']
                     break
             if child.poll() is not None:
                 break
         evidence['form_displayed'] = form_at is not None
-        evidence['provider_requests_before_confirmation'] = sum(
+        evidence['provider_requests_before_confirmation'] = None if args.case == 'live' else sum(
             request['at_seconds'] < evidence.get('confirmation_seconds', float('inf'))
             for request in requests)
         if args.case in ['cancel', 'never']:
@@ -323,12 +368,24 @@ def main():
                     'delivery': delivery}
             hello = project / 'hello.txt'
             evidence['native_tool_environment_workers'] = sorted(worker_tools_observed)
+            evidence['native_coordination_workers'] = sorted(worker_coordination_observed)
             evidence['passed'] = (hello.is_file() and hello.read_bytes() == b'Hello from DeLM.\n'
                 and evidence.get('run', {}).get('worker_count') == args.agents
                 and evidence.get('run', {}).get('selected_count') == args.agents
                 and evidence.get('run', {}).get('model') == 'gpt-6-astra'
                 and evidence.get('run', {}).get('effort') == 'medium'
                 and evidence.get('run', {}).get('delivery', {}).get('delivered') is True)
+            if args.case == 'live':
+                run = evidence.get('run', {})
+                evidence['passed'] &= (len(set(run.get('worker_threads', []))) == args.agents
+                    and all(run.get('worker_threads', [])) and run.get('auth_home') == str(home)
+                    and evidence.get('confirmed_count') == args.agents
+                    and run.get('delivery', {}).get('cleanup_complete') is True)
+                evidence['worker_workspaces_removed'] = not any(
+                    path.exists() for run_path in runs.glob('*/run.json')
+                    for path in [run_path.parent / 'workspace/baseline',
+                                 *(run_path.parent / f'workspace/worker-{index}' for index in range(1, args.agents + 1))])
+                evidence['passed'] &= evidence['worker_workspaces_removed']
             if args.case == 'positive':
                 run = evidence.get('run', {})
                 evidence['passed'] = (run.get('worker_count') == args.agents and run.get('selected_count') == args.agents
@@ -336,7 +393,7 @@ def main():
                     and all(run.get('worker_threads', [])) and run.get('auth_home') == str(home)
                     and evidence.get('confirmed_count') == args.agents
                     and evidence['provider_requests_before_confirmation'] == 0
-                    and worker_tools_observed == set(range(1, args.agents + 1)))
+                    and worker_tools_observed == worker_coordination_observed == set(range(1, args.agents + 1)))
     except Exception as error:
         evidence['error'] = str(error)
     finally:
@@ -354,7 +411,7 @@ def main():
                 cleanup_errors.append(f'{label}: {error}')
                 return None
         def remaining(limit):
-            return max(.01, min(limit, started + 58 - time.monotonic()))
+            return max(.01, min(limit, started + args.timeout_seconds - 2 - time.monotonic()))
         def stop_group(process):
             attempt('stop native process group', lambda: stop_process_group(process, remaining))
         # Stop only runs and processes rooted in this disposable qualification.
@@ -362,6 +419,8 @@ def main():
             attempt('stop qualification run', lambda: subprocess.run(
                 [str(args.runtime.resolve()), 'stop', '--run-id', path.parent.name],
                 env=environment, capture_output=True, timeout=remaining(2)))
+        evidence['cooperative_shutdown'] = attempt('wait for native shutdown', lambda:
+            wait_for_owned_shutdown(runs, project, min(started + args.timeout_seconds - 5, time.monotonic() + 10)))
         if child:
             stop_group(child)
         identities = attempt('read owned process identities', lambda: owned_identities(runs, project))
@@ -370,13 +429,13 @@ def main():
         for item in identities:
             if identity_running(item):
                 attempt('terminate owned process', lambda: os.kill(item['pid'], signal.SIGTERM))
-        cleanup_deadline = min(started + 57, time.monotonic() + 3)
+        cleanup_deadline = min(started + args.timeout_seconds - 3, time.monotonic() + 3)
         while time.monotonic() < cleanup_deadline and any(identity_running(item) for item in identities):
             time.sleep(.05)
         for item in identities:
             if identity_running(item):
                 attempt('kill owned process', lambda: os.kill(item['pid'], signal.SIGKILL))
-        kill_deadline = min(started + 58, time.monotonic() + .5)
+        kill_deadline = min(started + args.timeout_seconds - 2, time.monotonic() + .5)
         while time.monotonic() < kill_deadline and any(identity_running(item) for item in identities):
             time.sleep(.01)
         for client in clients:
@@ -397,6 +456,14 @@ def main():
         if cleanup_errors:
             evidence['cleanup_errors'] = cleanup_errors
         if not evidence['owned_processes_stopped'] or cleanup_errors:
+            evidence['passed'] = False
+        evidence['final_run_statuses'] = [(read_json(path) or {}).get('status')
+                                        for path in runs.glob('*/run.json')]
+        evidence['auth_reference_removed'] = not auth.is_symlink()
+        if args.case == 'live' and evidence['final_run_statuses'] not in [['complete'], ['delivered']]:
+            evidence['passed'] = False
+        if args.case == 'positive' and (not evidence['cooperative_shutdown']
+                                       or evidence['final_run_statuses'] != ['stopped']):
             evidence['passed'] = False
         evidence['elapsed_seconds'] = time.monotonic() - started
         evidence['provider_requests'] = requests

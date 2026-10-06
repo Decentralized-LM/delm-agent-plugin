@@ -10,13 +10,29 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
 
-from verify_codex_selector import stop_process_group
+from verify_codex_selector import stop_process_group, wait_for_owned_shutdown
 
 from verify_fresh_install import (EvidenceRPC, git_state, inspect_run, qualification_hooks,
                                  read_task, remove_auth_reference, selector_response, snapshot, task_handoff)
 
 
 class SelectorCleanupTests(unittest.TestCase):
+    def test_shutdown_waits_for_runtime_before_forcing_children(self):
+        with patch('verify_codex_selector.owned_identities', return_value=[{'pid': 123}]), \
+             patch('verify_codex_selector.identity_running', side_effect=[True, False]), \
+             patch('verify_codex_selector.time.monotonic', return_value=10), \
+             patch('verify_codex_selector.time.sleep') as sleep:
+            self.assertTrue(wait_for_owned_shutdown(None, None, 11))
+            sleep.assert_called_once_with(.05)
+
+    def test_shutdown_wait_is_bounded_when_worker_survives(self):
+        with patch('verify_codex_selector.owned_identities', return_value=[{'pid': 123}]), \
+             patch('verify_codex_selector.identity_running', return_value=True), \
+             patch('verify_codex_selector.time.monotonic', return_value=11), \
+             patch('verify_codex_selector.time.sleep') as sleep:
+            self.assertFalse(wait_for_owned_shutdown(None, None, 11))
+            sleep.assert_not_called()
+
     def test_exiting_launcher_is_reaped_after_kill_permission_race(self):
         process = Mock(pid=123)
         process.poll.return_value = None

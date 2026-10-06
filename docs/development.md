@@ -90,7 +90,7 @@ cargo build --locked --bin delm
 python3 scripts/verify_codex_selector.py --out .validation/selector-cancel --case cancel
 ```
 
-This stages the production plugin in a disposable Codex home and presses Escape in the real native form. It makes no model calls. `--case never`, `--case normal`, and `--case worker` check policy refusal, ordinary conversation, and nested worker suppression against a local scripted provider. `--case positive --agents 3` confirms the form, creates exactly three real native worker threads, and checks inherited environment values through their native execution tools using scripted responses. It establishes the launch path, not model-generated task quality. Each invocation has a 60-second ceiling and records the actual terminal bytes, native version, package hash, and result. Captured terminal bytes can be rendered as an evidence image; they are not an operating-system screenshot.
+This stages the production plugin in a disposable Codex home and presses Escape in the real native form. It makes no model calls. `--case never`, `--case normal`, and `--case worker` check policy refusal, ordinary conversation, and nested worker suppression against a local scripted provider. `--case positive --agents 3` confirms the form, creates exactly three real native worker threads, checks inherited environment values through their native execution tools, and calls the private coordination board without approval prompts, using scripted responses. It establishes the launch path, not model-generated task quality. These invocations have a 60-second ceiling and record the actual terminal bytes, native version, package hash, and result. Shutdown waits for native acknowledgement before forcing surviving owned processes. Captured terminal bytes can be rendered as an evidence image; they are not an operating-system screenshot.
 
 The routine `test_native_selection_environment.py` regression also checks three- and four-agent confirmation with a deliberately restricted MCP environment. It verifies that the trusted command hook preserves the original environment, waits for confirmation, and starts only one runtime even if the hook is repeated. It uses the `native-lifecycle-fixture` executable and makes no host or account calls.
 
@@ -102,7 +102,7 @@ python3 scripts/verify_codex_selector.py \
   --auth-home "${CODEX_HOME:-$HOME/.codex}"
 ```
 
-The live task creates one text file and performs one focused check. Its work budget leaves time for shutdown within the same 60-second ceiling. A timed-out or undelivered result is a failed check, not a speed result. The fixture references the existing native login without reading or copying credentials, then removes the reference after confirming shutdown.
+The live task creates one text file and performs one focused check. Its default ceiling is 60 seconds; add `--timeout-seconds 180` for an authorized three-minute live check. Both budgets reserve time for shutdown. A timed-out or undelivered result is a failed check, not a speed result. The fixture references the existing native login without reading or copying credentials, then removes the reference after confirming shutdown.
 
 The longer fresh-install qualification below is separate. Only run this when real account use has been authorized. Supply a small task beginning with `$delm:run `:
 

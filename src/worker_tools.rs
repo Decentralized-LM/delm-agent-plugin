@@ -119,9 +119,22 @@ impl Gateway {
 
     pub fn config(&self, index: usize) -> Result<Value> {
         ensure!(index < self.paths.len(), "Unknown worker");
+        // Invoking DeLM authorizes its private board protocol. This grant is
+        // limited to our exact tools on this authenticated, per-run endpoint;
+        // native execution and the user's other MCP servers keep their policy.
+        let tools: serde_json::Map<String, Value> = crate::board::tool_definitions()
+            .into_iter()
+            .chain(crate::services::tool_definitions())
+            .map(|tool| {
+                (
+                    tool["name"].as_str().unwrap().to_owned(),
+                    json!({"approval_mode":"approve"}),
+                )
+            })
+            .collect();
         Ok(
             json!({"command":std::env::current_exe()?,"args":["worker-mcp","--socket",self.paths[index]],
-            "env":{"DELM_COORDINATION_TOKEN":self.tokens[index]},"enabled":true,"required":true,"tool_timeout_sec":120}),
+            "env":{"DELM_COORDINATION_TOKEN":self.tokens[index]},"enabled":true,"required":true,"tool_timeout_sec":120,"tools":tools}),
         )
     }
 }
@@ -363,6 +376,33 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn coordination_grants_are_limited_to_the_owned_tools_and_endpoint() {
+        let gateway = Gateway::for_worker_count(&uuid::Uuid::new_v4().to_string(), 4).unwrap();
+        let listed = local_response(&json!({"method":"tools/list"})).unwrap();
+        for index in 0..4 {
+            let config = gateway.config(index).unwrap();
+            assert!(config.get("default_tools_approval_mode").is_none());
+            assert!(config.get("approval_policy").is_none());
+            assert_eq!(
+                config["tools"].as_object().unwrap().len(),
+                listed["tools"].as_array().unwrap().len()
+            );
+            for tool in listed["tools"].as_array().unwrap() {
+                assert_eq!(
+                    config["tools"][tool["name"].as_str().unwrap()]["approval_mode"],
+                    "approve"
+                );
+            }
+            assert_eq!(config["args"][2], json!(gateway.paths[index]));
+            assert_eq!(
+                config["env"]["DELM_COORDINATION_TOKEN"],
+                gateway.tokens[index]
+            );
+        }
+        assert!(gateway.config(4).is_err());
+    }
+
     #[tokio::test]
     async fn gateway_binds_requests_and_returns_runtime_response() {
         let mut gateway = Gateway::start(&uuid::Uuid::new_v4().to_string()).unwrap();

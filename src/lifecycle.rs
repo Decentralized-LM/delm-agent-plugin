@@ -20,6 +20,11 @@ use std::{
 pub const REQUIRED_EVENTS: [&str; 4] = ["preToolUse", "userPromptSubmit", "interrupt", "stop"];
 const MAX_RECORD: u64 = 1024 * 1024;
 
+// Cache only successful, content-verified metadata transitions. Every lookup
+// still stats the resource; another change requires a new hash verification.
+type ResourceProof = (PathBuf, FileIdentity, String, FileIdentity);
+static RESOURCE_PROOFS: std::sync::Mutex<Vec<ResourceProof>> = std::sync::Mutex::new(Vec::new());
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Binding {
     pub session_id: String,
@@ -41,12 +46,57 @@ pub struct FileIdentity {
     size: u64,
     mode: u32,
     uid: u32,
+    #[serde(default)]
+    gid: Option<u32>,
     links: u64,
     modified: (i64, i64),
     changed: (i64, i64),
 }
 
 impl FileIdentity {
+    fn verify(&self, path: &Path, expected_hash: &str) -> Result<bool> {
+        let current = Self::capture(path)?;
+        if current == *self {
+            return Ok(true);
+        }
+        // Document tracking and Finder bookkeeping can change ctime without
+        // replacing or editing an installed resource. Do not treat that as
+        // content trust: require the original bytes and all other identity
+        // fields, with a stable identity across the hash read.
+        let mut normalized = current.clone();
+        normalized.changed = self.changed;
+        if normalized != *self {
+            return Ok(false);
+        }
+        {
+            let proofs = RESOURCE_PROOFS
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Resource proof lock poisoned"))?;
+            if proofs.iter().any(|(p, expected, hash, verified)| {
+                p == path && expected == self && hash == expected_hash && verified == &current
+            }) {
+                return Ok(true);
+            }
+        }
+        if digest(path)? != expected_hash || Self::capture(path)? != current {
+            return Ok(false);
+        }
+        let mut proofs = RESOURCE_PROOFS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Resource proof lock poisoned"))?;
+        proofs.retain(|(p, _, _, _)| p != path);
+        if proofs.len() >= 32 {
+            proofs.remove(0);
+        }
+        proofs.push((
+            path.to_owned(),
+            self.clone(),
+            expected_hash.to_owned(),
+            current,
+        ));
+        Ok(true)
+    }
+
     fn capture(path: &Path) -> Result<Self> {
         let metadata = fs::symlink_metadata(path)?;
         ensure!(
@@ -59,6 +109,7 @@ impl FileIdentity {
             size: metadata.len(),
             mode: metadata.mode(),
             uid: metadata.uid(),
+            gid: Some(metadata.gid()),
             links: metadata.nlink(),
             modified: (metadata.mtime(), metadata.mtime_nsec()),
             changed: (metadata.ctime(), metadata.ctime_nsec()),
@@ -1132,11 +1183,13 @@ impl Binding {
             "Native owner exited or changed identity"
         );
         ensure!(
-            FileIdentity::capture(&self.hooks_file)? == self.hooks_identity,
+            self.hooks_identity
+                .verify(&self.hooks_file, &self.hooks_hash)?,
             "Native lifecycle hooks changed"
         );
         ensure!(
-            FileIdentity::capture(&self.executable)? == self.executable_identity,
+            self.executable_identity
+                .verify(&self.executable, &self.executable_hash)?,
             "Native lifecycle executable changed"
         );
         Ok(())
@@ -1316,6 +1369,46 @@ pub fn validate_hook_listing(listing: &Value, executable: &Path) -> Result<()> {
 pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn resource_bookkeeping_changes_require_unchanged_bytes_and_invalidate_cached_proofs() {
+        use std::os::fd::AsRawFd;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("hook");
+        fs::write(&path, "original").unwrap();
+        let file = File::open(&path).unwrap();
+        let modified = file.metadata().unwrap().modified().unwrap();
+        let expected = FileIdentity::capture(&path).unwrap();
+        let hash = digest(&path).unwrap();
+        assert_eq!(
+            unsafe { libc::fchflags(file.as_raw_fd(), libc::UF_TRACKED | libc::UF_HIDDEN) },
+            0
+        );
+        assert_ne!(
+            FileIdentity::capture(&path).unwrap().changed,
+            expected.changed
+        );
+        assert!(expected.verify(&path, &hash).unwrap());
+        assert!(expected.verify(&path, &hash).unwrap());
+        fs::write(&path, "modified").unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert!(!expected.verify(&path, &hash).unwrap());
+    }
+
+    #[test]
+    fn resource_verification_rejects_replacement_even_with_identical_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("hook");
+        fs::write(&path, "original").unwrap();
+        let expected = FileIdentity::capture(&path).unwrap();
+        let hash = digest(&path).unwrap();
+        let replacement = temp.path().join("replacement");
+        fs::write(&replacement, "original").unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert!(!expected.verify(&path, &hash).unwrap());
+    }
 
     pub(crate) fn input(event: &str, session: &str, turn: &str) -> HookInput {
         serde_json::from_value(json!({"hook_event_name":event,"session_id":session,"turn_id":turn}))
