@@ -6,6 +6,10 @@ on:
         description: Successful unsigned release preparation run ID
         required: true
         type: string
+      signed_run:
+        description: Existing successful signing run to resume without signing again (optional)
+        required: false
+        type: string
       qualification_run:
         description: Existing run with successful Claude qualification jobs (optional)
         required: false
@@ -22,7 +26,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   qualify-claude:
-    if: ${{ !inputs.qualification_run }}
+    if: ${{ !inputs.qualification_run && !inputs.signed_run }}
     environment: release
     strategy:
       fail-fast: false
@@ -94,7 +98,7 @@ jobs:
           path: ${{ runner.temp }}/claude-proof/qualification.json
           if-no-files-found: error
   sign:
-    if: ${{ always() && (needs.qualify-claude.result == 'success' || (needs.qualify-claude.result == 'skipped' && inputs.qualification_run != '')) }}
+    if: ${{ always() && !inputs.signed_run && (needs.qualify-claude.result == 'success' || (needs.qualify-claude.result == 'skipped' && inputs.qualification_run != '')) }}
     needs: [qualify-claude]
     runs-on: macos-15
     timeout-minutes: 60
@@ -166,6 +170,7 @@ jobs:
           path: signed-macos-release.tar
           if-no-files-found: error
   qualify-signed:
+    if: ${{ always() && (needs.sign.result == 'success' || (needs.sign.result == 'skipped' && inputs.signed_run != '')) }}
     needs: [sign]
     strategy:
       fail-fast: false
@@ -190,6 +195,8 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signed-macos-release-candidate
+          run-id: ${{ inputs.signed_run || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Verify and exercise the signed universal binary
         env:
           RELEASE_REPOSITORY: ${{ github.repository }}
@@ -207,6 +214,7 @@ jobs:
           path: ${{ runner.temp }}/signed-qualification
           if-no-files-found: error
   publish:
+    if: ${{ always() && needs.qualify-signed.result == 'success' && (needs.sign.result == 'success' || (needs.sign.result == 'skipped' && inputs.signed_run != '')) }}
     needs: [sign, qualify-signed]
     runs-on: macos-15
     timeout-minutes: 10
@@ -225,6 +233,8 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signed-macos-release-candidate
+          run-id: ${{ inputs.signed_run || github.run_id }}
+          github-token: ${{ github.token }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: signed-qualification-*
