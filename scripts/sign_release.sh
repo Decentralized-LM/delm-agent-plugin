@@ -27,13 +27,23 @@ printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$release_certificat
 security create-keychain -p "$release_password" "$release_keychain"
 security set-keychain-settings -lut 21600 "$release_keychain"
 security unlock-keychain -p "$release_password" "$release_keychain"
+# Apple intermediate certificates are public; importing the issuer does not
+# override system trust or authorize an untrusted root.
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+  --output "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$release_keychain"
 security import "$release_certificate" -k "$release_keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+echo "Configuring signing-key access"
 security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$release_password" "$release_keychain" >/dev/null
+echo "Checking signing identity"
+security find-identity -v -p codesigning "$release_keychain"
 # Preserve the qualified unsigned packages and their checksums for provenance.
 # package_release verifies identical runtime bytes in both host payloads and
 # copies this one signed binary into each self-contained host package.
 release_binary="$RUNNER_TEMP/delm-signed"
 cp unsigned-review/plugins/delm/bin/delm "$release_binary"
+echo "Signing the qualified runtime"
 codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" --keychain "$release_keychain" "$release_binary"
 codesign --verify --strict --verbose=2 "$release_binary"
 ditto -c -k --keepParent "$release_binary" "$RUNNER_TEMP/delm-notarization.zip"

@@ -6,6 +6,10 @@ on:
         description: Successful unsigned release preparation run ID
         required: true
         type: string
+      qualification_run:
+        description: Existing run with successful Claude qualification jobs (optional)
+        required: false
+        type: string
       source_ref:
         description: Version tag identifying the exact candidate source
         required: true
@@ -18,6 +22,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   qualify-claude:
+    if: ${{ !inputs.qualification_run }}
     environment: release
     strategy:
       fail-fast: false
@@ -89,6 +94,7 @@ jobs:
           path: ${{ runner.temp }}/claude-proof/qualification.json
           if-no-files-found: error
   sign:
+    if: ${{ always() && (needs.qualify-claude.result == 'success' || (needs.qualify-claude.result == 'skipped' && inputs.qualification_run != '')) }}
     needs: [qualify-claude]
     runs-on: macos-15
     timeout-minutes: 60
@@ -113,6 +119,8 @@ jobs:
         with:
           pattern: claude-proof-*
           path: claude-proofs
+          run-id: ${{ inputs.qualification_run || github.run_id }}
+          github-token: ${{ github.token }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
