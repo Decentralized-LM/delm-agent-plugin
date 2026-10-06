@@ -99,6 +99,11 @@ jobs:
           ref: ${{ inputs.source_ref }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: unsigned-macos-review-not-for-distribution
@@ -148,7 +153,7 @@ jobs:
           verify(root, require_qualified=True)
           PYPROOF
           tar -cf unsigned-macos-review.tar -C candidate-origin .
-          bash scripts/sign_release.sh
+          bash release-tooling/scripts/sign_release.sh
           tar -cf signed-macos-release.tar -C signed-release .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
