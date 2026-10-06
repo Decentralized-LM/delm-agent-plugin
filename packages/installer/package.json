@@ -20,6 +20,7 @@
     "lib/installer.mjs",
     "lib/maintenance.mjs",
     "lib/native.mjs",
+    "lib/release.mjs",
     "release.json"
   ],
   "scripts": {

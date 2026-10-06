@@ -61,7 +61,22 @@ For an existing Claude `delm@delm-local` source plugin, inspect and manage it th
 
 Failures are reported with native host details. If registration succeeds but installation fails, the registration remains available for inspection and retry. The installer does not automatically remove partial state or unrelated registrations. Claude mutation results are parsed from their final JSON line; list results use their documented JSON arrays. State is verified after every operation.
 
-## Private verification
+## Repository transfers
+
+The first distribution will use `jerry2247/delm-agent-plugin`. A later GitHub
+transfer or rename does not change the `delm-agent` npm package name. Prepare a
+new installer version with the new destination and add each previous address
+with `--previous-repository OWNER/REPO`. New installations use the new address;
+existing native marketplace registrations may retain an explicitly approved
+previous address and follow GitHub's redirect. Copying the code into a different
+repository does not create that redirect. Keep previous repository paths unused
+so another repository cannot replace them.
+
+Only addresses listed in the released package are accepted. A similarly named
+marketplace at another source remains a conflict. This support does not migrate
+`delm-local` source installations or alter plugin permissions.
+
+## Verification
 
 From this package directory:
 

@@ -1,4 +1,5 @@
 import {InstallerError} from './native.mjs';
+import {matchesRepository, matchesRepositoryUrl} from './release.mjs';
 
 function unsupported() {
   return new InstallerError('Claude Code returned unsupported native plugin JSON. Update Claude Code and retry.', 'UNSUPPORTED_CLAUDE');
@@ -93,8 +94,8 @@ export async function manageClaude(command, {claude, release, run, beforeMutatio
     const matching = marketplaces.filter(item => item.name === release.marketplace);
     const marketplace = matching[0];
     const expectedSource = marketplace?.ref === release.ref && (
-      (marketplace.source === 'git' && [release.url, release.url.slice(0, -4)].includes(marketplace.url))
-      || (marketplace.source === 'github' && marketplace.repo === release.repository));
+      (marketplace.source === 'git' && matchesRepositoryUrl(release, marketplace.url))
+      || (marketplace.source === 'github' && matchesRepository(release, marketplace.repo)));
     const plugins = installed.filter(item => item.id === release.plugin);
     const userPlugins = plugins.filter(item => item.scope === 'user');
     const plugin = userPlugins[0];

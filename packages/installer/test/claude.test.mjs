@@ -160,6 +160,50 @@ test('Claude accepts documented GitHub source shape only with matching repositor
   await assert.rejects(manage('install', options), {code: 'MARKETPLACE_CONFLICT'});
 });
 
+test('Claude accepts approved previous Git and GitHub registrations without replacing them', async () => {
+  const previousRepository = 'old-owner/old-repo';
+  for (const source of [
+    {source: 'git', url: `https://github.com/${previousRepository}.git`},
+    {source: 'git', url: `https://github.com/${previousRepository}`},
+    {source: 'github', repo: previousRepository},
+  ]) {
+    for (const command of ['status', 'install', 'update', 'remove']) {
+      const {state, options} = fake({installed: true});
+      state.marketplaces = [{name: 'delm', ref: 'marketplace', ...source}];
+      options.release = {...RELEASE, previousRepositories: [previousRepository]};
+      const before = structuredClone(state.marketplaces);
+      assert.equal((await manage(command, options)).conflict, false);
+      assert.deepEqual(state.marketplaces, before);
+      assert.ok(!mutations(state).some(call => call[2] === 'marketplace' && call[3] === 'add'));
+    }
+    const {state, options} = fake({installed: true});
+    state.marketplaces = [{name: 'delm', ref: 'wrong', ...source}];
+    options.release = {...RELEASE, previousRepositories: [previousRepository]};
+    await assert.rejects(manage('install', options), {code: 'MARKETPLACE_CONFLICT'});
+    assert.deepEqual(mutations(state), []);
+  }
+  const {state, options} = fake();
+  options.release = {...RELEASE, previousRepositories: [previousRepository]};
+  await manage('install', options);
+  assert.equal(state.marketplaces[0].url, RELEASE.url);
+});
+
+test('Claude rejects unapproved or altered prior repository identities before mutations', async () => {
+  for (const source of [
+    {source: 'github', repo: 'old-owner/old-repo/extra'},
+    {source: 'github', repo: 'unrelated/repo'},
+    {source: 'git', url: 'https://github.com/old-owner/old-repo.git?other'},
+    {source: 'git', url: 'https://user@github.com/old-owner/old-repo.git'},
+    {source: 'git', url: 'https://github.com/old-owner/old-repo/extra'},
+  ]) {
+    const {state, options} = fake({installed: true});
+    state.marketplaces = [{name: 'delm', ref: 'marketplace', ...source}];
+    options.release = {...RELEASE, previousRepositories: ['old-owner/old-repo']};
+    await assert.rejects(manage('install', options), {code: 'MARKETPLACE_CONFLICT'});
+    assert.deepEqual(mutations(state), []);
+  }
+});
+
 test('Claude malformed JSON and list schema are rejected before mutation', async () => {
   for (const stdout of ['not-json', '{}', '[null]']) {
     const {options} = fake();

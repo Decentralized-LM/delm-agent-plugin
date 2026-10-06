@@ -16,7 +16,9 @@ test('package exposes help/version, rejects hidden repository overrides, and can
   assert.deepEqual(metadata.dependencies ?? {}, {});
   assert.deepEqual(metadata.bin, {'delm-agent': 'bin/delm-agent.mjs'});
   assert.equal(metadata.repository, undefined);
-  assert.equal(JSON.parse(readFileSync(path.join(root, 'release.json'), 'utf8')).repository, null);
+  const sourceRelease = JSON.parse(readFileSync(path.join(root, 'release.json'), 'utf8'));
+  assert.equal(sourceRelease.repository, null);
+  assert.deepEqual(sourceRelease.previousRepositories, []);
   assert.equal(execFileSync(process.execPath, [cli, '--version'], {encoding: 'utf8'}).trim(), metadata.version);
   assert.match(execFileSync(process.execPath, [cli, '--help'], {encoding: 'utf8'}), /unpublished/);
   assert.throws(() => execFileSync(process.execPath, [cli, 'install', '--marketplace', '/tmp/foreign'], {stdio: 'pipe'}), error => error.status === 1);
@@ -36,7 +38,7 @@ test('npm pack contains only the runnable CLI, metadata, README and license', ()
     const packed = JSON.parse(execFileSync('npm', ['pack', '--json', '--ignore-scripts', '--offline', '--no-update-notifier', '--pack-destination', temporary,
       '--userconfig', userconfig, '--globalconfig', globalconfig, '--cache', path.join(temporary, 'cache')], {cwd: root, encoding: 'utf8'}));
     assert.deepEqual(packed[0].files.map(file => file.path).sort(), [
-      'LICENSE', 'NOTICE', 'README.md', 'bin/delm-agent.mjs', 'lib/claude.mjs', 'lib/hosts.mjs', 'lib/installer.mjs', 'lib/maintenance.mjs', 'lib/native.mjs', 'package.json', 'release.json',
+      'LICENSE', 'NOTICE', 'README.md', 'bin/delm-agent.mjs', 'lib/claude.mjs', 'lib/hosts.mjs', 'lib/installer.mjs', 'lib/maintenance.mjs', 'lib/native.mjs', 'lib/release.mjs', 'package.json', 'release.json',
     ]);
     assert.ok(packed[0].size < 20_000, 'The thin installer should stay small.');
     assert.deepEqual(packed[0].bundled, []);
@@ -60,12 +62,18 @@ test('preparation binds one destination, produces publishable metadata, and pres
     const args = [prepare, '--repository', destination, '--out', output, '--native-release', native];
     const preparation = JSON.parse(execFileSync('python3', args, {encoding: 'utf8'}));
     assert.equal(preparation.repository, destination);
+    assert.deepEqual(preparation.previousRepositories, []);
     assert.equal(preparation.nativeRelease.sha256, sha256(readFileSync(native)));
     assert.equal(preparation.nativeRelease.version, '0.3.0');
     const metadata = JSON.parse(readFileSync(path.join(output, 'package/package.json'), 'utf8'));
     assert.equal(metadata.private, false);
     assert.equal(metadata.version, JSON.parse(sourceMetadata).version);
     assert.equal(metadata.repository.url, `git+https://github.com/${destination}.git`);
+    assert.equal(metadata.homepage, `https://github.com/${destination}#readme`);
+    assert.deepEqual(metadata.bugs, {url: `https://github.com/${destination}/issues`});
+    assert.deepEqual(metadata.keywords, ['delm', 'codex', 'claude-code', 'ai-agents', 'cli']);
+    assert.deepEqual(metadata.publishConfig, {access: 'public', registry: 'https://registry.npmjs.org/', tag: 'latest'});
+    assert.deepEqual(metadata.files, JSON.parse(sourceMetadata).files);
     assert.equal(metadata.scripts, undefined);
     const configured = JSON.parse(readFileSync(path.join(output, 'package/release.json'), 'utf8'));
     assert.deepEqual(configured, {...JSON.parse(sourceRelease), repository: destination});
@@ -76,6 +84,11 @@ test('preparation binds one destination, produces publishable metadata, and pres
     assert.match(readme, /npx --yes delm-agent@latest install/);
     assert.match(readme, /npx --yes delm-agent@latest install --host claude/);
     assert.match(readme, /CLAUDE_CONFIG_DIR/);
+    assert.doesNotMatch(readme, /Preparing a package|after this package is published/);
+    assert.match(readme, /## Repository moves/);
+    assert.match(readme, /no approved previous repository names/);
+    assert.match(readme, /For Codex, restart, open `\/hooks`, and review and trust DeLM/);
+    assert.match(readme, /Installation status does not verify activation or permissions/);
     assert.match(help, /codex\|claude\|both/);
     assert.ok(readme.includes(destination));
     assert.doesNotMatch(readme, /jerry2247|unpublished|not an available install command/);
@@ -110,6 +123,66 @@ test('preparation binds one destination, produces publishable metadata, and pres
     }
     assert.deepEqual(readFileSync(path.join(root, 'package.json')), sourceMetadata);
     assert.deepEqual(readFileSync(path.join(root, 'release.json')), sourceRelease);
+  } finally {
+    rmSync(temporary, {recursive: true, force: true});
+  }
+});
+
+test('preparation records only explicit previous repositories through CLI and workflow JSON inputs', () => {
+  const temporary = mkdtempSync(path.join(tmpdir(), 'delm moved installer '));
+  const prepare = path.resolve(root, '../../scripts/prepare_installer.py');
+  const destination = 'delm-fixture/current-distribution';
+  const previous = ['original-owner/delm', 'second-owner/renamed-delm'];
+  try {
+    for (const [name, options] of [
+      ['cli', previous.flatMap(repository => ['--previous-repository', repository])],
+      ['workflow', ['--previous-repositories-json', JSON.stringify(previous)]],
+    ]) {
+      const output = path.join(temporary, name);
+      const preparation = JSON.parse(execFileSync('python3', [prepare, '--repository', destination,
+        '--out', output, ...options], {encoding: 'utf8'}));
+      assert.deepEqual(preparation.previousRepositories, previous);
+      const configuration = JSON.parse(readFileSync(path.join(output, 'package/release.json'), 'utf8'));
+      assert.equal(configuration.repository, destination);
+      assert.deepEqual(configuration.previousRepositories, previous);
+      const readme = readFileSync(path.join(output, 'package/README.md'), 'utf8');
+      for (const repository of previous) assert.ok(readme.includes(`\`${repository}\``));
+      assert.match(readme, /GitHub redirects that name after a repository transfer or rename/);
+      assert.match(readme, /Copying the project to a new repository does not create a GitHub redirect/);
+      const preparedCli = path.join(output, 'package/bin/delm-agent.mjs');
+      assert.match(execFileSync(process.execPath, [preparedCli, '--help'], {encoding: 'utf8'}),
+        /Marketplace: https:\/\/github.com\/delm-fixture\/current-distribution/);
+      assert.ok(existsSync(path.join(output, preparation.tarball.path)));
+      assert.ok(preparation.files['lib/release.mjs']);
+    }
+  } finally {
+    rmSync(temporary, {recursive: true, force: true});
+  }
+});
+
+test('invalid previous-repository arguments fail before creating output', () => {
+  const temporary = mkdtempSync(path.join(tmpdir(), 'delm invalid previous repository '));
+  const prepare = path.resolve(root, '../../scripts/prepare_installer.py');
+  const destination = 'delm-fixture/public-distribution';
+  const invalidArguments = [
+    ['--previous-repository', destination],
+    ['--previous-repository', destination.toUpperCase()],
+    ['--previous-repository', 'owner/old', '--previous-repository', 'OWNER/OLD'],
+    ...['', '../invalid', 'https://github.com/owner/repo', 'owner/repo/path', 'owner/repo?ref=main',
+      'owner/repo#marketplace', 'owner/repo;touch proof', 'owner/repo\nother/repo', ' owner/repo']
+      .map(value => ['--previous-repository', value]),
+    ...['not-json', 'null', '{}', '"owner/repo"', '[null]', '[1]', '[{}]', '[["owner/repo"]]',
+      '["owner/old", "OWNER/OLD"]', JSON.stringify([destination]), JSON.stringify(['https://github.com/owner/repo'])]
+      .map(value => ['--previous-repositories-json', value]),
+    ['--previous-repository', 'owner/old', '--previous-repositories-json', '[]'],
+  ];
+  try {
+    for (const [index, options] of invalidArguments.entries()) {
+      const output = path.join(temporary, `invalid-${index}`);
+      assert.throws(() => execFileSync('python3', [prepare, '--repository', destination, '--out', output, ...options],
+        {stdio: 'pipe'}), error => [1, 2].includes(error.status), JSON.stringify(options));
+      assert.equal(existsSync(output), false, JSON.stringify(options));
+    }
   } finally {
     rmSync(temporary, {recursive: true, force: true});
   }

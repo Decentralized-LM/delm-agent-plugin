@@ -2,21 +2,25 @@
 
 Public releases contain separate self-contained Codex and Claude Code plugins with identical universal macOS runtime bytes. Each package has its native manifest, run skill, lifecycle integration, and license files; Claude also includes its native MCP sidecar configuration and shared worker instructions. Users need Git and their selected host CLI, without a compiler or source checkout. Claude Code 2.1.289 or newer is the supported native API floor. Windows and Linux are separate future work.
 
-The source repository currently has no published marketplace. The release workflow resolves one repository address and uses it for the native marketplace, plugin metadata, and prepared installer. A new public home does not require changing the installer implementation.
+The public source repository is [jerry2247/delm-agent-plugin](https://github.com/jerry2247/delm-agent-plugin). The first native marketplace and npm package have not been published. Initial releases will use this repository; a later GitHub transfer is covered below.
 
 ## Release destination
 
 The workflow's `release_repository` input accepts `OWNER/REPOSITORY` and defaults to the repository running the workflow. Unsigned review can prepare artifacts for another destination. Publication requires the configured destination to match the workflow repository and its Git remote, so a release cannot accidentally publish to a different origin.
 
-The installer source has no configured destination and remains private. Release preparation creates a separate configured package with the same repository identity as the native plugin. The generated package is what users receive; its repository cannot be overridden when they run it.
+For the first release, use `release_repository: jerry2247/delm-agent-plugin` and `previous_repositories: []`. The latter is a JSON array of approved former GitHub `OWNER/REPO` names; it is only needed after a repository transfer or rename.
 
-## Private iteration
+The installer source leaves its destination unset and its npm manifest has `private: true`. Release preparation creates the publishable package with the same repository identity as the native plugin. Users cannot override that destination or add former repository addresses when running the installer.
 
-Run **Prepare macOS release** with `source_ref` set to a branch or full commit SHA and `publish` disabled. The workflow resolves the reference once, checks out that exact clean commit in every job, and retains an unsigned review artifact. A private repository keeps its workflow artifacts private to those with access.
+## Prepare a candidate
+
+Run **Prepare macOS release** with `source_ref` set to a branch or full commit SHA and `publish` disabled. The workflow resolves the reference once, checks out that exact clean commit in every job, and retains an unsigned review artifact.
 
 Successful preparation produces `unsigned-macos-review-not-for-distribution` and `prepared-npm-installer-not-published`. The installer artifact contains its tarball, `preparation.json`, and `SHA256SUMS`. Its preparation record binds the configured repository and source revision to the native package metadata. These artifacts let contributors inspect the exact files before publication.
 
 Keep `Cargo.toml`, `Cargo.lock`, `.codex-plugin/plugin.json`, and `hosts/claude/.claude-plugin/plugin.json` on the same version while iterating. The version can remain unchanged until a public release is ready. Do not add a root `plugin.json`: current Codex interprets it as the portable format and skips native lifecycle hooks.
+
+The native plugin is currently **0.3.0**; the npm installer is **0.1.0**. These are separate version sequences. An unchanged installer can install newer native marketplace releases without being republished. Changes to installer behavior, its destination, or approved former repository addresses require a new installer version.
 
 For uncommitted local work, build both host packages and exercise the runtime in disposable directories:
 
@@ -30,7 +34,7 @@ Use `x86_64` on an actual Intel Mac. Every smoke output directory must be new; p
 
 ## Manual Claude candidate qualification
 
-Ordinary CI uses no Claude account or model calls. It runs native installation fixtures, strict native plugin validation, and a bounded MCP initialize/tools-list probe of the actual bundled runtime. These establish package compatibility, not successful collaborative task execution.
+The manually started release workflow uses no Claude account or model calls. It runs native installation fixtures, strict native plugin validation, and a bounded MCP initialize/tools-list probe of the actual bundled runtime. Pushes and pull requests do not start these checks automatically. These establish package compatibility, not successful collaborative task execution.
 
 For release evidence, first prepare an unsigned candidate from a clean source commit. Download that candidate, verify its checksums, and use its exact `plugins/delm-claude` package. From the matching source checkout, run this explicit manual fixture on native Apple Silicon and again on an actual Intel Mac, using each machine's normal authenticated Claude setup:
 
@@ -78,7 +82,8 @@ When ready to publish:
 1. Create the source tag matching the package version. Protect source tags and `delm-plugin-*` tags against replacement, and protect the `marketplace` branch.
 2. Configure the GitHub `release` environment with a required reviewer and these environment secrets: `APPLE_CERTIFICATE_BASE64` (Developer ID Application certificate as a base64-encoded P12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD`.
 3. Obtain matching manual Claude candidate qualification records for native Apple Silicon and Intel as described above.
-4. Dispatch **Prepare macOS release** with that tag as `source_ref`, the records in `claude_qualifications`, and `publish` enabled. The signing job uses the protected environment. After approval, successful signing and both signed native qualification jobs gate the publisher automatically; the publisher receives repository write permission but no Apple credentials.
+4. Dispatch **Prepare macOS release** with that tag as `source_ref`, `release_repository: jerry2247/delm-agent-plugin`, `previous_repositories: []`, the records in `claude_qualifications`, and `publish` enabled. The signing job uses the protected environment. After approval, successful signing and both signed native qualification jobs gate the publisher automatically; the publisher receives repository write permission but no Apple credentials.
+5. Publish the prepared npm tarball from that successful workflow, following the commands below. Verify installation, update, status, and removal through both hosts before announcing the release.
 
 Failed native checks retain their evidence, and the notarization response is retained when available. Standalone Mach-O binaries cannot carry a stapled notarization ticket; the workflow checks Apple's online record. Never disable Gatekeeper or remove quarantine to bypass a failure.
 
@@ -88,20 +93,20 @@ The build deployment target is macOS 13.0. CI executes on native ARM `macos-15` 
 
 Publication creates an immutable `delm-plugin-v<version>` tag and advances the `marketplace` branch atomically. The Codex catalog at `.agents/plugins/marketplace.json` points to `plugins/delm` at that immutable tag. Claude uses `.claude-plugin/marketplace.json` and its relative `plugins/delm-claude` package from the same atomically published marketplace tree. Existing package tags cannot be replaced, and concurrent branch changes cause publication to fail rather than overwrite another release. Source files and the source branch remain untouched.
 
-The generated release README supplies the exact one-paste command using the real repository name:
+After the native marketplace is published, Codex can also be installed directly:
 
 ```sh
-codex plugin marketplace add OWNER/REPOSITORY --ref marketplace && codex plugin add delm@delm
+codex plugin marketplace add jerry2247/delm-agent-plugin --ref marketplace && codex plugin add delm@delm
 ```
 
-`OWNER/REPOSITORY` above describes the command format, not a published destination. Copy the fully resolved command from the published package README. Restart Codex after installation, open `/hooks`, and review and trust the DeLM hooks. Restart Codex once more, then invoke `$delm:run <task>` in the intended project. Installation does not start workers or grant hook trust.
+Restart Codex after installation, open `/hooks`, and review and trust the DeLM hooks. Restart Codex once more, then invoke `$delm:run <task>` in the intended project. Installation does not start workers or grant hook trust.
 
 Updates use `codex plugin marketplace upgrade delm`; review changed hooks in `/hooks` when Codex requests it, then restart before running DeLM. Removal uses `codex plugin remove delm@delm`. Neither requires the source checkout. Native plugin management handles downloading and activation; DeLM adds no updater or background service. Existing `delm-local` users should follow [migration](support.md#updating-and-removing-the-plugin).
 
 Claude installation uses its native manager and the same distribution repository:
 
 ```sh
-claude plugin marketplace add https://github.com/OWNER/REPOSITORY.git#marketplace --scope user
+claude plugin marketplace add https://github.com/jerry2247/delm-agent-plugin.git#marketplace --scope user
 claude plugin install delm@delm --scope user
 ```
 
@@ -109,7 +114,7 @@ Restart Claude Code and use `/delm:run <task>`. Update with `claude plugin marke
 
 Repository-hosted installation is distinct from listing in OpenAI's public plugin directory. Publication does not imply directory approval.
 
-The npm wrapper in `packages/installer` detects the installed host and delegates marketplace registration and installation to its native CLI. When both hosts are available, it offers Codex, Claude Code, or both. Scripts can choose explicitly with `--host codex`, `--host claude`, or `--host both`. Its proposed name is `delm-agent`, which remains unpublished and unreserved. Its version is independent of the plugin version, so a new plugin release does not require republishing an unchanged installer.
+The `delm-agent` npm installer detects the installed host and delegates marketplace registration and installation to its native CLI. When both hosts are available, it offers Codex, Claude Code, or both. Scripts can choose explicitly with `--host codex`, `--host claude`, or `--host both`. Public installation requires Node.js 22 or later, Git, and the selected host CLI with its login completed.
 
 After a successful workflow with `publish` enabled has published the signed native marketplace, download `prepared-npm-installer-not-published` from that same run. Verify its `SHA256SUMS`, then publish the prepared installer tarball. It already contains the selected repository address, package metadata, and an explicit file allowlist. The source package retains `private: true`; publish the prepared tarball rather than changing that source setting.
 
@@ -121,13 +126,36 @@ npm login
 npm publish ./delm-agent-0.1.0.tgz --access public
 ```
 
-Run these commands from the final repository's checkout. Replace `RUN_ID` with the successful publication workflow's run ID and use the filename produced for the installer version being released. Registry account ownership and authentication are required. Each published installer version is immutable; increment its package version when its code or destination changes. Users then install with:
+Run these commands from this repository's checkout. Replace `RUN_ID` with the successful publication workflow's run ID and use the filename produced for the installer version being released. Registry account ownership and authentication are required. Each published installer version is immutable; increment its package version when its code or destination changes. Users then install with:
 
 ```sh
 npx --yes delm-agent@latest install
 ```
 
 The destination repository must be public for installation without GitHub access credentials. Before announcing a release, verify its installation using the published command, followed by native hook review, update, and removal. The final native plugin and installer must identify the same repository. Until both are published, the command above is not an available public installation path.
+
+## Transfer the repository later
+
+Use GitHub's repository transfer operation to move this same repository. GitHub redirects existing Git clone, fetch, and push URLs to the new location. Creating a copy in another repository does not transfer those URLs. Do not create a new repository or fork at `jerry2247/delm-agent-plugin` after the transfer: GitHub says that reusing the old location permanently removes its redirects. See [GitHub's transfer documentation](https://docs.github.com/en/repositories/creating-and-managing-repositories/transferring-a-repository).
+
+After the transfer:
+
+1. Update the maintainer checkout's `origin` and public documentation to the new repository. Confirm its release environment, workflow permissions, and release protections.
+2. Keep existing plugin tags unchanged. Publish the next qualified native release from the new home when updating its distribution metadata; an existing `delm-plugin-v<version>` tag cannot be replaced.
+3. Increment `packages/installer/package.json`'s installer version. Prepare it with the new `release_repository` and `previous_repositories: ["jerry2247/delm-agent-plugin"]`. Keep any additional approved former addresses in that array. Preparation updates the npm repository, homepage, issue links, and installation configuration.
+4. Publish that prepared installer tarball, then verify a fresh installation and an update from an installation registered at the old address for each host.
+
+For local release preparation, repeat `--previous-repository` for each approved former address:
+
+```sh
+python3 scripts/prepare_installer.py \
+  --repository NEW_OWNER/NEW_REPOSITORY \
+  --previous-repository jerry2247/delm-agent-plugin \
+  --native-release /path/to/new-release/release.json \
+  --out .validation/prepared-installer-transfer
+```
+
+The installer accepts only the current repository and the explicitly approved former addresses embedded in its release configuration. It keeps an existing native marketplace registration at its approved old URL and lets the host update through GitHub's redirect. It does not silently replace that registration. Fresh installations use the new URL; unrelated registrations remain conflicts. Test the redirect before publishing and preserve it afterward. The npm package name and user command remain `delm-agent` and `npx --yes delm-agent@latest install`.
 
 ## Package verification
 

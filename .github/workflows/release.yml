@@ -11,6 +11,11 @@ on:
         description: 'GitHub OWNER/REPO for native and npm installation; blank uses this repository'
         required: false
         type: string
+      previous_repositories:
+        description: 'JSON array of approved previous OWNER/REPO names after GitHub transfers or renames'
+        default: '[]'
+        required: false
+        type: string
       claude_qualifications:
         description: 'JSON array from manual native Claude qualification.json records; both architectures required to publish'
         default: '[]'
@@ -148,6 +153,7 @@ jobs:
           RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
           RELEASE_PUBLISH: ${{ inputs.publish }}
           CLAUDE_QUALIFICATIONS_JSON: ${{ inputs.claude_qualifications || '[]' }}
+          PREVIOUS_REPOSITORIES_JSON: ${{ inputs.previous_repositories || '[]' }}
         run: |
           tar -xf artifacts/runtime-aarch64-apple-darwin/runtime.tar -C artifacts/runtime-aarch64-apple-darwin
           tar -xf artifacts/runtime-x86_64-apple-darwin/runtime.tar -C artifacts/runtime-x86_64-apple-darwin
@@ -157,7 +163,7 @@ jobs:
           release_qualification_flags=()
           if [[ "$RELEASE_PUBLISH" == "true" ]]; then release_qualification_flags+=(--require-qualified); fi
           python3 scripts/package_release.py --verify unsigned-review --revision "$RELEASE_SOURCE_SHA" --repository "$RELEASE_REPOSITORY" "${release_qualification_flags[@]}"
-          python3 scripts/prepare_installer.py --repository "$RELEASE_REPOSITORY" --native-release unsigned-review/release.json --out prepared-installer
+          python3 scripts/prepare_installer.py --repository "$RELEASE_REPOSITORY" --previous-repositories-json "$PREVIOUS_REPOSITORIES_JSON" --native-release unsigned-review/release.json --out prepared-installer
           tar -cf unsigned-macos-review.tar -C unsigned-review .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
