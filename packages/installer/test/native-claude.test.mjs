@@ -8,7 +8,7 @@ import {test} from 'node:test';
 
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 
-test('packed installer uses real Claude plugin management with isolated local transport and retained data', {
+test('packed installer transfers real Claude registration with isolated local transport and retained data', {
   skip: process.platform !== 'darwin' ? 'Native installation currently supports macOS only.' : false,
   timeout: 120_000,
 }, t => {
@@ -80,26 +80,39 @@ test('packed installer uses real Claude plugin management with isolated local tr
     native('install', 'other@unrelated', '--scope', 'user');
     const otherBefore = native('list').find(item => item.id === 'other@unrelated');
     const tarball = path.join(output, prepared.tarball.path);
-    const cli = (...args) => JSON.parse(run('npx', ['--yes', '--offline', `--package=${tarball}`, 'delm-agent', ...args, '--host', 'claude', '--claude', claude, '--json']));
+    const packedCli = packageTarball => (...args) => JSON.parse(run('npx', ['--yes', '--offline', `--package=${packageTarball}`, 'delm-agent', ...args, '--host', 'claude', '--claude', claude, '--json']));
+    const cli = packedCli(tarball);
     assert.equal(cli('status').host, 'claude');
     assert.equal(cli('install').version, '0.3.0');
     const repeated = cli('install');
     assert.equal(repeated.changed, false);
     assert.equal(repeated.scope, 'user');
+
+    const transferredRepository = 'delm-fixture/transferred-claude-distribution';
+    const transferredUrl = `https://github.com/${transferredRepository}.git`;
+    const transferredOutput = path.join(root, 'prepared after transfer');
+    const transferred = JSON.parse(run('python3', [path.resolve(packageRoot, '../../scripts/prepare_installer.py'),
+      '--repository', transferredRepository, '--previous-repository', 'delm-fixture/claude-distribution', '--out', transferredOutput]));
+    // Both addresses reach the same fixture history, standing in for a GitHub
+    // transfer redirect. No external repository is created or contacted.
+    run('git', ['config', '--file', gitconfig, '--add', `url.${pathToFileURL(repository).href}.insteadOf`, transferredUrl]);
+    const transferredCli = packedCli(path.join(transferredOutput, transferred.tarball.path));
+    assert.equal(transferredCli('install').changed, false);
+    assert.equal(native('marketplace', 'list').find(item => item.name === 'delm').url, url);
     const saved = path.join(config, 'plugins/data/delm-delm/retained.txt');
     mkdirSync(path.dirname(saved), {recursive: true});
     writeFileSync(saved, 'retained plugin data');
     native('disable', 'delm@delm', '--scope', 'user');
     release('0.3.1');
-    const updated = cli('update');
+    const updated = transferredCli('update');
     assert.equal(updated.version, '0.3.1');
     assert.equal(updated.enabled, false);
-    assert.equal(cli('install').enabled, true);
+    assert.equal(transferredCli('install').enabled, true);
     const installed = native('list').find(item => item.id === 'delm@delm');
     assert.equal(installed.scope, 'user');
     assert.equal(run(path.join(installed.installPath, 'bin/delm'), []).trim(), 'delm 0.3.1');
-    assert.equal(cli('remove').installed, false);
-    assert.equal(cli('remove').changed, false);
+    assert.equal(transferredCli('remove').installed, false);
+    assert.equal(transferredCli('remove').changed, false);
     assert.equal(readFileSync(saved, 'utf8'), 'retained plugin data');
     assert.ok(native('marketplace', 'list').some(item => item.name === 'delm'));
     assert.deepEqual(native('list').find(item => item.id === 'other@unrelated'), otherBefore);
@@ -109,6 +122,11 @@ test('packed installer uses real Claude plugin management with isolated local tr
     assert.equal(readFileSync(path.join(config, '.credentials.json'), 'utf8'), '{}\n');
     assert.equal(readFileSync(path.join(codexHome, 'config.toml'), 'utf8'), 'model = "codex-untouched"\n');
 
+    native('marketplace', 'remove', 'delm');
+    assert.equal(transferredCli('install').version, '0.3.1');
+    assert.equal(native('marketplace', 'list').find(item => item.name === 'delm').url, transferredUrl);
+    assert.equal(transferredCli('remove').installed, false);
+
     // A correct repository at a different branch must not be silently replaced.
     git('branch', 'other-ref');
     native('marketplace', 'remove', 'delm');
@@ -116,7 +134,7 @@ test('packed installer uses real Claude plugin management with isolated local tr
     native('install', 'delm@delm', '--scope', 'user');
     const registrationBefore = native('marketplace', 'list');
     const pluginBefore = native('list').find(item => item.id === 'delm@delm');
-    assert.throws(() => cli('install'), error => error.status === 1 && JSON.parse(error.stderr).code === 'MARKETPLACE_CONFLICT');
+    assert.throws(() => transferredCli('install'), error => error.status === 1 && JSON.parse(error.stderr).code === 'MARKETPLACE_CONFLICT');
     assert.deepEqual(native('marketplace', 'list'), registrationBefore);
     assert.deepEqual(native('list').find(item => item.id === 'delm@delm'), pluginBefore);
     assert.equal(run(claude, ['--version']).trim(), hostVersion, 'Qualification must use one host version throughout.');
