@@ -1,48 +1,56 @@
-# Contributing
+# Contributing to DeLM
 
-DeLM supports native Codex and Claude Code workflows on macOS. Both host adapters share the collaboration policy, task board, workspace handling, and delivery implementation. Follow [development setup](docs/development.md) for prerequisites, local host packages, and verification.
+We welcome bug fixes, documentation improvements, and ideas for making DeLM better in Codex and Claude Code.
+
+## Quick links
+
+- [GitHub](https://github.com/Decentralized-LM/delm-agent-plugin)
+- [Discord](https://discord.com/invite/EuQyJPJzBt)
+- [Project website](https://yuzhenmao.github.io/DeLM/)
+- [Research paper](https://arxiv.org/abs/2606.10662)
+
+## How to contribute
+
+- **Bugs and small fixes:** open an issue or a pull request. Link any related discussion.
+- **Features and larger changes:** start a [GitHub issue](https://github.com/Decentralized-LM/delm-agent-plugin/issues) or discuss the idea on [Discord](https://discord.com/invite/EuQyJPJzBt) before implementing it.
+- **Questions and setup help:** ask on Discord or check the [support guide](docs/support.md).
 
 ## Install from source
 
-Install Git, Python 3, Rust, Xcode Command Line Tools, and your chosen host CLI. Complete its native login, then clone the public source:
+Development requires macOS, Git, Python 3, Node.js 22 or later, Xcode Command Line Tools, and the Rust toolchain specified in [rust-toolchain.toml](rust-toolchain.toml). Install the CLI for the host you want to work on: Codex or Claude Code 2.1.289 or later.
 
 ```sh
-git clone https://github.com/jerry2247/delm-agent-plugin.git
+git clone https://github.com/Decentralized-LM/delm-agent-plugin.git
 cd delm-agent-plugin
 ```
 
-For Codex:
+Follow the development guide to [set up Codex](docs/development.md#codex-plugin) or [set up Claude Code](docs/development.md#claude-code-plugin). You can install both. Sign in through your chosen host before trying an interactive run; routine verification does not need an account.
 
-```sh
-./scripts/install.sh
-```
+If you already have DeLM installed, review [source installation maintenance](docs/support.md#retained-state-and-contributor-installations) before switching installations or rebuilding.
 
-Restart Codex, review and trust DeLM in `/hooks`, then restart again.
+## Before opening a pull request
 
-For Claude Code 2.1.289 or later:
+Keep each PR focused on one problem. Explain what changes for the user and how you checked it. For changes to worker prompts or coordination, describe how the agents' behavior changes. Include a regression test for a bug fix and screenshots for visual changes when useful.
 
-```sh
-./scripts/build.sh --host claude
-claude plugin marketplace add "$PWD" --scope user
-claude plugin install delm@delm-local --scope user
-```
-
-Restart Claude Code and review its native trust and permission prompts. Keep this checkout available: the local Claude marketplace loads the staged package from it. You can install both hosts. See [source installation maintenance](docs/support.md#retained-state-and-contributor-installations) before rebuilding, updating, or removing an installation.
-
-## Make a change
-
-Keep changes focused and explain the problem, resulting behavior, and checks you ran. Changes to worker prompts or coordination should state how they affect the two-worker DeLM mechanism. Include a regression test when a change fixes behavior that could recur.
-
-Before submitting, run:
+For code changes, run:
 
 ```sh
 ./scripts/verify.sh
 ```
 
-Changes to installation, capability inheritance, or process ownership also need the relevant [host-specific checks](docs/development.md#focused-verification). Native installer checks for both hosts and Codex inheritance and lifecycle fixtures use disposable configurations without model calls. Run these checks locally; pushes and pull requests do not launch automatic verification workflows. The manually started release workflow also runs the required release checks. The Claude real-task fixture is separate and requires explicit account-use authorization. Report which checks passed and any you could not run; saved-configuration checks alone do not prove exact live-session parity, and a local fixture does not qualify a public release.
+Installation, capability inheritance, and process lifecycle changes also need the relevant [host-specific checks](docs/development.md#focused-verification). Run checks locally and report what passed or could not be tested; pushes and pull requests do not start automatic verification workflows. [Real-task checks](docs/development.md#optional-real-task-qualification) use a host account and require its owner's authorization.
 
-Keep credentials, private run folders, local builds, and research notes out of contributions. Bug reports should include the DeLM version, host name and version, macOS version and architecture, installation method, exact error, and a small reproduction. For permission or lifecycle failures, include the native permission mode and the operation that failed. Share only the logs needed to explain the issue, with private content removed.
+For documentation-only changes, check the wording, links, and commands you changed. Keep credentials, private run logs, local builds, and research notes out of your PR.
 
-See [architecture](docs/architecture.md) for runtime behavior and [releases](docs/releases.md) for packaging and publication.
+## Reporting bugs
 
-The native plugin version is **0.3.0** and the installer version is **0.1.0**. They advance independently: plugin releases update the native marketplace; installer changes require a new npm package version. Keep publication configuration in the release preparation step, including any approved former repository addresses.
+Include enough detail to reproduce the problem:
+
+- What you expected and what happened, including the exact error.
+- A small reproduction or the steps that led to the failure.
+- DeLM and host versions, installation method, macOS version, and Apple Silicon or Intel.
+- Relevant logs or screenshots, with private content removed.
+
+For permission or process lifecycle issues, also include the host's permission mode and the operation that failed.
+
+See the [development guide](docs/development.md) for build and test details, [architecture](docs/architecture.md) for how DeLM works, and [release guide](docs/releases.md) for packaging and publication.
