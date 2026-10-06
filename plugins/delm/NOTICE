@@ -1,0 +1,13 @@
+DeLM for Codex and Claude Code
+Copyright 2026 DeLM contributors
+
+DeLM-owned source code is licensed under the MIT License.
+DeLM communicates with the user's separately installed OpenAI Codex or
+Anthropic Claude Code CLI. Neither host executable is included or modified.
+
+Native runtime bundles include THIRD_PARTY_NOTICES.txt with their dependency
+licenses and notices. Third-party components retain their respective licenses.
+Refresh them after dependency changes: python3 scripts/dependency_notices.py
+The demo's separately attributed fonts, libraries, and media retain their
+existing terms; see video-demo/assets/SOURCES.md and
+video-demo/assets/fonts/LICENSE.txt.

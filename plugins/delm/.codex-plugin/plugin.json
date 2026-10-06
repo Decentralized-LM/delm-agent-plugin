@@ -1,0 +1,8 @@
+{
+  "name": "delm",
+  "version": "0.3.0",
+  "description": "Build in parallel with collaborating Codex agents and deliver their changes to your project.",
+  "skills": "./skills",
+  "hooks": "./hooks/hooks.json",
+  "repository": "https://github.com/jerry2247/delm-agent-plugin"
+}

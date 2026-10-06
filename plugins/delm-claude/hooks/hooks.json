@@ -1,0 +1,4 @@
+{
+  "description": "Native Claude Code coordination and lifecycle for DeLM.",
+  "modules": ["./delm.js"]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "delm",
+  "owner": {
+    "name": "DeLM"
+  },
+  "description": "DeLM native Claude Code plugin",
+  "plugins": [
+    {
+      "name": "delm",
+      "source": "./plugins/delm-claude",
+      "description": "Collaborating agents with shared tasks and guarded result delivery."
+    }
+  ]
+}

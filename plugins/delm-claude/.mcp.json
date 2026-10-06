@@ -1,0 +1,6 @@
+{
+  "delm": {
+    "command": "${CLAUDE_PLUGIN_ROOT}/bin/delm",
+    "args": ["claude", "mcp"]
+  }
+}

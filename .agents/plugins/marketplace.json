@@ -1,0 +1,22 @@
+{
+  "name": "delm",
+  "interface": {
+    "displayName": "DeLM"
+  },
+  "plugins": [
+    {
+      "name": "delm",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/jerry2247/delm-agent-plugin.git",
+        "path": "./plugins/delm",
+        "ref": "delm-plugin-v0.3.0"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

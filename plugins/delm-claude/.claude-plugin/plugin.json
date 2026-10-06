@@ -1,0 +1,10 @@
+{
+  "name": "delm",
+  "version": "0.3.0",
+  "description": "Build in parallel with collaborating Claude Code agents and deliver their changes to your project.",
+  "author": {
+    "name": "DeLM contributors"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/jerry2247/delm-agent-plugin"
+}
