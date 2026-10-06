@@ -22,6 +22,11 @@ HOST_PATHS = {"codex": "plugins/delm", "claude": "plugins/delm-claude"}
 HOST_MANIFESTS = {"codex": ".codex-plugin/plugin.json", "claude": ".claude-plugin/plugin.json"}
 
 
+def is_signed(metadata):
+    """Read separate signing state, including older notarized release records."""
+    return metadata.get("signed", metadata.get("signedAndNotarized", False)) is True
+
+
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
@@ -166,7 +171,7 @@ def verify_claude_qualification(metadata, require_all=False):
         version = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*) \(Claude Code\)", str(record.get("hostVersion", "")))
         proof = record.get("outputProof", {})
         allowed_runtime_hashes = {
-            metadata.get("unsignedRuntimeSha256") if metadata.get("signedAndNotarized") else metadata["files"]["bin/delm"]["sha256"],
+            metadata.get("unsignedRuntimeSha256") if is_signed(metadata) else metadata["files"]["bin/delm"]["sha256"],
             metadata.get("qualification", {}).get(arch, {}).get("runtimeSha256"),
         } - {None}
         if (record.get("schema") != 1 or record.get("kind") != "claude-native-qualification"
@@ -206,7 +211,9 @@ def load_claude_qualifications(paths, existing=None):
 
 
 def assemble(source, runtime, output, repository, revision, signed=False,
-             qualifications=(), unsigned_origin=None, claude="claude", claude_qualifications=()):
+             qualifications=(), unsigned_origin=None, claude="claude", claude_qualifications=(), notarized=False):
+    if notarized and not signed:
+        raise RuntimeError("Notarized releases must also be signed.")
     if not re.fullmatch(REPOSITORY_PATTERN, repository):
         raise RuntimeError("Repository must be the GitHub OWNER/REPO, without a URL.")
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
@@ -218,7 +225,7 @@ def assemble(source, runtime, output, repository, revision, signed=False,
     qualification = {}
     if unsigned_origin is not None:
         origin = verify(unsigned_origin, revision=revision, repository=repository, require_qualified=True)
-        if origin["signedAndNotarized"] or origin["runtimeSourcesSha256"] != provenance["runtimeSourcesSha256"]:
+        if is_signed(origin) or origin["runtimeSourcesSha256"] != provenance["runtimeSourcesSha256"]:
             raise RuntimeError("Signing source differs from the qualified unsigned package.")
         verify_qualification(origin, unsigned_origin / "plugins/delm/bin/delm")
         qualification = origin["qualification"]
@@ -273,7 +280,7 @@ def assemble(source, runtime, output, repository, revision, signed=False,
         "schema": 1, "version": version, "sourceRevision": revision,
         "repository": repository, **provenance,
         "platform": "darwin", "architectures": ["arm64", "x86_64"],
-        "minimumMacOS": "13.0", "signedAndNotarized": signed,
+        "minimumMacOS": "13.0", "signed": signed, "signedAndNotarized": notarized,
         "files": packages["codex"]["files"], "hostPackages": packages,
         "claudeValidation": claude_validation,
         "claudeAdapterSha256": claude_adapter_digest(output / HOST_PATHS["claude"]),
@@ -292,7 +299,7 @@ def assemble(source, runtime, output, repository, revision, signed=False,
         f"# DeLM {version} for macOS\n\n"
         "Prebuilt native plugins for Codex and Claude Code on Apple Silicon and Intel. "
         "Requires the selected host CLI and Git; no Rust or Python is needed.\n\n"
-        + ("Signed and notarized release.\n\n" if signed else
+        + (("Signed and notarized release.\n\n" if notarized else "Developer ID-signed release; not notarized.\n\n") if signed else
            "**Unsigned review artifact. Not for public distribution or installation.**\n\n")
         + ("Built from an uncommitted working tree. `sourceRevision` identifies its base commit, "
            "not the exact source; `runtimeSourcesSha256` records the runtime source inputs.\n\n"
@@ -329,6 +336,8 @@ def verify(output, revision=None, repository=None, require_qualified=False):
             or metadata.get("architectures") != list(ARCHITECTURES)
             or metadata.get("minimumMacOS") != "13.0"
             or type(metadata.get("signedAndNotarized")) is not bool
+            or type(metadata.get("signed", metadata.get("signedAndNotarized"))) is not bool
+            or (metadata.get("signedAndNotarized") and not is_signed(metadata))
             or type(metadata.get("sourceDirty")) is not bool
             or not re.fullmatch(r"[0-9a-f]{40}", metadata.get("sourceRevision", ""))
             or not re.fullmatch(r"[0-9a-f]{64}", metadata.get("runtimeSourcesSha256", ""))
@@ -402,12 +411,12 @@ def verify(output, revision=None, repository=None, require_qualified=False):
     if actual != expected:
         raise RuntimeError("Distribution files or checksums changed.")
     verify_claude_qualification(metadata)
-    if require_qualified or metadata["signedAndNotarized"]:
+    if require_qualified or is_signed(metadata):
         if metadata["sourceDirty"]:
             raise RuntimeError("An uncommitted working-tree artifact cannot qualify for publication.")
         verify_qualification(metadata)
         verify_claude_qualification(metadata, require_all=True)
-    if metadata["signedAndNotarized"] and not re.fullmatch(
+    if is_signed(metadata) and not re.fullmatch(
             r"[0-9a-f]{64}", metadata.get("unsignedRuntimeSha256", "")):
         raise RuntimeError("Signed release must identify its qualified unsigned runtime.")
     return metadata
@@ -420,6 +429,7 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--repository")
     parser.add_argument("--revision")
+    parser.add_argument("--signed", action="store_true")
     parser.add_argument("--signed-and-notarized", action="store_true")
     parser.add_argument("--qualification", action="append", default=[], type=Path)
     parser.add_argument("--unsigned-origin", type=Path)
@@ -434,11 +444,14 @@ def main():
     else:
         if not all((args.runtime, args.output, args.repository, args.revision)):
             parser.error("--runtime, --output, --repository, and --revision are required")
+        if args.signed or args.signed_and_notarized:
+            subprocess.run(["codesign", "--verify", "--strict", str(args.runtime)], check=True)
         if args.signed_and_notarized:
             subprocess.run(["codesign", "--verify", "--strict", "--check-notarization",
                             "-R=notarized", str(args.runtime)], check=True)
         assemble(SOURCE, args.runtime, args.output, args.repository, args.revision,
-                 args.signed_and_notarized, args.qualification, args.unsigned_origin, args.claude, args.claude_qualification)
+                 args.signed or args.signed_and_notarized, args.qualification, args.unsigned_origin, args.claude,
+                 args.claude_qualification, notarized=args.signed_and_notarized)
         verify(args.output)
 
 

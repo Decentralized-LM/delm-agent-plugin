@@ -94,6 +94,51 @@ def checksums(output):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_signed_only_publication_keeps_provenance_and_rejects_bad_signatures(self):
+        with fixture() as (root, source, runtime, revision):
+            origin, signed = root / "unsigned", root / "signed"
+            package_release.assemble(source, runtime, origin, "example/delm", revision,
+                                     qualifications=qualifications(root, source, runtime, revision),
+                                     claude_qualifications=fixture_claude_qualifications(root, source, runtime))
+            package_release.assemble(source, runtime, signed, "example/delm", revision,
+                                     signed=True, unsigned_origin=origin)
+            metadata = package_release.verify(signed, require_qualified=True)
+            self.assertTrue(metadata["signed"])
+            self.assertFalse(metadata["signedAndNotarized"])
+            self.assertEqual(metadata["unsignedRuntimeSha256"], fingerprint(runtime)["sha256"])
+            self.assertIn("not notarized", (signed / "README.md").read_text())
+            reports = root / "reports"
+            for architecture in package_release.ARCHITECTURES:
+                package_release.write_json(reports / ("signed-qualification-" + architecture) / "result.json", {
+                    "kind": "release-runtime-smoke", "architecture": architecture,
+                    "runtimeSha256": fingerprint(runtime)["sha256"], "passed": True,
+                    "signed": True, "signedAndNotarized": False, "modelCalls": 0,
+                    **package_release.source_state(source), "cases": qualify_release.expected_smoke_cases()})
+            with mock.patch.object(qualify_release, "command") as command:
+                self.assertTrue(qualify_release.verify_signed(signed, reports)["passed"])
+                command.assert_called_once_with(["codesign", "--verify", "--strict", str(signed / "plugins/delm/bin/delm")])
+            with mock.patch.object(qualify_release, "command", side_effect=subprocess.CalledProcessError(1, "codesign")):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    qualify_release.verify_signed(signed, reports)
+            with self.assertRaisesRegex(RuntimeError, "signed package"):
+                qualify_release.verify_signed(origin, reports)
+            metadata["signed"] = False
+            metadata["signedAndNotarized"] = True
+            package_release.write_json(signed / "release.json", metadata)
+            checksums(signed)
+            with self.assertRaisesRegex(RuntimeError, "Invalid release provenance"):
+                package_release.verify(signed)
+
+    def test_release_tool_preserves_tagged_source_identity(self):
+        with fixture() as (_, source, _, revision):
+            tag = "v" + package_release.source_version(source)
+            subprocess.run(["git", "-C", str(source), "tag", tag], check=True)
+            wrapper = Path(__file__).resolve().parent / "release_tool.py"
+            env = {**os.environ, "SOURCE_REF": tag, "RELEASE_SOURCE_SHA": revision,
+                   "RELEASE_PUBLISH": "true", "RELEASE_REPOSITORY": "example/delm", "GITHUB_ACTIONS": "false"}
+            env.pop("GITHUB_OUTPUT", None)
+            subprocess.run(["python3", str(wrapper), "release_identity.py"], cwd=source, env=env, check=True)
+
     def test_adapter_provenance_ignores_native_editor_generation_but_binds_executed_resources(self):
         with fixture() as (root, source, runtime, revision):
             package = root / "claude"

@@ -22,7 +22,7 @@ on:
         required: false
         type: string
       publish:
-        description: 'Sign, notarize, qualify, and publish to the native marketplace'
+        description: 'Sign, qualify, and publish to the native marketplace'
         default: false
         type: boolean
 permissions:
@@ -199,7 +199,7 @@ jobs:
           node-version: '22'
       - name: Install the native Claude payload validator
         run: npm install --global @anthropic-ai/claude-code@2.1.289
-      - name: Sign and notarize the qualified package
+      - name: Sign the qualified package
         env:
           RELEASE_PUBLISH: ${{ inputs.publish }}
           SOURCE_REF: ${{ inputs.source_ref }}
@@ -207,9 +207,6 @@ jobs:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           RELEASE_REPOSITORY: ${{ needs.identity.outputs.repository }}
         run: |
           bash scripts/sign_release.sh
@@ -219,13 +216,6 @@ jobs:
           name: signed-macos-release-candidate
           path: signed-macos-release.tar
           if-no-files-found: error
-      - name: Retain notarization response
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: notarization-response
-          path: ${{ runner.temp }}/delm-notarization.json
-          if-no-files-found: ignore
   qualify-signed:
     needs: [identity, sign]
     strategy:
@@ -246,7 +236,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signed-macos-release-candidate
-      - name: Verify and exercise the signed universal binary under quarantine
+      - name: Verify and exercise the signed universal binary
         env:
           RELEASE_REPOSITORY: ${{ needs.identity.outputs.repository }}
           RELEASE_SOURCE_SHA: ${{ needs.identity.outputs.revision }}
@@ -255,7 +245,6 @@ jobs:
           mkdir candidate
           tar -xf signed-macos-release.tar -C candidate
           python3 scripts/package_release.py --verify candidate --revision "$RELEASE_SOURCE_SHA" --repository "$RELEASE_REPOSITORY" --require-qualified
-          xattr -w com.apple.quarantine '0081;00000000;DeLMReleaseQualification;' candidate/plugins/delm/bin/delm
           python3 scripts/qualify_release.py smoke --runtime candidate/plugins/delm/bin/delm --architecture "$BUILD_ARCHITECTURE" --signed --out "$RUNNER_TEMP/signed-qualification"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
