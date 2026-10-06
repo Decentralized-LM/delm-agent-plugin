@@ -11,6 +11,8 @@
   <a href="https://arxiv.org/abs/2606.10662"><img src="docs/assets/paper.svg" alt="Read the paper on arXiv" height="28"></a>
   &nbsp;
   <a href="https://yuzhenmao.github.io/DeLM/"><img src="docs/assets/website.svg" alt="Visit the project website" height="28"></a>
+  &nbsp;
+  <a href="https://discord.com/invite/EuQyJPJzBt"><img src="docs/assets/discord.svg" alt="Join the DeLM community on Discord" height="28"></a>
 </p>
 
 <p align="center">
@@ -28,17 +30,9 @@ DeLM lets agents work in parallel in your existing Codex or Claude Code workflow
 
 DeLM uses your existing host account and starts agents only when you ask.
 
-<p align="center">
-  <a href="video-demo/renders/delm-demo.mp4"><img src="video-demo/renders/poster.png" alt="Watch DeLM for Claude Code and Codex: agents building and sharing their work" width="800"></a>
-  <br>
-  <a href="video-demo/renders/delm-demo.mp4">Watch the 55-second demo</a>
-</p>
-
 ## Install on macOS
 
-**Release pending:** the npm package and native marketplace are not published yet. You can [install from source now](CONTRIBUTING.md#install-from-source).
-
-After publication, install either or both plugins with one command:
+**Release pending.** Public installation will use one command for either or both plugins:
 
 ```sh
 npx --yes delm-agent@latest install
@@ -102,6 +96,8 @@ Codex workers preserve saved skills, plugins, hooks, MCP configuration, and perm
 ## Research
 
 DeLM builds on **Decentralized Multi-Agent Systems with Shared Context**. See the [paper](https://arxiv.org/abs/2606.10662), [project website](https://yuzhenmao.github.io/DeLM/), and [research code](https://github.com/yuzhenmao/DeLM) for the method, evaluations, and agent trajectories.
+
+The Codex and Claude Code plugins were created by [Jerry Gu](https://github.com/jerry2247).
 
 ## License
 
