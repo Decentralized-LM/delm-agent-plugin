@@ -1,0 +1,238 @@
+name: Publish verified macOS candidate
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run:
+        description: Successful unsigned release preparation run ID
+        required: true
+        type: string
+      source_ref:
+        description: Version tag identifying the exact candidate source
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: delm-release
+  cancel-in-progress: false
+jobs:
+  qualify-claude:
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Verify candidate provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          RELEASE_PUBLISH: 'true'
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 scripts/release_identity.py
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN" > "$RUNNER_TEMP/candidate-run.json"
+          python3 - <<'PYPROVENANCE'
+          import json, os, subprocess
+          from pathlib import Path
+          run = json.loads((Path(os.environ['RUNNER_TEMP']) / 'candidate-run.json').read_text())
+          revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          assert run['conclusion'] == 'success' and run['event'] == 'workflow_dispatch'
+          assert run['path'] == '.github/workflows/release.yml'
+          assert run['head_sha'] == revision
+          assert run['repository']['full_name'] == os.environ['GITHUB_REPOSITORY']
+          PYPROVENANCE
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unsigned-macos-review-not-for-distribution
+          run-id: ${{ inputs.candidate_run }}
+          github-token: ${{ github.token }}
+      - name: Install native host and verify the exact candidate
+        run: |
+          npm install --global @anthropic-ai/claude-code@2.1.289
+          mkdir candidate
+          tar -xf unsigned-macos-review.tar -C candidate
+          python3 scripts/package_release.py --verify candidate --revision "$(git rev-parse HEAD)" --repository "$GITHUB_REPOSITORY"
+      - name: Qualify Claude collaboration on the native architecture
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          test -n "$CLAUDE_CODE_OAUTH_TOKEN"
+          export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude-qualification-config"
+          mkdir -m 700 "$CLAUDE_CONFIG_DIR"
+          python3 - <<'PYSETTINGS'
+          import json, os
+          from pathlib import Path
+          settings = {'permissions': {'defaultMode': 'acceptEdits', 'allow': ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__plugin_delm_delm__*']}}
+          (Path(os.environ['CLAUDE_CONFIG_DIR']) / 'settings.json').write_text(json.dumps(settings))
+          PYSETTINGS
+          python3 scripts/verify_claude_native.py --plugin candidate/plugins/delm-claude --out "$RUNNER_TEMP/claude-proof" --authorize-model-use --timeout 150
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: claude-proof-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/claude-proof/qualification.json
+          if-no-files-found: error
+  sign:
+    needs: [qualify-claude]
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: release
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unsigned-macos-review-not-for-distribution
+          run-id: ${{ inputs.candidate_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: claude-proof-*
+          path: claude-proofs
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install the native Claude payload validator
+        run: npm install --global @anthropic-ai/claude-code@2.1.289
+      - name: Sign and notarize the qualified package
+        env:
+          RELEASE_PUBLISH: 'true'
+          SOURCE_REF: ${{ inputs.source_ref }}
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          export RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
+          mkdir candidate-origin
+          tar -xf unsigned-macos-review.tar -C candidate-origin
+          python3 - <<'PYPROOF'
+          import json
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, 'scripts')
+          from package_release import load_claude_qualifications, verify, verify_claude_qualification
+          from install_support import package_files
+          root = Path('candidate-origin')
+          metadata = verify(root)
+          metadata['claudeQualification'] = load_claude_qualifications(sorted(Path('claude-proofs').glob('*/qualification.json')))
+          metadata['claudeQualifiedArchitectures'] = [arch for arch in ('arm64', 'x86_64') if arch in metadata['claudeQualification']]
+          verify_claude_qualification(metadata, require_all=True)
+          (root / 'release.json').write_text(json.dumps(metadata, indent=2) + '\n')
+          readme = root / 'README.md'
+          readme.write_text(readme.read_text().replace('none; qualification remains incomplete', 'arm64, x86_64'))
+          entries = package_files(root)
+          (root / 'SHA256SUMS').write_text(''.join(f"{info['sha256']}  {name}\n" for name, info in entries.items() if name != 'SHA256SUMS'))
+          verify(root, require_qualified=True)
+          PYPROOF
+          tar -cf unsigned-macos-review.tar -C candidate-origin .
+          bash scripts/sign_release.sh
+          tar -cf signed-macos-release.tar -C signed-release .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-macos-release-candidate
+          path: signed-macos-release.tar
+          if-no-files-found: error
+      - name: Retain notarization response
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: notarization-response
+          path: ${{ runner.temp }}/delm-notarization.json
+          if-no-files-found: ignore
+  qualify-signed:
+    needs: [sign]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-macos-release-candidate
+      - name: Verify and exercise the signed universal binary under quarantine
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          BUILD_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          export RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
+          mkdir candidate
+          tar -xf signed-macos-release.tar -C candidate
+          python3 scripts/package_release.py --verify candidate --revision "$RELEASE_SOURCE_SHA" --repository "$RELEASE_REPOSITORY" --require-qualified
+          xattr -w com.apple.quarantine '0081;00000000;DeLMReleaseQualification;' candidate/plugins/delm/bin/delm
+          python3 scripts/qualify_release.py smoke --runtime candidate/plugins/delm/bin/delm --architecture "$BUILD_ARCHITECTURE" --signed --out "$RUNNER_TEMP/signed-qualification"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: signed-qualification-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/signed-qualification
+          if-no-files-found: error
+  publish:
+    needs: [sign, qualify-signed]
+    runs-on: macos-15
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-macos-release-candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: signed-qualification-*
+          path: signed-evidence
+      - name: Publish the signed, qualified package atomically
+        env:
+          RELEASE_PUBLISH: 'true'
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          export RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
+          mkdir signed-release
+          tar -xf signed-macos-release.tar -C signed-release
+          python3 scripts/publish_release.py signed-release signed-evidence
+          python3 scripts/prepare_installer.py --repository "$RELEASE_REPOSITORY" --native-release signed-release/release.json --out prepared-installer
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prepared-npm-installer-not-published
+          path: |
+            prepared-installer/*.tgz
+            prepared-installer/preparation.json
+            prepared-installer/SHA256SUMS
+          if-no-files-found: error
