@@ -11,8 +11,6 @@
   <a href="https://arxiv.org/abs/2606.10662"><img src="docs/assets/paper.svg" alt="Read the paper on arXiv" height="28"></a>
   &nbsp;
   <a href="https://yuzhenmao.github.io/DeLM/"><img src="docs/assets/website.svg" alt="Visit the project website" height="28"></a>
-  &nbsp;
-  <a href="https://discord.com"><img src="docs/assets/discord.svg" alt="Discord" height="28"></a>
 </p>
 
 <p align="center">
@@ -38,41 +36,24 @@ DeLM uses your existing host account and starts agents only when you ask.
 
 ## Install on macOS
 
-Build from source with Git, Python 3, Rust, and Xcode Command Line Tools. Install the CLI for your chosen host and complete its login first. Run the installation commands below from this repository's root. You can install either plugin or both.
+**Release pending:** the npm package and native marketplace are not published yet. You can [install from source now](CONTRIBUTING.md#install-from-source).
 
-### Codex
-
-```sh
-./scripts/install.sh
-```
-
-Restart Codex, open `/hooks`, and review and trust the DeLM hooks. Restart once more to load the configuration, then open Codex in the project you want to work on.
-
-### Claude Code
-
-Requires **Claude Code 2.1.289 or later**.
-
-```sh
-./scripts/build.sh --host claude
-claude plugin marketplace add "$PWD" --scope user
-claude plugin install delm@delm-local --scope user
-```
-
-Restart Claude Code, then open it in the project you want to work on. DeLM uses Claude's native plugins, skills, hooks, and MCP tools. Review any trust or permission prompts Claude presents.
-
-See [support](docs/support.md) for updates, removal, and troubleshooting, or [development setup](docs/development.md) for local builds.
-
-### Planned one-command install
-
-The proposed package name is **`delm-agent`**. Once the package and prebuilt releases are published, installation will be:
+After publication, install either or both plugins with one command:
 
 ```sh
 npx --yes delm-agent@latest install
 ```
 
-The installer detects your installed host. If both Codex and Claude Code are available, choose **Codex**, **Claude Code**, or **Both**. Explicit host flags are available for [scripted installation](packages/installer/README.md#host-selection).
+Requires macOS, Node.js 22 or later, Git, and the CLI for your chosen host with its login completed. Claude Code requires version **2.1.289 or later**.
 
-This command is not available yet; the package name is not reserved. Contributors can [verify the installer locally](packages/installer/README.md#private-verification).
+The installer detects your installed host. If both Codex and Claude Code are available, choose **Codex**, **Claude Code**, or **Both**. Explicit host flags are available for [scripted installation](packages/installer/README.md#host-selection). Each plugin uses its host's native plugin manager.
+
+| Host | After installation |
+| --- | --- |
+| Codex | Restart, open `/hooks`, and review and trust the DeLM hooks. Restart once more to load them. |
+| Claude Code | Restart to load DeLM. Review any trust or permission prompts Claude presents. |
+
+See [support](docs/support.md) for updates, removal, and troubleshooting, or the [release guide](docs/releases.md) for publication requirements.
 
 ## Run a task
 

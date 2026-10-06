@@ -13,8 +13,10 @@ import tempfile
 
 SOURCE = Path(__file__).resolve().parents[1] / "packages/installer"
 PACKAGE_FILES = ["LICENSE", "NOTICE", "README.md", "bin/delm-agent.mjs",
-                 "lib/claude.mjs", "lib/hosts.mjs", "lib/installer.mjs", "lib/maintenance.mjs", "lib/native.mjs", "package.json", "release.json"]
+                 "lib/claude.mjs", "lib/hosts.mjs", "lib/installer.mjs", "lib/maintenance.mjs", "lib/native.mjs",
+                 "lib/release.mjs", "package.json", "release.json"]
 REPOSITORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
+UNSET = object()
 
 
 def write_json(path, value):
@@ -25,7 +27,10 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def readme(repository):
+def readme(repository, previous_repositories):
+    previous_sources = ", ".join(f"`{name}`" for name in previous_repositories)
+    relocation = (f"This release also recognizes these approved previous repository names: {previous_sources}."
+                  if previous_repositories else "This release has no approved previous repository names.")
     return f"""# DeLM installer
 
 Install and manage native DeLM plugins for Codex or Claude Code. Both use the
@@ -116,12 +121,40 @@ source installation blocks install and update. For Codex, stop active work, run
 migration instructions if cached files were modified. For Claude, review the
 source installation in its native plugin manager. This installer does not remove
 or migrate source installations automatically.
+
+## Repository moves
+
+New installations use [`{repository}`](https://github.com/{repository}) on the
+`marketplace` branch. {relocation}
+An existing registration at an approved previous name can stay in place when
+GitHub redirects that name after a repository transfer or rename. The installer
+keeps that registration and its settings; it does not rewrite arbitrary sources
+or treat unrelated repositories as DeLM. The branch must still be `marketplace`.
+Copying the project to a new repository does not create a GitHub redirect.
+
+Run the latest published installer after a move. If your registered source is not
+recognized, review the release's migration instructions before changing it.
+Report installer issues at <https://github.com/{repository}/issues>.
 """
 
 
-def prepare(repository, output, native_release=None, source=SOURCE):
-    if not re.fullmatch(REPOSITORY_PATTERN, repository):
+def validate_repositories(repository, previous_repositories):
+    if not isinstance(repository, str) or not re.fullmatch(REPOSITORY_PATTERN, repository):
         raise RuntimeError("Repository must be a GitHub OWNER/REPO name, not a URL or path.")
+    if not isinstance(previous_repositories, list):
+        raise RuntimeError("Previous repositories must be a JSON array of GitHub OWNER/REPO names.")
+    seen = {repository.lower()}
+    for previous in previous_repositories:
+        if not isinstance(previous, str) or not re.fullmatch(REPOSITORY_PATTERN, previous):
+            raise RuntimeError("Each previous repository must be a GitHub OWNER/REPO name, not a URL or path.")
+        if previous.lower() in seen:
+            raise RuntimeError("Previous repositories must be unique and must not include the current repository (case-insensitive).")
+        seen.add(previous.lower())
+
+
+def prepare(repository, output, native_release=None, source=SOURCE, previous_repositories=UNSET):
+    previous_repositories = [] if previous_repositories is UNSET else previous_repositories
+    validate_repositories(repository, previous_repositories)
     source = Path(source).resolve()
     output = Path(output).absolute()
     if output.exists() or output.is_symlink():
@@ -131,7 +164,7 @@ def prepare(repository, output, native_release=None, source=SOURCE):
     metadata = json.loads((source / "package.json").read_text())
     configuration = json.loads((source / "release.json").read_text())
     if metadata.get("private") is not True or configuration != {
-        "repository": None, "marketplace": "delm", "ref": "marketplace", "plugin": "delm@delm"
+        "repository": None, "previousRepositories": [], "marketplace": "delm", "ref": "marketplace", "plugin": "delm@delm"
     }:
         raise RuntimeError("Preparation requires the private, unconfigured source installer.")
     if metadata.get("name") != "delm-agent" or not re.fullmatch(
@@ -162,12 +195,18 @@ def prepare(repository, output, native_release=None, source=SOURCE):
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source / relative, destination)
     configuration["repository"] = repository
+    configuration["previousRepositories"] = previous_repositories
     write_json(package / "release.json", configuration)
     metadata["private"] = False
     metadata["repository"] = {"type": "git", "url": f"git+https://github.com/{repository}.git"}
+    metadata["homepage"] = f"https://github.com/{repository}#readme"
+    metadata["bugs"] = {"url": f"https://github.com/{repository}/issues"}
+    metadata["keywords"] = ["delm", "codex", "claude-code", "ai-agents", "cli"]
+    metadata["publishConfig"] = {"access": "public", "registry": "https://registry.npmjs.org/",
+                                 "tag": "next" if "-" in metadata["version"] else "latest"}
     metadata.pop("scripts", None)
     write_json(package / "package.json", metadata)
-    (package / "README.md").write_text(readme(repository), encoding="utf-8")
+    (package / "README.md").write_text(readme(repository, previous_repositories), encoding="utf-8")
     # npm configuration and cache are disposable. No lifecycle scripts, login,
     # registry lookup, or publication is needed to create the tarball.
     with tempfile.TemporaryDirectory(prefix="delm-installer-npm-") as temporary:
@@ -187,7 +226,7 @@ def prepare(repository, output, native_release=None, source=SOURCE):
             or sorted(item["path"] for item in packed[0].get("files", [])) != PACKAGE_FILES):
         raise RuntimeError("npm packed unexpected installer contents; preserve the output for review.")
     tarball = output / expected_tarball
-    preparation = {"schema": 1, "repository": repository,
+    preparation = {"schema": 1, "repository": repository, "previousRepositories": previous_repositories,
                    "installer": {"name": metadata["name"], "version": metadata["version"]},
                    "tarball": {"path": expected_tarball, "sha256": sha256(tarball)},
                    "files": {relative: sha256(package / relative) for relative in PACKAGE_FILES}}
@@ -205,9 +244,16 @@ def main():
     parser.add_argument("--repository", required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--native-release", type=Path)
+    previous = parser.add_mutually_exclusive_group()
+    previous.add_argument("--previous-repository", action="append", default=[], metavar="OWNER/REPO",
+                          help="Approve a previous GitHub repository name after a transfer or rename; repeat for each name.")
+    previous.add_argument("--previous-repositories-json", metavar="JSON",
+                          help="JSON array of approved previous repository names, for workflow input.")
     args = parser.parse_args()
     try:
-        result = prepare(args.repository, args.out, args.native_release)
+        previous_repositories = (json.loads(args.previous_repositories_json)
+                                 if args.previous_repositories_json is not None else args.previous_repository)
+        result = prepare(args.repository, args.out, args.native_release, previous_repositories=previous_repositories)
     except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Installer preparation failed: {error}\n")
     print(json.dumps(result, indent=2))

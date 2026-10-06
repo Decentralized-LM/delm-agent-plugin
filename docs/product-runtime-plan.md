@@ -1,8 +1,8 @@
 # DeLM product and runtime plan
 
-Status: main implementation completed, with the verification commands below used for acceptance. The agent-visible changes in the review checkpoint remain undecided, and the separate terminal UI work is deferred.
+Status: the core implementation and Claude terminal board are implemented. This document records their design boundaries and acceptance criteria; it is not a statement that a public release has been qualified or published. The agent-visible proposals in the review checkpoint below remain separate decisions.
 
-The goal is to make DeLM reliable, fast, and straightforward to use in Codex and Claude Code while preserving its collaboration model. The separate [terminal UI plan](terminal-ui-plan.md) covers how users see progress and will follow the core fixes.
+The goal is to make DeLM reliable, fast, and straightforward to use in Codex and Claude Code while preserving its collaboration model. The [terminal UI plan](terminal-ui-plan.md) documents the implemented Claude board. Current installation and release work is tracked in the [release guide](releases.md).
 
 ## Design boundaries
 
@@ -124,14 +124,14 @@ Consider giving the parent a concise outcome, delivery status, meaningful verifi
 
 The parent already performs host control and final reporting, and may perform narrowly scoped original-project checks when delivery requires them. Reducing its input should preserve the information needed to report results truthfully.
 
-## Execution order after approval
+## Implementation sequence
 
 1. Correct conversation/input handling and worker wakeups, with focused regression coverage.
 2. Verify setup inheritance and collect runtime phase measurements.
 3. Implement optimizations supported by those measurements, then complete installation and recovery improvements.
 4. Reconcile documentation and validate the affected behavior across both hosts.
 
-Resolve the agent-information proposals independently before scheduling their implementation. The terminal UI remains a separate follow-up plan.
+Resolve the agent-information proposals independently before scheduling their implementation. The Claude terminal board is implemented separately from those model-context proposals.
 
 ## Implementation record
 
@@ -139,11 +139,12 @@ Resolve the agent-information proposals independently before scheduling their im
 | --- | --- |
 | Conversation and inputs | Claude state is keyed by conversation, including delayed events and concurrent starts. Accepted text and additional context are forwarded together. Tests cover switches, recovery, failed delivery, native refusals, and unchanged fork settings. |
 | Worker wakeups | Both adapters reconcile readiness after native turn completion. Codex also wakes for task creation. Board, controller, and scripted native-host tests cover event order, dependency relevance, duplicate events, and preserved worker identity. |
-| Setup inheritance | Added regression cases for skill enablement, dependencies, plugin identity, MCP authentication, and discovery failure. The native saved-configuration fixture passes without model calls. CI checks the qualified and latest versions of both hosts. |
+| Setup inheritance | Added regression cases for skill enablement, dependencies, plugin identity, MCP authentication, and discovery failure. Native fixtures cover saved configuration, metadata lookup, and production Codex startup without remote model calls. CI checks configured versions and latest releases; support still depends on passing evidence for the actual host version. |
 | Runtime overhead | Added passive phase, worker-turn, waiting, and coordination-response measurements. Observations add no model calls or per-sample filesystem synchronization. The wakeup fixes remove missed-event idle time; cheap layout checks reject unsupported projects before recursive capture. Other performance candidates remain dependent on measurements. |
 | Installation | Structured and readable status distinguish enabled installation from unverified session readiness. Mutation preflights preserve active and uncertain runs, including failed startup records, with actionable errors. |
 | Recovery and diagnostics | `delm runs`, `delm report`, and explicit preview/confirm `delm clean` expose run state, timing, and eligible diagnostic storage. Cleanup retains ownership, completion evidence, shared board, delivery records, recovery contents, and original-project files. |
 | Documentation | README, support, development, architecture, Claude integration, and both source and prepared-installer instructions describe the supported behavior and its limits. |
+| Claude terminal board | The native board displays agents, task ownership, shared context, and delivery or recovery state. It opens with a run; hiding or reopening it does not start model work. See the [terminal UI plan](terminal-ui-plan.md). |
 
 ### Supported boundaries
 

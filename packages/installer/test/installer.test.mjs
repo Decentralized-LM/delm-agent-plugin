@@ -27,7 +27,8 @@ function fake({installed = false, enabled = true, source = RELEASE.url, legacy =
       ? state.legacy ? [{pluginId: 'delm@delm-local', installed: true}] : []
       : state.plugins.filter(item => item.pluginId === RELEASE.plugin)};
     else if (operation[0] === 'marketplace' && operation[1] === 'add') {
-      assert.deepEqual(operation, ['marketplace', 'add', RELEASE.url, '--ref', RELEASE.ref]);
+      const registeredSource = state.marketplaces.find(item => item.name === 'delm')?.marketplaceSource.source;
+      assert.deepEqual(operation, ['marketplace', 'add', registeredSource ?? RELEASE.url, '--ref', RELEASE.ref]);
       if (!state.marketplaces.some(item => item.name === 'delm')) state.marketplaces.push({name: 'delm', marketplaceSource: {sourceType: 'git', source: RELEASE.url}});
       result = {marketplaceName: 'delm', alreadyAdded: installed};
     } else if (operation[0] === 'add') {
@@ -72,6 +73,52 @@ test('source and invalid release configurations fail before calling native tools
     const run = async () => assert.fail('Unconfigured release called a native tool');
     await assert.rejects(manage(command, {platform: 'darwin', run}), {code: 'UNCONFIGURED_RELEASE'});
     await assert.rejects(manage(command, {platform: 'darwin', run, release: {...RELEASE, repository: '../invalid'}}), {code: 'INVALID_RELEASE'});
+  }
+});
+
+test('invalid repository transfer allowlists are rejected before either host is called', async () => {
+  const invalid = [null, 'old/repo', {}, [null], [42], ['../repo'], ['old/repo/extra'], ['old/repo\n'],
+    ['https://github.com/old/repo'], ['old/repo#marketplace'], ['old/repo', 'OLD/REPO'],
+    [RELEASE.repository], [RELEASE.repository.toUpperCase()]];
+  for (const host of ['codex', 'claude']) {
+    for (const previousRepositories of invalid) {
+      await assert.rejects(manage('install', {
+        host, platform: 'darwin', release: {...RELEASE, previousRepositories},
+        run: async () => assert.fail('Invalid release called a native tool'),
+      }), {code: 'INVALID_RELEASE'});
+    }
+  }
+});
+
+test('Codex preserves approved previous registration and still asks native add to validate its ref', async () => {
+  for (const command of COMMANDS) {
+    for (const suffix of ['', '.git']) {
+      const source = `https://github.com/old-owner/old-repo${suffix}`;
+      const {state, options} = fake({installed: true, source});
+      options.release = {...RELEASE, previousRepositories: ['old-owner/old-repo']};
+      const before = structuredClone(state.marketplaces);
+      const result = await manage(command, options);
+      assert.equal(result.conflict, false);
+      assert.deepEqual(state.marketplaces, before);
+      if (['install', 'update'].includes(command)) {
+        assert.deepEqual(mutations(state)[0].slice(2, -1), ['marketplace', 'add', source, '--ref', 'marketplace']);
+      }
+    }
+  }
+  const {state, options} = fake();
+  options.release = {...RELEASE, previousRepositories: ['old-owner/old-repo']};
+  await manage('install', options);
+  assert.equal(state.marketplaces[0].marketplaceSource.source, RELEASE.url);
+});
+
+test('Codex rejects unapproved and altered previous source URLs without mutations', async () => {
+  for (const source of ['https://github.com/unrelated/repo.git', 'https://github.com/old-owner/old-repo.git?other',
+    'https://github.com/old-owner/old-repo/extra', 'https://github.com/old-owner/old-repo.git#marketplace',
+    'https://user@github.com/old-owner/old-repo.git', 'http://github.com/old-owner/old-repo.git']) {
+    const {state, options} = fake({installed: true, source});
+    options.release = {...RELEASE, previousRepositories: ['old-owner/old-repo']};
+    await assert.rejects(manage('install', options), {code: 'MARKETPLACE_CONFLICT'});
+    assert.deepEqual(mutations(state), []);
   }
 });
 

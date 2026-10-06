@@ -6,6 +6,7 @@ import {join, resolve} from 'node:path';
 import {InstallerError, execute} from './native.mjs';
 import {manageClaude, describeClaude} from './claude.mjs';
 import {assertMaintenanceSafe, installationReadiness} from './maintenance.mjs';
+import {matchesRepositoryUrl, validateRelease} from './release.mjs';
 export {InstallerError, execute} from './native.mjs';
 const configuration = JSON.parse(readFileSync(new URL('../release.json', import.meta.url), 'utf8'));
 export const RELEASE = Object.freeze({
@@ -27,11 +28,7 @@ export function validateRequest(command, {platform = process.platform, release =
   if (release.repository === null) {
     throw new InstallerError('This source installer has no release destination. Use a prepared installer package; contributors can run scripts/prepare_installer.py with --repository OWNER/REPO and --out DIRECTORY.', 'UNCONFIGURED_RELEASE');
   }
-  if (typeof release.repository !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(release.repository)
-      || release.url !== `https://github.com/${release.repository}.git`
-      || release.marketplace !== 'delm' || release.ref !== 'marketplace' || release.plugin !== 'delm@delm') {
-    throw new InstallerError('This installer has invalid release configuration. Obtain a correctly prepared package.', 'INVALID_RELEASE');
-  }
+  validateRelease(release);
   if (command !== 'status' && platform !== 'darwin') {
     throw new InstallerError('DeLM installation currently supports macOS only. Windows and Linux support is not released yet.', 'UNSUPPORTED_PLATFORM');
   }
@@ -79,6 +76,7 @@ async function manageNative(command, {codex, release: RELEASE, run, beforeMutati
       throw new InstallerError('Codex did not return native plugin JSON. Update stock Codex CLI and retry.', 'UNSUPPORTED_CODEX');
     }
   };
+  let registeredMarketplaceUrl;
   const readState = async () => {
     const marketplaces = collection(await native('marketplace', 'list'), 'marketplaces');
     const installed = collection(await native('list', '--marketplace', RELEASE.marketplace), 'installed');
@@ -86,8 +84,8 @@ async function manageNative(command, {codex, release: RELEASE, run, beforeMutati
     const matching = marketplaces.filter(item => item.name === RELEASE.marketplace);
     const marketplace = matching[0];
     const source = marketplace?.marketplaceSource;
-    const expectedSource = source?.sourceType === 'git'
-      && [RELEASE.url, RELEASE.url.slice(0, -4)].includes(source.source);
+    const expectedSource = source?.sourceType === 'git' && matchesRepositoryUrl(RELEASE, source.source);
+    registeredMarketplaceUrl = expectedSource ? source.source : null;
     const conflict = matching.length > 1 || (marketplace && !expectedSource);
     const plugins = installed.filter(item => item.pluginId === RELEASE.plugin);
     if (plugins.length > 1) throw new InstallerError('Codex reports multiple DeLM installations. Resolve them in the native plugin manager before continuing.', 'AMBIGUOUS_INSTALLATION');
@@ -103,6 +101,7 @@ async function manageNative(command, {codex, release: RELEASE, run, beforeMutati
     };
   };
   const before = await readState();
+  const marketplaceUrl = registeredMarketplaceUrl ?? RELEASE.url;
   if (command === 'status') return {command, ...before};
   if (before.conflict) {
     throw new InstallerError('The marketplace name delm belongs to a different or unidentifiable source. It was preserved. Review `codex plugin marketplace list --json` before continuing.', 'MARKETPLACE_CONFLICT');
@@ -128,7 +127,9 @@ async function manageNative(command, {codex, release: RELEASE, run, beforeMutati
   await run('git', ['--version']);
   // Native add checks the configured ref as well as the URL. Its own conflict
   // handling preserves an existing marketplace registered against another ref.
-  const marketplace = await native('marketplace', 'add', RELEASE.url, '--ref', RELEASE.ref);
+  // After a repository transfer, retain the verified previous URL so native add
+  // can check its ref without rejecting the registration as a different source.
+  const marketplace = await native('marketplace', 'add', marketplaceUrl, '--ref', RELEASE.ref);
   if (marketplace.marketplaceName !== RELEASE.marketplace) {
     throw new InstallerError('The repository returned an unexpected marketplace identity. No plugin was installed; review the native marketplace registration.', 'UNEXPECTED_IDENTITY');
   }

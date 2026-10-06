@@ -8,7 +8,7 @@ import {test} from 'node:test';
 
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 
-test('packed npx entrypoint installs, updates and removes through real Codex with isolated Git transport', {
+test('packed npx entrypoint installs, transfers, updates and removes through real Codex with isolated Git transport', {
   skip: process.platform !== 'darwin' ? 'Native installation currently supports macOS only.' : false,
   timeout: 120_000,
 }, () => {
@@ -83,7 +83,8 @@ test('packed npx entrypoint installs, updates and removes through real Codex wit
     native('add', 'other@unrelated');
     const otherBefore = native('list', '--marketplace', 'unrelated');
     const tarball = path.join(output, prepared.tarball.path);
-    const cli = (...args) => JSON.parse(run('npx', ['--yes', '--offline', `--package=${tarball}`, 'delm-agent', ...args, '--codex', codex, '--json']));
+    const packedCli = packageTarball => (...args) => JSON.parse(run('npx', ['--yes', '--offline', `--package=${packageTarball}`, 'delm-agent', ...args, '--codex', codex, '--json']));
+    const cli = packedCli(tarball);
 
     assert.equal(cli('status').installed, false);
     assert.equal(cli('install').version, '0.3.0');
@@ -92,18 +93,35 @@ test('packed npx entrypoint installs, updates and removes through real Codex wit
     assert.ok(!originalConfig.includes('trusted_hash'), 'Installation must not grant hook trust.');
     assert.equal(readFileSync(path.join(codexHome, 'auth.json'), 'utf8'), '{}\n');
 
+    // Simulate GitHub's transfer redirect with a second URL mapping to the same
+    // local release history. The second package explicitly approves the first.
+    const transferredRepository = 'delm-fixture/transferred-distribution';
+    const transferredUrl = `https://github.com/${transferredRepository}.git`;
+    const transferredOutput = path.join(root, 'prepared after transfer');
+    const transferred = JSON.parse(run('python3', [path.resolve(packageRoot, '../../scripts/prepare_installer.py'),
+      '--repository', transferredRepository, '--previous-repository', RELEASE.repository, '--out', transferredOutput]));
+    run('git', ['config', '--file', gitconfig, '--add', `url.${pathToFileURL(repository).href}.insteadOf`, transferredUrl]);
+    const transferredCli = packedCli(path.join(transferredOutput, transferred.tarball.path));
+    assert.equal(transferredCli('install').changed, false);
+    assert.equal(native('marketplace', 'list').marketplaces.find(item => item.name === 'delm').marketplaceSource.source, RELEASE.url);
+
     release('0.3.1');
-    assert.equal(cli('update').version, '0.3.1');
+    assert.equal(transferredCli('update').version, '0.3.1');
     const installed = native('list', '--marketplace', 'delm').installed;
     assert.equal(installed.find(item => item.pluginId === RELEASE.plugin).version, '0.3.1');
     assert.equal(run(path.join(codexHome, 'plugins/cache/delm/delm/0.3.1/bin/delm'), []).trim(), 'delm 0.3.1');
-    assert.equal(cli('remove').installed, false);
-    assert.equal(cli('remove').changed, false);
+    assert.equal(transferredCli('remove').installed, false);
+    assert.equal(transferredCli('remove').changed, false);
     assert.ok(native('marketplace', 'list').marketplaces.some(item => item.name === 'delm'));
     assert.deepEqual(native('list', '--marketplace', 'unrelated'), otherBefore);
     assert.equal(readFileSync(retained, 'utf8'), 'retained work');
     assert.equal(readFileSync(path.join(codexHome, 'auth.json'), 'utf8'), '{}\n');
     assert.match(readFileSync(path.join(codexHome, 'config.toml'), 'utf8'), /model = "fixture-model"/);
+
+    native('marketplace', 'remove', 'delm');
+    assert.equal(transferredCli('install').version, '0.3.1');
+    assert.equal(native('marketplace', 'list').marketplaces.find(item => item.name === 'delm').marketplaceSource.source, transferredUrl);
+    assert.equal(transferredCli('remove').installed, false);
 
     // The native list API omits the registered ref. The installer delegates this
     // check to native add; verify that a different ref cannot be silently reset.
@@ -114,7 +132,7 @@ test('packed npx entrypoint installs, updates and removes through real Codex wit
     const conflictingConfig = readFileSync(path.join(codexHome, 'config.toml'), 'utf8');
     const conflictingPlugin = native('list', '--marketplace', 'delm');
     const conflictingRuntime = readFileSync(path.join(codexHome, 'plugins/cache/delm/delm/0.3.1/bin/delm'));
-    assert.throws(() => cli('install'), error => error.status === 1
+    assert.throws(() => transferredCli('install'), error => error.status === 1
       && String(error.stderr).includes('NATIVE_COMMAND_FAILED'));
     assert.equal(readFileSync(path.join(codexHome, 'config.toml'), 'utf8'), conflictingConfig);
     assert.deepEqual(native('list', '--marketplace', 'delm'), conflictingPlugin);

@@ -2,6 +2,8 @@
 
 DeLM runs on macOS through the selected host's native CLI and account. Builds target macOS 13 or later on Apple Silicon and Intel; advertised release support requires qualification on the actual architecture and OS. See [development](development.md) for source builds and [releases](releases.md) for publication requirements.
 
+The public source is available at [jerry2247/delm-agent-plugin](https://github.com/jerry2247/delm-agent-plugin). The npm package and native marketplace are not published yet; use the [source installation instructions](../CONTRIBUTING.md#install-from-source) to try the current code. After publication, `npx --yes delm-agent@latest install` will detect the available host and offer Codex, Claude Code, or both when both CLIs are installed.
+
 ## Selecting a project
 
 Invoke `$delm:run` in Codex or `/delm:run` in Claude Code from the exact project folder you want to change. If that folder has no `.git` entry, DeLM initializes an independent repository there without creating a commit. Existing Git administration is preserved and validated. Resolve a collection containing several repositories before invoking it. Save editor buffers first: the captured baseline contains saved files, not unsaved editor content.
@@ -117,7 +119,15 @@ Cleanup requires confirmed delivery, completed workspace cleanup, confirmed nati
 
 For a published marketplace installation, the [common installer](../packages/installer/README.md#host-selection) supports `update`, `remove`, and `status` with the same host detection and choice as installation. Pass `--host codex`, `--host claude`, or `--host both` to select explicitly. You can also use the native commands below. Update and removal are separate operations. Stop active work first.
 
+```sh
+npx --yes delm-agent@latest status
+npx --yes delm-agent@latest update
+npx --yes delm-agent@latest remove
+```
+
 The common installer and source activation scripts refuse active or uncertain runs. A fully stopped run with no temporary workspaces and a verified recovery bundle can remain saved while you update or remove the plugin. Saved work is not deleted by maintenance. These checks are preflight checks, so do not start a new run concurrently with maintenance.
+
+If the repository moves, a new installer release can recognize explicitly approved former GitHub addresses. An existing native registration keeps its old URL and follows GitHub's transfer redirect; fresh installations use the new URL. This requires an actual repository transfer or rename and a working redirect. Copying the code into another repository does not provide that behavior. See the [maintainer transfer procedure](releases.md#transfer-the-repository-later). Unrelated marketplace registrations are not replaced automatically.
 
 ### Codex
 

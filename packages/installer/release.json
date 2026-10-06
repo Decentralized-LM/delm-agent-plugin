@@ -1,5 +1,6 @@
 {
   "repository": null,
+  "previousRepositories": [],
   "marketplace": "delm",
   "ref": "marketplace",
   "plugin": "delm@delm"
