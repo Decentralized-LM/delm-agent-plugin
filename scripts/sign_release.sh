@@ -22,11 +22,22 @@ python3 scripts/package_release.py --verify unsigned-review --revision "$RELEASE
 release_keychain="$RUNNER_TEMP/delm-signing.keychain-db"
 release_certificate="$RUNNER_TEMP/delm-signing.p12"
 release_password=$(openssl rand -hex 32)
-trap 'security delete-keychain "$release_keychain" >/dev/null 2>&1 || true; rm -f "$release_certificate"' EXIT
+release_search_list=()
+while IFS= read -r existing_keychain; do
+  release_search_list+=("$existing_keychain")
+done < <(security list-keychains -d user | python3 -c 'import shlex,sys; print("\n".join(shlex.split(sys.stdin.read())))')
+cleanup_signing() {
+  security list-keychains -d user -s "${release_search_list[@]}" >/dev/null 2>&1 || true
+  security delete-keychain "$release_keychain" >/dev/null 2>&1 || true
+  rm -f "$release_certificate"
+}
+trap cleanup_signing EXIT
 printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$release_certificate"
 security create-keychain -p "$release_password" "$release_keychain"
 security set-keychain-settings -lut 21600 "$release_keychain"
 security unlock-keychain -p "$release_password" "$release_keychain"
+# codesign also resolves key material through the user's keychain search list.
+security list-keychains -d user -s "$release_keychain" "${release_search_list[@]}"
 # Apple intermediate certificates are public; importing the issuer does not
 # override system trust or authorize an untrusted root.
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
