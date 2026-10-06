@@ -16,7 +16,8 @@ if (( ${#missing_settings[@]} )); then
 fi
 python3 scripts/release_identity.py
 mkdir unsigned-review
-tar -xf unsigned-macos-review.tar -C unsigned-review
+# Preserve reviewed payload modes under the private signing umask.
+tar -xpf unsigned-macos-review.tar -C unsigned-review
 python3 scripts/package_release.py --verify unsigned-review --revision "$RELEASE_SOURCE_SHA" --repository "$RELEASE_REPOSITORY" --require-qualified
 release_keychain="$RUNNER_TEMP/delm-signing.keychain-db"
 release_certificate="$RUNNER_TEMP/delm-signing.p12"
