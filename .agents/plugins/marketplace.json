@@ -8,9 +8,9 @@
       "name": "delm",
       "source": {
         "source": "git-subdir",
-        "url": "https://github.com/jerry2247/delm-agent-plugin.git",
+        "url": "https://github.com/Decentralized-LM/delm-agent-plugin.git",
         "path": "./plugins/delm",
-        "ref": "delm-plugin-v0.3.0"
+        "ref": "delm-plugin-v0.3.1"
       },
       "policy": {
         "installation": "AVAILABLE",
