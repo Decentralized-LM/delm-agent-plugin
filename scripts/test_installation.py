@@ -23,7 +23,7 @@ import publish_release
 
 SOURCE = Path(__file__).resolve().parent.parent
 CODEX = shutil.which("codex")
-CLAUDE = shutil.which("claude")
+CLAUDE = build.claude_executable()
 
 
 def executable(path, content):
