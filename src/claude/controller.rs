@@ -83,6 +83,7 @@ pub(super) struct Controller {
     native_host: ProcessIdentity,
     runtime: ProcessIdentity,
     workers: [Worker; 2],
+    worker_scopes: [Option<Vec<FilesystemScope>>; 2],
     board: Board,
     services: Services,
     tickets: HashMap<String, Ticket>,
@@ -252,6 +253,7 @@ impl Controller {
             native_host,
             runtime,
             workers,
+            worker_scopes: [None, None],
             board,
             services: Services::default(),
             tickets: HashMap::new(),
@@ -608,7 +610,7 @@ impl Controller {
     fn configure_scopes(&mut self, r: &Value) -> Result<Value> {
         let i = self.worker(r)?;
         let scopes: Vec<FilesystemScope> = serde_json::from_value(r["scopes"].clone())?;
-        self.board.set_worker_scopes(i + 1, scopes)?;
+        self.worker_scopes[i] = Some(self.board.set_worker_scopes(i + 1, scopes)?);
         if let Some(policy) = r.get("result_policy") {
             let mut policy: ResultPolicy = serde_json::from_value(policy.clone())?;
             // Host customization cannot allow interpreter routes through the
@@ -833,8 +835,7 @@ impl Controller {
                 Some("complete")=>{
                     ensure!(!answer.trim().is_empty(),"Native completed turn has no final answer");
                     let declaration=declaration.as_ref().unwrap();
-                    let shared=self.board.shared_checks(i+1,declaration,self.revision)?;
-                    let completion=Completion::capture_with_evidence(&self.workspace.workers[i],declaration,&self.workers[i].checks,self.revision,&self.workers[i].result_policy,shared,&self.workspace.baseline_manifest)?;
+                    let completion=Completion::capture_with_evidence(&self.board,i+1,declaration,&self.workers[i].checks,self.revision,&self.workers[i].result_policy,&self.workspace.baseline_manifest)?;
                     atomic_json(&self.workspace.run_dir.join("completion.json"),&completion)?;
                     if let Some(accepted) = &completion.accepted {
                         self.retained_artifacts.extend(accepted.selection.artifacts.iter().cloned());
@@ -1061,7 +1062,9 @@ impl Controller {
                     "phase",
                     &json!({"phase":"delivery_and_cleanup","boundary":"start"}),
                 )?;
-                let delivery = candidate.deliver(&self.workspace, *i);
+                let delivery = candidate.deliver_with_validation(&self.workspace, *i, || {
+                    candidate.verify_shared_inputs(&self.board, *i + 1)
+                });
                 self.journal.observe("phase", &json!({"phase":"delivery_and_cleanup","boundary":"end","success":delivery.is_ok()}))?;
                 let delivery = delivery?;
                 self.status = if !delivery.delivered {
@@ -1140,7 +1143,7 @@ impl Controller {
             &self.workspace.run_dir.join("claude.json"),
             &json!({"version":1,"host":"claude","runtime_version":env!("CARGO_PKG_VERSION"),"host_version":self.host_version,"package_root":self.package_root,"session_id":self.session_id,
             "workspace":self.workspace,"project":self.workspace.original,"token_digest":self.token_digest,"task":self.task,"revision":self.revision,"sequence":self.sequence,"native_host":self.native_host,
-            "runtime":self.runtime,"workers":self.workers,"services":self.services.process_identities(),"candidate":self.candidate,"status":self.status,
+            "runtime":self.runtime,"workers":self.workers,"worker_scopes":self.worker_scopes,"services":self.services.process_identities(),"candidate":self.candidate,"status":self.status,
             "stop_requested":self.stop_requested,"finished":self.finished,"finalization":self.finalization,"final_result":self.final_result,"retained_artifacts":self.retained_artifacts}),
         )
     }
@@ -1368,7 +1371,29 @@ fn recover_at(run_dir: &Path, request: &Value) -> Result<Value> {
         // Delivery reconciles its durable completed transaction first. It
         // revalidates the candidate when applying for the first time; a retry
         // after cleanup must not require removed worker files or replay edits.
-        let delivered = candidate.deliver(&prepared, worker);
+        let delivered = candidate.deliver_with_validation(&prepared, worker, || {
+            // Older runs without shared receipts need no saved board scopes.
+            // Never infer broader permissions for a receipt from an old run.
+            let declared = candidate.declaration.get("shared_checks");
+            if candidate.shared_checks.is_empty()
+                && declared.is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
+            {
+                return Ok(());
+            }
+            let scopes: Vec<FilesystemScope> = serde_json::from_value(
+                saved["worker_scopes"][worker].clone(),
+            ).context("Saved run lacks native check-input permissions; its result must be preserved for recovery instead of automatic delivery")?;
+            let mut board = Board::open(
+                &prepared.run_dir,
+                &prepared.baseline,
+                prepared.workers.clone(),
+            )?;
+            ensure!(
+                board.set_worker_scopes(worker + 1, scopes.clone())? == scopes,
+                "Saved native check-input permissions resolve differently; preserve the result for recovery"
+            );
+            candidate.verify_shared_inputs(&board, worker + 1)
+        });
         let result = match delivered {
             Ok(delivery) => {
                 json!({"type":"final","status":if !delivery.delivered {"delivery_conflict"} else if delivery.verification_required {"delivered"} else {"complete"},
@@ -1511,6 +1536,601 @@ mod tests {
         c.handle(json!({"op":"begin_settle","generation":finalization.generation,"revision":finalization.revision}))?;
         c.handle(json!({"op":"settle","generation":finalization.generation,"revision":finalization.revision,
             "agents":[{"id":"agent-1","status":"completed"},{"id":"agent-2","status":"killed"}],"background_tasks_stopped":true}))
+    }
+
+    fn complete_with_dependency_check(c: &mut Controller) {
+        let root = c.workspace.workers[0].clone();
+        fs::write(root.join("source.txt"), "finished\n").unwrap();
+        fs::create_dir_all(root.join("node_modules/three/build")).unwrap();
+        fs::write(
+            root.join("node_modules/three/build/three.core.js"),
+            "export const checkedDependency = true;\n",
+        )
+        .unwrap();
+        fs::create_dir(root.join(".cache")).unwrap();
+        fs::write(root.join(".gitignore"), ".cache/\nnode_modules/\n").unwrap();
+        fs::write(root.join(".cache/requested.txt"), "requested artifact\n").unwrap();
+        let snapshot = tool(
+            c,
+            1,
+            "begin-dependency-check",
+            "delm_check_begin",
+            json!({"idempotency_key":"begin-dependency-check", "summary":"Check source with its installed dependency",
+                "paths":["source.txt", ".cache/requested.txt", "node_modules/three/build/three.core.js", "node_modules/three/build/absent.js"]}),
+        );
+        c.handle(
+            json!({"op":"command_start","agent_id":"agent-1","turn_id":"turn-1",
+            "call_id":"dependency-check","command":"node check.mjs","cwd":root}),
+        )
+        .unwrap();
+        c.handle(
+            json!({"op":"command_end","agent_id":"agent-1","call_id":"dependency-check",
+            "result_ref":"dependency-check-result","is_error":false,"interrupted":false,
+            "background_task_id":null,"timed_out":false}),
+        )
+        .unwrap();
+        let receipt = tool(
+            c,
+            1,
+            "finish-dependency-check",
+            "delm_check_finish",
+            json!({"idempotency_key":"finish-dependency-check", "snapshot_id":snapshot["result"]["snapshot_id"],
+                "command_id":"dependency-check"}),
+        );
+        assert_eq!(receipt["result"]["reusable"], true);
+        tool(
+            c,
+            1,
+            "complete-with-dependency",
+            "delm_complete",
+            json!({"idempotency_key":"complete-with-dependency", "expected_revision":1,"outcome":"complete",
+                "summary":"Implemented with a checked dependency", "checks":["dependency-check"],
+                "shared_checks":[receipt["result"]["receipt_id"]], "artifacts":[".cache/requested.txt"]}),
+        );
+        let result = c
+            .handle(
+                json!({"op":"turn_end","agent_id":"agent-1","turn_id":"turn-1",
+            "reason":"completed","answer":"Implemented and checked."}),
+            )
+            .unwrap();
+        assert_eq!(result["actions"][0]["type"], "candidate");
+    }
+
+    #[test]
+    fn dependency_check_inputs_are_validated_without_delivering_installed_dependencies() {
+        let (_temp, mut c) = controller();
+        complete_with_dependency_check(&mut c);
+        // Only named inputs back this receipt. Unrelated installed files are
+        // neither delivery outputs nor evidence for the declared check.
+        fs::write(
+            c.workspace.workers[0].join("node_modules/three/unrelated.js"),
+            "unrelated late write\n",
+        )
+        .unwrap();
+        assert_dependency_check_delivered(&settle(&mut c).unwrap()["actions"][0]);
+        assert_eq!(
+            fs::read_to_string(c.workspace.original.join("source.txt")).unwrap(),
+            "finished\n"
+        );
+        assert_eq!(
+            fs::read_to_string(c.workspace.original.join(".cache/requested.txt")).unwrap(),
+            "requested artifact\n"
+        );
+        assert!(!c.workspace.original.join("node_modules").exists());
+        assert!(c.workspace.workers.iter().all(|root| !root.exists()));
+    }
+
+    fn assert_dependency_check_delivered(result: &Value) {
+        // Existing delivery policy still requests verification when installed
+        // environment files were intentionally omitted from the result.
+        assert_eq!(result["status"], "delivered", "{result}");
+        assert_eq!(result["delivery"]["delivered"], true);
+        assert_eq!(result["delivery"]["verification_required"], true);
+        assert_eq!(result["delivery"]["cleanup_complete"], true);
+    }
+
+    #[test]
+    fn dependency_check_changes_after_selection_preserve_the_original_and_recoverable_outputs() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        for change in ["contents", "deleted", "mode", "absent_created", "symlink"] {
+            let (temp, mut c) = controller();
+            complete_with_dependency_check(&mut c);
+            let root = c.workspace.workers[0].clone();
+            let dependency = root.join("node_modules/three/build/three.core.js");
+            match change {
+                "contents" => fs::write(&dependency, "changed after check\n").unwrap(),
+                "deleted" => fs::remove_file(&dependency).unwrap(),
+                "mode" => {
+                    let mode = fs::metadata(&dependency).unwrap().permissions().mode();
+                    fs::set_permissions(&dependency, fs::Permissions::from_mode(mode ^ 0o100))
+                        .unwrap();
+                }
+                "absent_created" => {
+                    fs::write(
+                        root.join("node_modules/three/build/absent.js"),
+                        "new input\n",
+                    )
+                    .unwrap();
+                }
+                "symlink" => {
+                    fs::remove_file(&dependency).unwrap();
+                    symlink(root.join("source.txt"), &dependency).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let result = settle(&mut c).unwrap();
+            assert_eq!(
+                result["actions"][0]["status"], "recovery_required",
+                "{change}: {result}"
+            );
+            assert!(
+                result["actions"][0]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("shared check"),
+                "{change}: {result}"
+            );
+            assert_eq!(
+                fs::read_to_string(c.workspace.original.join("source.txt")).unwrap(),
+                "original\n",
+                "{change}"
+            );
+            assert!(!c.workspace.original.join(".cache/requested.txt").exists());
+            assert!(!c.workspace.original.join("node_modules").exists());
+            assert!(c.workspace.workers.iter().all(|root| !root.exists()));
+            let recovery = Path::new(
+                result["actions"][0]["recovery"]["recovery"]
+                    .as_str()
+                    .unwrap(),
+            );
+            let exported =
+                workspace::export_recovery(recovery, &temp.path().join("exported"), 1).unwrap();
+            assert_eq!(
+                fs::read_to_string(exported.files.join("source.txt")).unwrap(),
+                "finished\n"
+            );
+            assert_eq!(
+                fs::read_to_string(exported.files.join(".cache/requested.txt")).unwrap(),
+                "requested artifact\n"
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_check_candidate_keeps_retryable_shutdown_and_explicit_cancellation() {
+        for cancel in [false, true] {
+            let (_temp, mut c) = controller();
+            complete_with_dependency_check(&mut c);
+            let fence = c.finalization.clone().unwrap();
+            c.handle(json!({"op":"begin_settle","generation":fence.generation,"revision":fence.revision}))
+                .unwrap();
+            c.handle(json!({"op":"settlement_failed","generation":fence.generation,"revision":fence.revision}))
+                .unwrap();
+            assert!(c.candidate.is_some());
+            assert!(c.workspace.workers.iter().all(|root| root.exists()));
+            if cancel {
+                c.handle(json!({"op":"cancel","reason":"User requested /delm-stop"}))
+                    .unwrap();
+                assert!(c.candidate.is_none());
+            }
+            let result = settle(&mut c).unwrap();
+            if cancel {
+                assert_eq!(result["actions"][0]["status"], "stopped");
+            } else {
+                assert_dependency_check_delivered(&result["actions"][0]);
+            }
+            assert_eq!(
+                fs::read_to_string(c.workspace.original.join("source.txt")).unwrap(),
+                if cancel { "original\n" } else { "finished\n" }
+            );
+            assert!(!c.workspace.original.join("node_modules").exists());
+            assert!(c.workspace.workers.iter().all(|root| !root.exists()));
+        }
+    }
+
+    fn make_dependency_check_recoverable(c: &mut Controller) -> Value {
+        // Hold a child alive with its input pipe, then close it after capturing
+        // identity. This models an exited bridge without a timed sleep.
+        let mut process = std::process::Command::new("/bin/cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        c.runtime = ProcessIdentity::capture(process.id()).unwrap();
+        drop(process.stdin.take());
+        assert!(process.wait().unwrap().success());
+        let token = "dependency-recovery-token";
+        c.token_digest = Some(format!("{:x}", Sha256::digest(token)));
+        c.persist().unwrap();
+        json!({"intent":"auto","token":token,"session_id":"session",
+            "agents":[{"id":"agent-1","status":"completed"},{"id":"agent-2","status":"killed"}],
+            "background_tasks_stopped":true})
+    }
+
+    #[test]
+    fn dependency_check_recovery_revalidates_inputs_and_saved_access_before_first_delivery() {
+        for change in [
+            "unchanged",
+            "unrelated",
+            "contents",
+            "denied",
+            "deny_alias_retargeted",
+            "saved_policy_path_replaced",
+            "receipt_scope_missing",
+            "receipt_hash",
+            "receipt_id",
+            "malformed_declaration",
+        ] {
+            let (temp, mut c) = controller();
+            complete_with_dependency_check(&mut c);
+            let root = c.workspace.workers[0].clone();
+            match change {
+                "unchanged"
+                | "receipt_scope_missing"
+                | "receipt_hash"
+                | "receipt_id"
+                | "malformed_declaration" => {}
+                "unrelated" => {
+                    fs::write(root.join("node_modules/unrelated.js"), "unrelated\n").unwrap()
+                }
+                "contents" => fs::write(
+                    root.join("node_modules/three/build/three.core.js"),
+                    "changed\n",
+                )
+                .unwrap(),
+                "denied" => {
+                    c.handle(json!({"op":"configure_scopes","agent_id":"agent-1", "scopes":[
+                        FilesystemScope {path:root.clone(), access:FilesystemAccess::Write},
+                        FilesystemScope {path:root.join("node_modules/three"), access:FilesystemAccess::Deny}
+                    ]})).unwrap();
+                }
+                "deny_alias_retargeted" => {
+                    let alias = temp.path().join("permission-alias");
+                    std::os::unix::fs::symlink(root.join("node_modules/three"), &alias).unwrap();
+                    c.handle(
+                        json!({"op":"configure_scopes","agent_id":"agent-1", "scopes":[
+                            FilesystemScope {path:root.clone(), access:FilesystemAccess::Write},
+                            FilesystemScope {path:alias.clone(), access:FilesystemAccess::Deny}
+                        ]}),
+                    )
+                    .unwrap();
+                    let unrelated = temp.path().join("unrelated-permission-target");
+                    fs::create_dir(&unrelated).unwrap();
+                    fs::remove_file(&alias).unwrap();
+                    std::os::unix::fs::symlink(unrelated, &alias).unwrap();
+                }
+                "saved_policy_path_replaced" => {
+                    let denied = temp.path().join("saved-denied-directory");
+                    let replacement = temp.path().join("replacement-directory");
+                    fs::create_dir(&denied).unwrap();
+                    fs::create_dir(&replacement).unwrap();
+                    c.handle(
+                        json!({"op":"configure_scopes","agent_id":"agent-1", "scopes":[
+                            FilesystemScope {path:root.clone(), access:FilesystemAccess::Write},
+                            FilesystemScope {path:denied.clone(), access:FilesystemAccess::Deny}
+                        ]}),
+                    )
+                    .unwrap();
+                    fs::remove_dir(&denied).unwrap();
+                    std::os::unix::fs::symlink(replacement, &denied).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let request = make_dependency_check_recoverable(&mut c);
+            let run_dir = c.workspace.run_dir.clone();
+            let project = c.workspace.original.clone();
+            drop(c);
+            if matches!(
+                change,
+                "receipt_scope_missing" | "receipt_hash" | "receipt_id" | "malformed_declaration"
+            ) {
+                let path = run_dir.join("claude.json");
+                let mut saved = read_state(&path).unwrap();
+                let candidate = &mut saved["candidate"][1];
+                match change {
+                    "receipt_scope_missing" => {
+                        candidate["shared_checks"][0]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("scope");
+                    }
+                    "receipt_hash" => {
+                        candidate["shared_checks"][0]["files"]["node_modules/three/build/three.core.js"]
+                            ["sha256"] = json!("0".repeat(64))
+                    }
+                    "receipt_id" => candidate["shared_checks"][0]["receipt_id"] = json!(999999),
+                    "malformed_declaration" => {
+                        candidate["declaration"]["shared_checks"] = json!("not an array")
+                    }
+                    _ => unreachable!(),
+                }
+                atomic_json(&path, &saved).unwrap();
+            }
+            let result = recover_at(&run_dir, &request).unwrap();
+            let delivered = matches!(change, "unchanged" | "unrelated");
+            if delivered {
+                assert_dependency_check_delivered(&result);
+            } else {
+                assert_eq!(result["status"], "recovery_required", "{change}: {result}");
+                if change == "saved_policy_path_replaced" {
+                    assert!(
+                        result["reason"]
+                            .as_str()
+                            .unwrap()
+                            .contains("permissions resolve differently")
+                    );
+                }
+                let recovery = Path::new(result["recovery"]["recovery"].as_str().unwrap());
+                let exported =
+                    workspace::export_recovery(recovery, &temp.path().join("exported"), 1).unwrap();
+                assert_eq!(
+                    fs::read_to_string(exported.files.join("source.txt")).unwrap(),
+                    "finished\n"
+                );
+                assert_eq!(
+                    fs::read_to_string(exported.files.join(".cache/requested.txt")).unwrap(),
+                    "requested artifact\n"
+                );
+            }
+            assert_eq!(
+                fs::read_to_string(project.join("source.txt")).unwrap(),
+                if delivered {
+                    "finished\n"
+                } else {
+                    "original\n"
+                },
+                "{change}"
+            );
+            assert_eq!(project.join(".cache/requested.txt").exists(), delivered);
+            assert!(!project.join("node_modules").exists());
+            for name in ["baseline", "worker-1", "worker-2"] {
+                assert!(!run_dir.join("workspace").join(name).exists());
+            }
+            let repeated = recover_at(&run_dir, &request).unwrap();
+            assert_eq!(repeated["already_finished"], true);
+            assert_eq!(repeated["status"], result["status"]);
+        }
+    }
+
+    #[test]
+    fn peer_receipt_recovery_uses_winning_worker_inputs_and_permissions() {
+        for change in [
+            "unchanged",
+            "consumer_input_changed",
+            "consumer_read_denied",
+        ] {
+            let (temp, mut c) = controller();
+            let author = c.workspace.workers[0].clone();
+            let consumer = c.workspace.workers[1].clone();
+            let dependency = "node_modules/fixture/input.txt";
+            for root in [&author, &consumer] {
+                fs::write(root.join("source.txt"), "consumer result\n").unwrap();
+                fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+                fs::create_dir_all(root.join("node_modules/fixture")).unwrap();
+                fs::write(root.join(dependency), "checked input\n").unwrap();
+            }
+            let snapshot = tool(
+                &mut c,
+                1,
+                "begin-peer-check",
+                "delm_check_begin",
+                json!({"idempotency_key":"begin-peer-check", "summary":"Check shared source and dependency",
+                    "paths":["source.txt", dependency]}),
+            );
+            c.handle(
+                json!({"op":"command_start","agent_id":"agent-1","turn_id":"turn-1",
+                "call_id":"peer-check","command":"node check.mjs","cwd":author}),
+            )
+            .unwrap();
+            c.handle(
+                json!({"op":"command_end","agent_id":"agent-1","call_id":"peer-check",
+                "result_ref":"peer-check-result","is_error":false,"interrupted":false,
+                "background_task_id":null,"timed_out":false}),
+            )
+            .unwrap();
+            let receipt = tool(
+                &mut c,
+                1,
+                "finish-peer-check",
+                "delm_check_finish",
+                json!({"idempotency_key":"finish-peer-check", "snapshot_id":snapshot["result"]["snapshot_id"],
+                    "command_id":"peer-check"}),
+            )["result"]
+                .clone();
+            assert_eq!(receipt["worker"], 1);
+            assert_eq!(receipt["reusable"], true);
+            tool(
+                &mut c,
+                2,
+                "complete-with-peer-check",
+                "delm_complete",
+                json!({"idempotency_key":"complete-with-peer-check", "expected_revision":1,
+                    "outcome":"complete", "summary":"Reused peer check", "checks":[],
+                    "shared_checks":[receipt["receipt_id"]], "artifacts":[]}),
+            );
+            let result = c
+                .handle(
+                    json!({"op":"turn_end","agent_id":"agent-2","turn_id":"turn-2",
+                "reason":"completed","answer":"Implemented with the peer's checked inputs."}),
+                )
+                .unwrap();
+            assert_eq!(result["actions"][0]["type"], "candidate");
+            assert_eq!(result["actions"][0]["agent_id"], "agent-2");
+
+            // The receipt is historical evidence. Recovery must inspect the
+            // winner's matching inputs, not the author's later files or policy.
+            fs::write(author.join("source.txt"), "author later result\n").unwrap();
+            fs::write(author.join(dependency), "author changed input\n").unwrap();
+            c.handle(json!({"op":"configure_scopes","agent_id":"agent-1","scopes":[]}))
+                .unwrap();
+            match change {
+                "unchanged" => {}
+                "consumer_input_changed" => {
+                    fs::write(consumer.join(dependency), "consumer changed input\n").unwrap();
+                }
+                "consumer_read_denied" => {
+                    c.handle(json!({"op":"configure_scopes","agent_id":"agent-2","scopes":[]}))
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let mut request = make_dependency_check_recoverable(&mut c);
+            request["agents"] = json!([
+                {"id":"agent-1","status":"killed"},
+                {"id":"agent-2","status":"completed"}
+            ]);
+            let run_dir = c.workspace.run_dir.clone();
+            let project = c.workspace.original.clone();
+            let saved = read_state(&run_dir.join("claude.json")).unwrap();
+            assert_eq!(saved["candidate"][0], 1);
+            assert_eq!(saved["candidate"][1]["shared_checks"], json!([receipt]));
+            assert_eq!(saved["candidate"][1]["checks"], json!([]));
+            assert_eq!(saved["worker_scopes"][0], json!([]));
+            if change == "consumer_read_denied" {
+                assert_eq!(saved["worker_scopes"][1], json!([]));
+            } else {
+                assert_eq!(saved["worker_scopes"][1][0]["path"], json!(consumer));
+            }
+            assert!(!run_dir.join("workspace/delivery/result.json").exists());
+            drop(c);
+
+            let result = recover_at(&run_dir, &request).unwrap();
+            let delivered = change == "unchanged";
+            if delivered {
+                assert_dependency_check_delivered(&result);
+                assert_eq!(result["shared_checks"], json!([receipt]));
+                assert_eq!(result["checks"], json!([]));
+            } else {
+                assert_eq!(result["status"], "recovery_required", "{change}: {result}");
+                let expected = if change == "consumer_input_changed" {
+                    "shared check input changed"
+                } else {
+                    "worker policy forbids"
+                };
+                assert!(
+                    result["reason"].as_str().unwrap().contains(expected),
+                    "{change}: {result}"
+                );
+                let recovery = Path::new(result["recovery"]["recovery"].as_str().unwrap());
+                let exported =
+                    workspace::export_recovery(recovery, &temp.path().join("consumer-export"), 2)
+                        .unwrap();
+                assert_eq!(
+                    fs::read_to_string(exported.files.join("source.txt")).unwrap(),
+                    "consumer result\n"
+                );
+            }
+            assert_eq!(
+                fs::read_to_string(project.join("source.txt")).unwrap(),
+                if delivered {
+                    "consumer result\n"
+                } else {
+                    "original\n"
+                },
+                "{change}"
+            );
+            assert!(!project.join("node_modules").exists());
+            for name in ["baseline", "worker-1", "worker-2"] {
+                assert!(
+                    !run_dir.join("workspace").join(name).exists(),
+                    "{change}: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dependency_check_recovery_replays_finished_delivery_without_removed_inputs_or_user_overwrites()
+     {
+        let (_temp, mut c) = controller();
+        complete_with_dependency_check(&mut c);
+        let request = make_dependency_check_recoverable(&mut c);
+        let run_dir = c.workspace.run_dir.clone();
+        let path = run_dir.join("claude.json");
+        let before_final_persist = fs::read(&path).unwrap();
+        let project = c.workspace.original.clone();
+        assert_dependency_check_delivered(&settle(&mut c).unwrap()["actions"][0]);
+        assert!(c.workspace.workers.iter().all(|root| !root.exists()));
+        // Simulate loss of the final controller write after durable delivery
+        // and cleanup, with a subsequent user edit in the original project.
+        fs::write(&path, before_final_persist).unwrap();
+        fs::write(project.join("source.txt"), "later user edit\n").unwrap();
+        fs::write(
+            project.join(".cache/requested.txt"),
+            "later artifact edit\n",
+        )
+        .unwrap();
+        drop(c);
+        let result = recover_at(&run_dir, &request).unwrap();
+        assert_dependency_check_delivered(&result);
+        assert_eq!(
+            fs::read_to_string(project.join("source.txt")).unwrap(),
+            "later user edit\n"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join(".cache/requested.txt")).unwrap(),
+            "later artifact edit\n"
+        );
+        assert!(!project.join("node_modules").exists());
+        let repeated = recover_at(&run_dir, &request).unwrap();
+        assert_eq!(repeated["already_finished"], true);
+        assert_dependency_check_delivered(&repeated);
+    }
+
+    #[test]
+    fn dependency_check_legacy_recovery_requires_saved_permissions_only_for_shared_receipts() {
+        for shared_receipt in [false, true] {
+            let (temp, mut c) = controller();
+            if shared_receipt {
+                complete_with_dependency_check(&mut c);
+            } else {
+                complete(&mut c);
+            }
+            let request = make_dependency_check_recoverable(&mut c);
+            let run_dir = c.workspace.run_dir.clone();
+            let project = c.workspace.original.clone();
+            drop(c);
+            let path = run_dir.join("claude.json");
+            let mut saved = read_state(&path).unwrap();
+            saved.as_object_mut().unwrap().remove("worker_scopes");
+            atomic_json(&path, &saved).unwrap();
+            let result = recover_at(&run_dir, &request).unwrap();
+            if shared_receipt {
+                assert_eq!(result["status"], "recovery_required");
+                let reason = result["reason"].as_str().unwrap();
+                assert!(
+                    reason.contains("lacks native check-input permissions"),
+                    "{reason}"
+                );
+                assert!(reason.contains("preserved for recovery"), "{reason}");
+                assert_eq!(
+                    fs::read_to_string(project.join("source.txt")).unwrap(),
+                    "original\n"
+                );
+                let recovery = Path::new(result["recovery"]["recovery"].as_str().unwrap());
+                let exported =
+                    workspace::export_recovery(recovery, &temp.path().join("exported"), 1).unwrap();
+                assert_eq!(
+                    fs::read_to_string(exported.files.join("source.txt")).unwrap(),
+                    "finished\n"
+                );
+                assert_eq!(
+                    fs::read_to_string(exported.files.join(".cache/requested.txt")).unwrap(),
+                    "requested artifact\n"
+                );
+            } else {
+                assert_eq!(result["status"], "complete");
+                assert_eq!(
+                    fs::read_to_string(project.join("source.txt")).unwrap(),
+                    "finished\n"
+                );
+            }
+            assert!(!project.join("node_modules").exists());
+            for name in ["baseline", "worker-1", "worker-2"] {
+                assert!(!run_dir.join("workspace").join(name).exists());
+            }
+        }
     }
 
     #[test]
@@ -2048,12 +2668,12 @@ mod tests {
                 "candidate" => {
                     let declaration = json!({"expected_revision":1,"outcome":"complete","summary":"Done","checks":[]});
                     let completion = Completion::capture_with_evidence(
-                        &c.workspace.workers[1],
+                        &c.board,
+                        2,
                         &declaration,
                         &c.workers[1].checks,
                         1,
                         &c.workers[1].result_policy,
-                        vec![],
                         &c.workspace.baseline_manifest,
                     )
                     .unwrap();

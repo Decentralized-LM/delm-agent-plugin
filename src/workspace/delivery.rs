@@ -345,11 +345,11 @@ pub fn deliver_result(
         .join("workspace/delivery/result.json")
         .is_file()
     {
-        return deliver_internal(prepared, worker, None);
+        return deliver_internal(prepared, worker, None, || Ok(()));
     }
     let accepted = ResultSelection::new(&prepared.baseline_manifest, Vec::new())?
         .capture(&prepared.workers[worker])?;
-    deliver_internal(prepared, worker, Some(&accepted))
+    deliver_internal(prepared, worker, Some(&accepted), || Ok(()))
 }
 
 /// Deliver exactly the accepted source and requested-artifact manifest. The
@@ -360,13 +360,26 @@ pub fn deliver_accepted_result(
     accepted: &AcceptedResult,
 ) -> Result<DeliveryReport> {
     ensure!(worker < 2, "unknown result worker");
-    deliver_internal(prepared, worker, Some(accepted))
+    deliver_internal(prepared, worker, Some(accepted), || Ok(()))
+}
+
+/// Validate additional completion evidence before a new delivery. A completed
+/// transaction is reconciled first, without reopening cleaned worker files.
+pub(crate) fn deliver_accepted_result_with_validation(
+    prepared: &PreparedWorkspace,
+    worker: usize,
+    accepted: &AcceptedResult,
+    validate_inputs: impl FnOnce() -> Result<()>,
+) -> Result<DeliveryReport> {
+    ensure!(worker < 2, "unknown result worker");
+    deliver_internal(prepared, worker, Some(accepted), validate_inputs)
 }
 
 fn deliver_internal(
     prepared: &PreparedWorkspace,
     worker: usize,
     accepted: Option<&AcceptedResult>,
+    validate_inputs: impl FnOnce() -> Result<()>,
 ) -> Result<DeliveryReport> {
     let ownership = owned(prepared)?;
     ensure!(
@@ -437,7 +450,11 @@ fn deliver_internal(
         accepted.selection == expected,
         "Accepted result belongs to a different baseline"
     );
+    validate_inputs()?;
     let accepted = accepted.verify(&prepared.workers[worker])?;
+    // Recovery may reopen the check board during validation. Bind that read
+    // back to the saved workspace identities before starting a transaction.
+    owned(prepared)?;
     let candidate = &accepted.manifest;
     let environment_directories_omitted = accepted.environment_directories_omitted.clone();
     private_directory(&directory)?;

@@ -372,7 +372,10 @@ impl Drop for Session {
 }
 
 fn terminal(event: &Value) -> bool {
-    matches!(event["type"].as_str(), Some("result" | "stopped" | "error"))
+    matches!(
+        event["type"].as_str(),
+        Some("result" | "delivered" | "stopped" | "error")
+    )
 }
 
 fn running(event: &Value) -> bool {
@@ -420,6 +423,98 @@ fn normal_completion_delivers_into_original_and_removes_both_workspaces() {
     assert_eq!(fixture.requests("thread/start").len(), 2);
     fixture.assert_hosts_stopped();
     fixture.assert_delivered(1);
+}
+
+fn assert_scoped_dependency_delivery(mode: &str) {
+    let fixture = Fixture::new(mode);
+    let mut session = fixture.start(30);
+    let ready = session.until(|event| event["type"] == "ready");
+    session.accept(&ready);
+    let result = session.finish();
+    assert_eq!(result["type"], "delivered", "{:?}", session.events);
+    assert_eq!(result["details"]["delivery"]["delivered"], true);
+    // Dependencies stay local to each working copy. Successful delivery still
+    // reports that relocated source needs its own environment setup/check.
+    assert_eq!(result["details"]["delivery"]["verification_required"], true);
+    assert_eq!(
+        result["details"]["delivery"]["environment_directories_omitted"],
+        json!(["node_modules"])
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.project.join("result.txt")).unwrap(),
+        "thread-1\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.project.join("dist/report.txt")).unwrap(),
+        "checked artifact\n"
+    );
+    assert!(!fixture.project.join("node_modules").exists());
+    let mut actual = snapshot(&fixture.project);
+    for path in ["result.txt", "dist/report.txt", "dist"] {
+        assert!(actual.remove(Path::new(path)).is_some());
+    }
+    assert_eq!(
+        actual, fixture.before,
+        "pre-existing project or Git data changed"
+    );
+    fixture.assert_workspaces_removed(&result);
+    fixture.assert_hosts_stopped();
+    if mode == "dependency_receipt_unrelated" {
+        assert!(fixture.wire().iter().any(|event| {
+            event["direction"] == "fixture" && event["message"]["shutdown_mutation"] == "unrelated"
+        }));
+    }
+    assert_eq!(result["details"]["delivery"]["cleanup_complete"], true);
+    let completion: Value = serde_json::from_slice(
+        &fs::read(result["details"]["completion"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(completion["shared_checks"][0]["reusable"], true);
+    assert_eq!(completion["shared_checks"][0]["native"]["exitCode"], 0);
+    assert!(completion["shared_checks"][0]["files"]["node_modules/fixture/input.txt"].is_object());
+    assert_eq!(
+        completion["shared_checks"][0]["files"].get("node_modules/fixture/optional.txt"),
+        Some(&Value::Null)
+    );
+}
+
+#[test]
+fn scoped_dependency_receipt_delivers_source_and_artifact_without_dependency() {
+    assert_scoped_dependency_delivery("dependency_receipt");
+}
+
+#[test]
+fn scoped_dependency_receipt_ignores_unrelated_dependency_change_during_shutdown() {
+    assert_scoped_dependency_delivery("dependency_receipt_unrelated");
+}
+
+#[test]
+fn scoped_dependency_receipt_rejects_input_changes_during_shutdown() {
+    for mutation in ["changed", "deleted", "executable", "appeared", "symlink"] {
+        let fixture = Fixture::new(&format!("dependency_receipt_{mutation}"));
+        let mut session = fixture.start(30);
+        let ready = session.until(|event| event["type"] == "ready");
+        session.accept(&ready);
+        let stopped = session.finish();
+        assert_eq!(stopped["type"], "stopped", "mutation {mutation}: {stopped}");
+        assert!(
+            stopped["message"]
+                .as_str()
+                .unwrap()
+                .contains("shared check"),
+            "mutation {mutation}: {stopped}"
+        );
+        assert!(
+            fixture.wire().iter().any(|event| {
+                event["direction"] == "fixture" && event["message"]["shutdown_mutation"] == mutation
+            }),
+            "shutdown mutation {mutation} did not run"
+        );
+        assert_partial(&stopped);
+        fixture.assert_workspaces_removed(&stopped);
+        fixture.assert_hosts_stopped();
+        fixture.assert_original();
+    }
 }
 
 #[test]

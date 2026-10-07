@@ -483,9 +483,14 @@ class ReleaseTests(unittest.TestCase):
                                 env={"PATH": "/usr/bin:/bin"}, text=True, capture_output=True)
         self.assertEqual(result.returncode, 1)
         self.assertIn("Signing is not configured", result.stderr)
-        for name in ["APPLE_CERTIFICATE_BASE64", "APPLE_SIGNING_IDENTITY", "APPLE_TEAM_ID",
-                     "APPLE_APP_PASSWORD", "RELEASE_REPOSITORY", "RELEASE_SOURCE_SHA"]:
-            self.assertIn(name, result.stderr)
+        missing = next(line for line in result.stderr.splitlines()
+                       if line.startswith("Signing is not configured. Missing release settings: "))
+        # Signing and notarization have separate credentials. This stage requires
+        # the certificate and release identity, not Apple's notarization login.
+        self.assertCountEqual(missing.split(": ", 1)[1].split(), [
+            "APPLE_CERTIFICATE_BASE64", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY",
+            "RELEASE_REPOSITORY", "RELEASE_SOURCE_SHA", "RUNNER_TEMP",
+        ])
         self.assertIn("Private unsigned preparation", result.stderr)
 
     def test_resealed_extra_files_cannot_enter_the_release_distribution(self):
