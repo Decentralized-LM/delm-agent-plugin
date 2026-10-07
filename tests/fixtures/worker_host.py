@@ -7,6 +7,7 @@ The wire log records requests and responses, including those whose ACK is lost.
 import json
 import os
 import pathlib
+import subprocess
 import sys
 
 fixture = pathlib.Path(__file__)
@@ -111,6 +112,7 @@ serial = 0
 stale_sent = set()
 wake_wait = None
 wake_created = False
+check_revisions = {}
 
 
 def log(direction, message):
@@ -187,6 +189,73 @@ def complete(thread, turn, revision):
         "summary": "Created result.txt for revision {}. Lifecycle fixture; no command checks were needed.".format(revision),
         "checks": [],
     }, "completion")
+
+
+def begin_dependency_check(thread, turn, revision):
+    path = pathlib.Path(threads[thread]["cwd"])
+    (path / "result.txt").write_text(thread + "\n")
+    dependency = path / "node_modules/fixture/input.txt"
+    dependency.parent.mkdir(parents=True)
+    dependency.write_text("dependency\n")
+    (dependency.parent / "unrelated.txt").write_text("unrelated\n")
+    artifact = path / "dist/report.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("checked artifact\n")
+    check_revisions[thread] = revision
+    tool(thread, turn, "delm_check_begin", {
+        "summary": "Read the source, generated artifact, and installed dependency",
+        "paths": ["result.txt", "dist/report.txt", "node_modules/fixture/input.txt",
+                  "node_modules/fixture/optional.txt"],
+    }, "dependency-check-begun")
+
+
+def run_dependency_check(thread, turn, snapshot):
+    path = threads[thread]["cwd"]
+    command_id = "dependency-check-" + thread
+    script = ("from pathlib import Path; "
+              "assert Path('result.txt').read_text().startswith('thread-'); "
+              "assert Path('dist/report.txt').read_text() == 'checked artifact\\n'; "
+              "assert Path('node_modules/fixture/input.txt').read_text() == 'dependency\\n'; "
+              "assert not Path('node_modules/fixture/optional.txt').exists()")
+    item = {"id": command_id, "type": "commandExecution", "cwd": path,
+            "command": "python3 -c " + repr(script), "status": "inProgress"}
+    send({"method": "item/started", "params": {
+        "threadId": thread, "turnId": turn, "item": item}})
+    result = subprocess.run([sys.executable, "-c", script], cwd=path,
+                            capture_output=True, text=True, timeout=5)
+    item.update(status="completed", exitCode=result.returncode,
+                aggregatedOutput=result.stdout + result.stderr)
+    send({"method": "item/completed", "params": {
+        "threadId": thread, "turnId": turn, "item": item}})
+    tool(thread, turn, "delm_check_finish", {
+        "snapshot_id": snapshot, "command_id": command_id,
+    }, "dependency-check-finished")
+
+
+def mutate_dependency_during_shutdown(thread):
+    """Change inputs only after candidate capture, while the owned host stops."""
+    if thread != "thread-1" or not mode.startswith("dependency_receipt_"):
+        return
+    dependency = pathlib.Path(threads[thread]["cwd"]) / "node_modules/fixture/input.txt"
+    mutation = mode.removeprefix("dependency_receipt_")
+    if mutation == "changed":
+        dependency.write_text("invalidate\n")  # Same length; the content hash must detect this.
+    elif mutation == "deleted":
+        dependency.unlink()
+    elif mutation == "executable":
+        dependency.chmod(0o755)
+    elif mutation == "appeared":
+        (dependency.parent / "optional.txt").write_text("new input\n")
+    elif mutation == "symlink":
+        outside = fixture.with_suffix(".external.txt")
+        outside.write_bytes(dependency.read_bytes())
+        dependency.unlink()
+        dependency.symlink_to(outside)
+    elif mutation == "unrelated":
+        (dependency.parent / "unrelated.txt").write_text("unrelated change\n")
+    else:
+        raise AssertionError("unknown dependency mutation: " + mutation)
+    log("fixture", {"shutdown_mutation": mutation, "threadId": thread})
 
 
 def create_wake_work():
@@ -295,6 +364,8 @@ for line in sys.stdin:
                 status(thread, turn)
             else:
                 create_wake_work()
+        elif mode.startswith("dependency_receipt") and thread == "thread-2":
+            pass
         elif mode == "approvals":
             approval(thread, turn)
         elif mode == "stale_approval":
@@ -327,6 +398,8 @@ for line in sys.stdin:
         if method == "thread/unsubscribe" and mode == "unsubscribe_error":
             send({"id":request_id,"error":{"code":-32000,"message":"injected unsubscribe failure"}})
             continue
+        if method == "thread/backgroundTerminals/clean":
+            mutate_dependency_during_shutdown(params["threadId"])
         send({"id": request_id, "result": {}})
     elif method is None and request_id in calls:
         thread, turn, stage = calls.pop(request_id)
@@ -360,7 +433,21 @@ for line in sys.stdin:
                     "threadId": waiting_thread, "turn": {"id": waiting_turn, "status": "completed"}}})
         elif stage == "status":
             if result.get("success"):
-                complete(thread, turn, body["board"]["request_revision"])
+                if mode.startswith("dependency_receipt"):
+                    begin_dependency_check(thread, turn, body["board"]["request_revision"])
+                else:
+                    complete(thread, turn, body["board"]["request_revision"])
+        elif stage == "dependency-check-begun":
+            assert result.get("success"), result
+            run_dependency_check(thread, turn, body["result"]["snapshot_id"])
+        elif stage == "dependency-check-finished":
+            assert result.get("success") and body["result"]["reusable"], result
+            tool(thread, turn, "delm_complete", {
+                "expected_revision": check_revisions[thread], "outcome": "complete",
+                "summary": "Created result.txt and the checked artifact using an installed dependency.",
+                "checks": [], "shared_checks": [body["result"]["receipt_id"]],
+                "artifacts": ["dist/report.txt"],
+            }, "completion")
         elif result.get("success"):
             active.pop(thread, None)
             send({"method": "turn/completed", "params": {

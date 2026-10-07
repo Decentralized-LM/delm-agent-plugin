@@ -16,6 +16,8 @@ Board transfers remain confined to the prepared private copies. These are additi
 
 Native Bash observations supply check evidence. Claude's interface exposes a tool result reference and completion state, not a numeric exit code. DeLM records that distinction. Missing, interrupted, timed-out, and background outcomes cannot qualify a completed check. Relevant file changes invalidate shared evidence.
 
+Shared checks validate their explicitly named input files independently of the source and artifacts selected for delivery. An installed dependency can be a valid check input without being copied to the original project. Inputs are rechecked after shutdown and before first delivery, including during recovery using saved native file permissions. A retry of an already completed delivery uses its saved journal and preserves later user edits.
+
 ## Lifecycle and delivery
 
 Each peer can claim, split, publish, import, verify, and integrate work. Both contribute to one assembled result. There is no separate Claude collaboration algorithm or mandatory duplicate full-suite pass.

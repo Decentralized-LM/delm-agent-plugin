@@ -1,5 +1,6 @@
 //! Runtime evidence for a normally completed native turn. This establishes
 //! artifact identity and truthful command references, not semantic correctness.
+use crate::board::Board;
 use crate::evidence::CommandEvidence;
 use crate::workspace::{self, Manifest};
 use anyhow::{Context, Result, ensure};
@@ -44,9 +45,8 @@ impl Completion {
         )
     }
 
-    /// The board validates receipt provenance against the bound worker before
-    /// this call. Match the receipt's files to the captured candidate as well,
-    /// closing the interval between board validation and candidate capture.
+    /// Test helper for callers that do not use shared check receipts.
+    #[cfg(test)]
     pub fn capture_with_shared(
         root: &Path,
         declaration: &Value,
@@ -57,7 +57,11 @@ impl Completion {
         baseline: &Manifest,
     ) -> Result<Self> {
         let checks = validate_checks(declaration, native_checks, revision)?;
-        Self::capture_verified(
+        ensure!(
+            shared_checks.is_empty(),
+            "shared checks require a bound board"
+        );
+        Self::capture_candidate(
             root,
             declaration,
             checks,
@@ -69,27 +73,51 @@ impl Completion {
     }
 
     pub fn capture_with_evidence(
-        root: &Path,
+        board: &Board,
+        worker: usize,
         declaration: &Value,
         native_checks: &HashMap<String, CommandEvidence>,
         revision: u64,
         result_policy: &workspace::ResultPolicy,
-        shared_checks: Vec<Value>,
         baseline: &Manifest,
     ) -> Result<Self> {
         let checks = validate_evidence(declaration, native_checks, revision)?;
-        Self::capture_verified(
-            root,
+        let inputs = board.completion_checks(worker, declaration, revision)?;
+        let candidate = Self::capture_candidate(
+            board.worker_path(worker)?,
             declaration,
             checks,
             revision,
             result_policy,
-            shared_checks,
+            inputs.receipts().to_vec(),
             baseline,
-        )
+        )?;
+        // Input scopes can include environment files intentionally omitted from
+        // delivery. Recheck their actual files after selecting the outputs.
+        inputs.verify(board)?;
+        Ok(candidate)
     }
 
-    fn capture_verified(
+    /// Re-establish saved receipt provenance and current input identity before
+    /// delivery. A serialized candidate alone is not authoritative check evidence.
+    pub fn verify_shared_inputs(&self, board: &Board, worker: usize) -> Result<()> {
+        ensure!(
+            self.declaration["outcome"].as_str() == Some("complete")
+                && self.declaration["expected_revision"].as_u64() == Some(self.revision),
+            "saved completion declaration does not match its request revision"
+        );
+        let inputs = board.completion_checks(worker, &self.declaration, self.revision)?;
+        ensure!(
+            inputs.receipts() == self.shared_checks,
+            "saved shared check receipts differ from the authoritative board"
+        );
+        Ok(())
+    }
+
+    /// Capture deliverables and attach already observed command evidence.
+    /// The host adapter must also validate receipt inputs: the delivery manifest
+    /// intentionally omits newly installed dependencies and other environment files.
+    pub(crate) fn capture_candidate(
         root: &Path,
         declaration: &Value,
         checks: Vec<Value>,
@@ -139,27 +167,6 @@ impl Completion {
                     && receipt["reusable"] == true,
                 "invalid or obsolete shared check receipt"
             );
-            for (path, version) in receipt["files"]
-                .as_object()
-                .context("receipt has no input scope")?
-            {
-                let entry = manifest.files.get(path);
-                if version.is_null() {
-                    ensure!(entry.is_none(), "shared check input changed at {path}");
-                } else {
-                    let entry = entry.with_context(|| {
-                        format!("shared check input is absent from candidate: {path}")
-                    })?;
-                    ensure!(
-                        entry.kind == workspace::FileKind::File
-                            && entry.sha256.as_deref() == version["sha256"].as_str()
-                            && Some(entry.size) == version["bytes"].as_u64()
-                            && Some(u64::from(entry.mode & 0o111))
-                                == version["executable"].as_u64(),
-                        "shared check input changed at {path}"
-                    );
-                }
-            }
         }
         Ok(Self {
             revision,
@@ -193,6 +200,22 @@ impl Completion {
         let accepted = self.accepted.as_ref().context(
             "This saved result predates explicit artifact accounting; export its recovery data before cleanup")?;
         workspace::deliver_accepted_result(prepared, worker, accepted)
+    }
+
+    pub fn deliver_with_validation(
+        &self,
+        prepared: &workspace::PreparedWorkspace,
+        worker: usize,
+        validate_inputs: impl FnOnce() -> Result<()>,
+    ) -> Result<workspace::DeliveryReport> {
+        let accepted = self.accepted.as_ref().context(
+            "This saved result predates explicit artifact accounting; export its recovery data before cleanup")?;
+        workspace::deliver_accepted_result_with_validation(
+            prepared,
+            worker,
+            accepted,
+            validate_inputs,
+        )
     }
 }
 
@@ -269,17 +292,17 @@ fn validate_records(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::evidence::{CommandCompletion, NativeHost};
+    use crate::evidence::{CommandCompletion, FilesystemAccess, FilesystemScope, NativeHost};
 
     #[test]
     fn normalized_native_results_share_completion_fences_without_synthetic_exit_codes() {
-        let root = project();
-        std::fs::write(root.path().join("result.txt"), "ready").unwrap();
+        let (_temp, board, root, baseline) = board_project();
+        std::fs::write(root.join("result.txt"), "ready").unwrap();
         let command = CommandEvidence {
             host: NativeHost::Claude,
             id: "bash-1".into(),
             command: "node --test".into(),
-            cwd: root.path().into(),
+            cwd: root.clone(),
             revision: 1,
             started_sequence: Some(3),
             completion: CommandCompletion::NativeTool {
@@ -293,13 +316,13 @@ mod tests {
         let mut checks = HashMap::from([("bash-1".into(), command)]);
         let declaration = json!({"outcome":"complete","expected_revision":1,"checks":[{"id":"bash-1","passed":true}]});
         let completion = Completion::capture_with_evidence(
-            root.path(),
+            &board,
+            1,
             &declaration,
             &checks,
             1,
             &workspace::ResultPolicy::default(),
-            vec![],
-            &workspace::manifest(root.path()).unwrap(),
+            &baseline,
         )
         .unwrap();
         assert_eq!(completion.checks[0]["passed"], true);
@@ -308,15 +331,56 @@ mod tests {
                 .get("exit_code")
                 .is_none()
         );
-        completion.verify(root.path()).unwrap();
+        completion.verify(&root).unwrap();
+        completion.verify_shared_inputs(&board, 1).unwrap();
+        let restored: Completion =
+            serde_json::from_value(serde_json::to_value(&completion).unwrap()).unwrap();
+        restored.verify(&root).unwrap();
+        restored.verify_shared_inputs(&board, 1).unwrap();
+        assert_eq!(restored.manifest, completion.manifest);
         if let CommandCompletion::NativeTool { is_error, .. } =
             &mut checks.get_mut("bash-1").unwrap().completion
         {
             *is_error = true;
         }
         assert!(validate_evidence(&declaration, &checks, 1).is_err());
-        std::fs::write(root.path().join("result.txt"), "late change").unwrap();
-        assert!(completion.verify(root.path()).is_err());
+        std::fs::write(root.join("result.txt"), "late change").unwrap();
+        assert!(completion.verify(&root).is_err());
+        assert!(restored.verify(&root).is_err());
+    }
+
+    fn board_project() -> (tempfile::TempDir, Board, std::path::PathBuf, Manifest) {
+        let temp = tempfile::tempdir().unwrap();
+        let run = temp.path().join("run");
+        let baseline = temp.path().join("baseline");
+        let workers = [temp.path().join("worker-1"), temp.path().join("worker-2")];
+        for path in [&run, &baseline, &workers[0], &workers[1]] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let manifest = workspace::manifest(&baseline).unwrap();
+        let mut board = Board::open(&run, &baseline, workers).unwrap();
+        for worker in 1..=2 {
+            let path = board.worker_path(worker).unwrap().to_path_buf();
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "--quiet"])
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            board
+                .set_worker_scopes(
+                    worker,
+                    vec![FilesystemScope {
+                        path,
+                        access: FilesystemAccess::Write,
+                    }],
+                )
+                .unwrap();
+        }
+        let root = board.worker_path(1).unwrap().to_path_buf();
+        (temp, board, root, manifest)
     }
 
     fn project() -> tempfile::TempDir {
@@ -399,47 +463,98 @@ mod tests {
     }
 
     #[test]
-    fn shared_receipts_match_the_captured_candidate_without_forging_local_commands() {
-        let root = project();
-        std::fs::write(root.path().join("result.txt"), "ready").unwrap();
-        let manifest = workspace::manifest(root.path()).unwrap();
-        let file = &manifest.files["result.txt"];
-        let receipt = json!({"receipt_id":12,"worker":2,"request_revision":4,"reusable":true,
-            "files":{"result.txt":{"sha256":file.sha256,"bytes":file.size,"executable":file.mode & 0o111}},
-            "native":{"id":"peer-check"}});
-        let declaration = json!({"outcome":"complete","expected_revision":4,"summary":"Assembled contribution","checks":[],"shared_checks":[12]});
-        assert!(
-            Completion::capture(
-                root.path(),
-                &declaration,
-                &HashMap::new(),
-                4,
-                &workspace::ResultPolicy::default()
+    fn shared_dependency_receipts_survive_serialization_and_retain_board_authority() {
+        let (_temp, mut board, root, baseline) = board_project();
+        for worker in 1..=2 {
+            let path = board.worker_path(worker).unwrap();
+            std::fs::write(path.join("result.txt"), "ready").unwrap();
+            std::fs::create_dir_all(path.join("node_modules/library")).unwrap();
+            std::fs::write(path.join("node_modules/library/index.js"), "dependency").unwrap();
+        }
+        let begun = board
+            .begin_check(
+                2,
+                json!({"idempotency_key":"begin-peer","summary":"Focused peer check",
+                    "paths":["result.txt","node_modules/library/index.js","optional.json"]}),
+                || 10,
             )
-            .is_err()
-        );
-        let candidate = Completion::capture_with_shared(
-            root.path(),
+            .unwrap();
+        let command = CommandEvidence {
+            host: NativeHost::Claude,
+            id: "peer-check".into(),
+            command: "node --test".into(),
+            cwd: board.worker_path(2).unwrap().to_path_buf(),
+            revision: 1,
+            started_sequence: Some(11),
+            completion: CommandCompletion::NativeTool {
+                result_ref: "8".into(),
+                is_error: false,
+                interrupted: false,
+                background_task_id: None,
+                timed_out: false,
+            },
+        };
+        let receipt = board
+            .finish_check_with_evidence(
+                2,
+                json!({"idempotency_key":"finish-peer","snapshot_id":begun["result"]["snapshot_id"],
+                    "command_id":"peer-check"}),
+                &HashMap::from([("peer-check".into(), command)]),
+            )
+            .unwrap()["result"]
+            .clone();
+        let declaration = json!({"outcome":"complete","expected_revision":1,"summary":"Assembled contribution",
+            "checks":[],"shared_checks":[receipt["receipt_id"]]});
+        let candidate = Completion::capture_with_evidence(
+            &board,
+            1,
             &declaration,
             &HashMap::new(),
-            4,
+            1,
             &workspace::ResultPolicy::default(),
-            vec![receipt.clone()],
-            &workspace::manifest(root.path()).unwrap(),
+            &baseline,
         )
         .unwrap();
         assert!(candidate.checks.is_empty());
         assert_eq!(candidate.shared_checks[0]["worker"], 2);
-        std::fs::write(root.path().join("result.txt"), "changed").unwrap();
+        assert!(candidate.manifest.files.contains_key("result.txt"));
         assert!(
-            Completion::capture_with_shared(
-                root.path(),
+            !candidate
+                .manifest
+                .files
+                .contains_key("node_modules/library/index.js")
+        );
+        let encoded = serde_json::to_value(&candidate).unwrap();
+        let restored: Completion = serde_json::from_value(encoded.clone()).unwrap();
+        restored.verify_shared_inputs(&board, 1).unwrap();
+        let mut altered = encoded.clone();
+        altered["shared_checks"][0]["summary"] = json!("unrecorded receipt");
+        let altered: Completion = serde_json::from_value(altered).unwrap();
+        assert!(altered.verify_shared_inputs(&board, 1).is_err());
+        let mut altered = encoded.clone();
+        altered["declaration"]["expected_revision"] = json!(2);
+        let altered: Completion = serde_json::from_value(altered).unwrap();
+        assert!(altered.verify_shared_inputs(&board, 1).is_err());
+        let mut altered = encoded;
+        altered["declaration"]["outcome"] = json!("waiting");
+        let altered: Completion = serde_json::from_value(altered).unwrap();
+        assert!(altered.verify_shared_inputs(&board, 1).is_err());
+        std::fs::write(root.join("node_modules/library/unrelated.js"), "unrelated").unwrap();
+        restored.verify_shared_inputs(&board, 1).unwrap();
+        std::fs::write(root.join("optional.json"), "new input").unwrap();
+        assert!(restored.verify_shared_inputs(&board, 1).is_err());
+        std::fs::remove_file(root.join("optional.json")).unwrap();
+        std::fs::write(root.join("node_modules/library/index.js"), "changed").unwrap();
+        assert!(restored.verify_shared_inputs(&board, 1).is_err());
+        assert!(
+            Completion::capture_with_evidence(
+                &board,
+                1,
                 &declaration,
                 &HashMap::new(),
-                4,
+                1,
                 &workspace::ResultPolicy::default(),
-                vec![receipt],
-                &workspace::manifest(root.path()).unwrap()
+                &baseline,
             )
             .is_err()
         );

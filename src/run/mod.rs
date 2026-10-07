@@ -447,7 +447,7 @@ async fn serve_inner(
                     writers_stopped,
                     "Worker processes did not stop cleanly; both projects are preserved"
                 );
-                candidate.verify(&saved.workspace.workers[winner])?;
+                candidate.verify(&board)?;
                 atomic_json(&run_dir.join("completion.json"), &candidate)?;
                 // No owned writer remains before delivery and workspace cleanup.
                 candidate.deliver(&saved.workspace, winner)
@@ -1127,7 +1127,7 @@ async fn drive(
         if pending_accept_revision == Some(saved.revision)
             && pending_candidate
                 .as_ref()
-                .is_some_and(|(_, candidate)| candidate.revision == saved.revision)
+                .is_some_and(|(_, candidate)| candidate.revision() == saved.revision)
             && questions.is_empty()
             && approvals.is_empty()
             && input.is_empty()
@@ -1210,7 +1210,7 @@ async fn drive(
                 Some(HostCommand::Approval{..}) => {},
                 Some(HostCommand::AcceptResult{request_revision})
                     if request_revision == saved.revision
-                        && pending_candidate.as_ref().is_some_and(|(_,candidate)|candidate.revision == request_revision) => {
+                        && pending_candidate.as_ref().is_some_and(|(_,candidate)|candidate.revision() == request_revision) => {
                     pending_accept_revision = Some(request_revision);
                 }
                 _ => {}
@@ -1294,8 +1294,7 @@ async fn drive(
                                         journal.record("candidate",&json!({"worker":index+1,"revision":saved.revision,"declaration":outcome,"commands":saved.workers[index].checks}))?;
                                         atomic_json(&saved.workspace.run_dir.join("run.json"),saved)?;
                                         let declaration = outcome.as_ref().context("Completion declaration missing")?;
-                                        let shared = board.shared_checks(index+1,declaration,saved.revision)?;
-                                        let candidate = completion::Completion::capture_with_shared(&saved.workspace.workers[index],declaration,&saved.workers[index].checks,saved.revision,&saved.workers[index].result_policy,shared,&saved.workspace.baseline_manifest)?;
+                                        let candidate = completion::Completion::capture(board,index+1,declaration,&saved.workers[index].checks,saved.revision,&saved.workers[index].result_policy,&saved.workspace.baseline_manifest)?;
                                         pending_candidate = Some((index,candidate));
                                     }
                                 }

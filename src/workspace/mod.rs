@@ -794,6 +794,7 @@ mod output;
 mod prepare;
 mod recovery;
 mod result;
+pub(crate) use delivery::deliver_accepted_result_with_validation;
 pub use delivery::{
     DeliveryReport, RecoveryReport, deliver_accepted_result, deliver_result,
     preserve_partial_and_cleanup, preserve_partial_and_cleanup_with_artifacts,

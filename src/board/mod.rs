@@ -5,6 +5,7 @@
 //! COW objects and are read only through explicit expansion or import.
 
 mod checks;
+pub(crate) use checks::CompletionChecks;
 mod discovery;
 mod files;
 pub(crate) mod reader;
@@ -269,14 +270,20 @@ impl Board {
                 access,
             });
         }
-        self.set_worker_scopes(worker, scopes)
+        self.set_worker_scopes(worker, scopes).map(|_| ())
     }
 
     /// Bind effective project scopes supplied by a native host adapter. An
     /// empty scope grants no board reads or writes; paths are never inferred.
-    pub fn set_worker_scopes(&mut self, worker: usize, scopes: Vec<FilesystemScope>) -> Result<()> {
+    /// Return the resolved rules so recovery can preserve their exact meaning.
+    pub fn set_worker_scopes(
+        &mut self,
+        worker: usize,
+        scopes: Vec<FilesystemScope>,
+    ) -> Result<Vec<FilesystemScope>> {
         ensure!((1..=2).contains(&worker), "unbound worker identity");
         let mut rules = Vec::new();
+        let mut effective = Vec::new();
         for scope in scopes {
             let text = scope.path.to_string_lossy();
             ensure!(
@@ -292,10 +299,14 @@ impl Board {
                 "board permission paths must be absolute"
             );
             let path = files::normalize_rule_path(&scope.path)?;
-            rules.push((path, scope.access.as_str().to_owned()));
+            rules.push((path.clone(), scope.access.as_str().to_owned()));
+            effective.push(FilesystemScope {
+                path,
+                access: scope.access,
+            });
         }
         self.policies[worker - 1] = Some(rules);
-        Ok(())
+        Ok(effective)
     }
 
     fn require_access(&self, worker: usize, relative: &str, write: bool) -> Result<()> {
