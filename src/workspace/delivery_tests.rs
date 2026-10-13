@@ -217,6 +217,38 @@ fn unchanged_manifests_do_not_prove_original_dependencies_are_ready() {
 
 #[test]
 #[cfg(target_os = "macos")]
+fn delivery_applies_edits_to_originals_with_document_tracking_flag() {
+    use std::os::macos::fs::MetadataExt;
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    assert!(
+        git::command()
+            .arg("init")
+            .arg("--quiet")
+            .arg(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
+    for name in ["edited.txt", "unchanged.txt"] {
+        let file = project.join(name);
+        fs::write(&file, "saved\n").unwrap();
+        let flags = fs::symlink_metadata(&file).unwrap().st_flags() | libc::UF_TRACKED;
+        let path = cstr(file.as_os_str()).unwrap();
+        assert_eq!(unsafe { libc::chflags(path.as_ptr(), flags as _) }, 0);
+    }
+    let prepared = prepare(&project, &temp.path().join("run"), u64::MAX).unwrap();
+    fs::write(prepared.workers[0].join("edited.txt"), "result\n").unwrap();
+
+    let report = deliver_result(&prepared, 0, &ResultPolicy::default()).unwrap();
+    assert!(report.delivered && report.cleanup_complete);
+    assert_eq!(fs::read(project.join("edited.txt")).unwrap(), b"result\n");
+    assert_eq!(fs::read(project.join("unchanged.txt")).unwrap(), b"saved\n");
+}
+
+#[test]
+#[cfg(target_os = "macos")]
 fn durable_report_does_not_claim_cleanup_until_all_workers_are_removed() {
     let (_temp, prepared) = fixture();
     fs::write(prepared.workers[0].join("file.txt"), "result\n").unwrap();

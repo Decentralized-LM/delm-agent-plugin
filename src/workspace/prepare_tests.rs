@@ -204,6 +204,50 @@ fn batched_directory_classification_matches_individual_git_queries() {
     );
 }
 
+#[cfg(target_os = "macos")]
+fn add_tracked_flag(path: &Path) {
+    use std::os::macos::fs::MetadataExt;
+    let flags = fs::symlink_metadata(path).unwrap().st_flags() | libc::UF_TRACKED;
+    let path = cstr(path.as_os_str()).unwrap();
+    assert_eq!(unsafe { libc::chflags(path.as_ptr(), flags as _) }, 0);
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn capture_accepts_inputs_with_document_tracking_flag() {
+    use std::os::macos::fs::MetadataExt;
+    // macOS sets UF_TRACKED on files that have a document ID, and clonefile
+    // does not carry it to the clone.
+    let (temp, root) = fixture();
+    fs::create_dir(root.join("directory")).unwrap();
+    fs::write(root.join("directory/untracked.txt"), "untracked input\n").unwrap();
+    for path in ["tracked.txt", "directory", "directory/untracked.txt"] {
+        add_tracked_flag(&root.join(path));
+    }
+    let original = manifest(&root).unwrap();
+
+    let prepared = prepare(&root, &temp.path().join("run"), u64::MAX).unwrap();
+    for worker in &prepared.workers {
+        assert_eq!(
+            fs::read(worker.join("tracked.txt")).unwrap(),
+            b"saved contents\n"
+        );
+        assert_eq!(
+            fs::read(worker.join("directory/untracked.txt")).unwrap(),
+            b"untracked input\n"
+        );
+        assert_eq!(
+            manifest(worker).unwrap().files,
+            prepared.baseline_manifest.files
+        );
+    }
+    assert_eq!(manifest(&root).unwrap(), original);
+    let flags = fs::symlink_metadata(root.join("tracked.txt"))
+        .unwrap()
+        .st_flags();
+    assert_ne!(flags & libc::UF_TRACKED, 0);
+}
+
 #[test]
 #[cfg(target_os = "macos")]
 fn cached_baseline_inventory_rejects_file_replacement() {

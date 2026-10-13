@@ -460,7 +460,9 @@ fn flags(file: &File) -> Result<u32> {
             flags & 0xC09E_0086 == 0,
             "immutable, protected, dataless or mounted input is unsupported"
         );
-        Ok(flags)
+        // macOS uses UF_TRACKED for document IDs, and clonefile does not copy
+        // it, so it is not part of saved metadata.
+        Ok(flags & !libc::UF_TRACKED)
     }
     #[cfg(not(target_os = "macos"))]
     {
