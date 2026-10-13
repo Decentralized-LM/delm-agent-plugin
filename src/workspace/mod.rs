@@ -54,8 +54,24 @@ pub struct PreparedWorkspace {
     pub original: PathBuf,
     pub run_dir: PathBuf,
     pub baseline: PathBuf,
-    pub workers: [PathBuf; 2],
+    /// Private worker trees named `worker-1` through `worker-N`, in slot order.
+    pub workers: Vec<PathBuf>,
     pub baseline_manifest: Manifest,
+}
+
+impl PreparedWorkspace {
+    /// The only worker paths this run may own, derived from its own layout.
+    pub fn expected_workers(workspace: &Path, count: usize) -> Vec<PathBuf> {
+        (1..=count)
+            .map(|slot| workspace.join(format!("worker-{slot}")))
+            .collect()
+    }
+
+    /// Check that saved worker paths are this run's own, in slot order.
+    pub fn owns_worker_layout(&self, workspace: &Path) -> bool {
+        crate::config::validate_worker_count(self.workers.len()).is_ok()
+            && self.workers == Self::expected_workers(workspace, self.workers.len())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -800,7 +816,7 @@ pub use delivery::{
     preserve_partial_and_cleanup, preserve_partial_and_cleanup_with_artifacts,
 };
 pub use output::{AcceptedResult, ResultSelection};
-pub use prepare::{prepare, retain_result, retain_result_with_policy};
+pub use prepare::{prepare, prepare_workers, retain_result, retain_result_with_policy};
 pub use recovery::{RecoveryExport, RecoveryInspection, export_recovery, inspect_recovery};
 pub use result::{ResultPolicy, RuntimeLink, manifest_for_result};
 

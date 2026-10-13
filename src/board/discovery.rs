@@ -17,6 +17,9 @@ struct Cursor {
     after: i64,
     task_state: Option<String>,
     owner: Option<usize>,
+    /// The `peer` filter: tasks owned by any worker other than this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peers_of: Option<usize>,
     task_sequence: i64,
 }
 
@@ -61,14 +64,16 @@ pub(super) fn list(db: &Connection, worker: usize, args: &Value) -> Result<Value
         task_state.is_none_or(|s| matches!(s, "available" | "claimed" | "done")),
         "Unknown task state"
     );
-    let owner = match args.get("owner") {
-        None => None,
-        Some(Value::String(value)) if value == "self" => Some(worker),
-        Some(Value::String(value)) if value == "peer" => Some(3 - worker),
+    // `peer` means any other worker, so it stays correct for two to four peers.
+    let (owner, peers_of) = match args.get("owner") {
+        None => (None, None),
+        Some(Value::String(value)) if value == "self" => (Some(worker), None),
+        Some(Value::String(value)) if value == "peer" => (None, Some(worker)),
         _ => anyhow::bail!("Owner filter must be self or peer"),
     };
+    let owned_filter = owner.is_some() || peers_of.is_some();
     ensure!(
-        collection == "tasks" || (task_state.is_none() && owner.is_none()),
+        collection == "tasks" || (task_state.is_none() && !owned_filter),
         "Task filters only apply to tasks"
     );
     let sequence: i64 = db.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |row| {
@@ -81,7 +86,8 @@ pub(super) fn list(db: &Connection, worker: usize, args: &Value) -> Result<Value
         let cursor: Cursor = serde_json::from_str(string(args, "cursor", 1024)?)
             .context("Invalid discovery cursor; restart without a cursor")?;
         ensure!(cursor.version == 1 && cursor.collection == collection
-            && cursor.task_state.as_deref() == task_state && cursor.owner == owner,
+            && cursor.task_state.as_deref() == task_state && cursor.owner == owner
+            && cursor.peers_of == peers_of,
             "Discovery cursor does not match this collection or filters; restart without a cursor");
         ensure!(cursor.revision == revision, "The request changed; restart discovery without a cursor");
         ensure!(cursor.after >= 0 && cursor.through >= cursor.after && cursor.through <= sequence,
@@ -95,7 +101,7 @@ pub(super) fn list(db: &Connection, worker: usize, args: &Value) -> Result<Value
         [through],
         |row| row.get(0),
     )?;
-    if collection == "tasks" && (task_state.is_some() || owner.is_some()) {
+    if collection == "tasks" && (task_state.is_some() || owned_filter) {
         ensure!(
             prior
                 .as_ref()
@@ -104,15 +110,16 @@ pub(super) fn list(db: &Connection, worker: usize, args: &Value) -> Result<Value
         );
     }
     let (mut items, total) = if collection == "tasks" {
-        let filters = "id<=?1 AND (?3 IS NULL OR state=?3) AND (?4 IS NULL OR owner=?4)";
+        let filters = "id<=?1 AND (?3 IS NULL OR state=?3) AND (?4 IS NULL OR owner=?4) \
+            AND (?6 IS NULL OR (owner IS NOT NULL AND owner<>?6))";
         let total: i64 = db.query_row(
             &format!("SELECT COUNT(*) FROM tasks WHERE {filters} AND id>?2"),
-            params![through, 0, task_state, owner],
+            params![through, 0, task_state, owner, 0, peers_of],
             |row| row.get(0),
         )?;
         let mut query = db.prepare(&format!("SELECT id,author,owner,state,body,updated,task_number FROM (SELECT tasks.*,ROW_NUMBER() OVER(ORDER BY id) AS task_number FROM tasks) WHERE {filters} AND id>?2 ORDER BY id LIMIT ?5"))?;
         let rows = query.query_map(
-            params![through, after, task_state, owner, limit + 1],
+            params![through, after, task_state, owner, limit + 1, peers_of],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -194,6 +201,7 @@ pub(super) fn list(db: &Connection, worker: usize, args: &Value) -> Result<Value
                 .context("Discovery record identity missing")?,
             task_state: task_state.map(str::to_owned),
             owner,
+            peers_of,
             task_sequence,
         })?)
     } else {

@@ -289,3 +289,21 @@ test('the no-Intl fallback preserves emoji modifiers and joined graphemes', asyn
   assert.equal(fallback.fitText('👩🏽‍💻 AB', 3), '👩🏽‍💻…');
   assert.equal(fallback.fitText('🇯🇵🇺🇸abcd', 5), '🇯🇵🇺🇸…');
 });
+
+test('four agents stay visible in every pane size', () => {
+  const four = structuredClone(working);
+  four.agents.push({slot: 3, native_state: 'waiting', task_ids: []}, {slot: 4, native_state: 'working', task_ids: ['4']});
+  four.tasks.items[2] = {...four.tasks.items[2], owner: 'worker-4', state: 'claimed'};
+  const full = text(fixture({snapshot: four}).render());
+  for (const line of ['Agent 1 · Working', 'Agent 2 · Working', 'Agent 3 · Waiting', 'Agent 4 · Working']) assert.match(full, new RegExp(line));
+  assert.match(full, /Claimed · Agent 4/);
+  const short = text(fixture({snapshot: four}, {bodyColumns: 86, scroll: {bodyRows: 12}}).render());
+  for (const slot of [1, 2, 3, 4]) assert.match(short, new RegExp(`Agent ${slot} · `));
+  for (const rows of [5, 6, 7]) {
+    const tree = fixture({snapshot: four}, {bodyColumns: 52, scroll: {bodyRows: rows}}).render();
+    assert.ok(tree.props.children.length <= rows, `${tree.props.children.length} rows exceed ${rows}`);
+    assert.match(text(tree), /4 agents · 3 Working · 1 Waiting/);
+  }
+  assert.equal(normalizeBoard({snapshot: four}).agents.length, 4);
+  assert.match(boardSummary({snapshot: four}), /Agent 4 · Working · #4/);
+});

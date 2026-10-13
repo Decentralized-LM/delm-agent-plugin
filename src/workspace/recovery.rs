@@ -102,14 +102,16 @@ fn load(bundle: &Path) -> Result<(PathBuf, File, Bundle, usize)> {
     );
     let saved: Bundle = serde_json::from_slice(&bytes)?;
     ensure!(
-        saved.version == 1 && saved.original.is_absolute() && saved.workers.len() <= 2,
+        saved.version == 1
+            && saved.original.is_absolute()
+            && saved.workers.len() <= crate::config::MAX_WORKER_COUNT,
         "Unsupported recovery manifest"
     );
     let mut workers = BTreeSet::new();
     let mut blobs = BTreeSet::new();
     for worker in &saved.workers {
         ensure!(
-            worker.worker < 2 && workers.insert(worker.worker),
+            worker.worker < crate::config::MAX_WORKER_COUNT && workers.insert(worker.worker),
             "Invalid recovery worker identity"
         );
         ensure!(
@@ -233,10 +235,14 @@ fn export_version(root: &Path, blobs: &File, delta: &Delta, after: bool) -> Resu
 }
 
 /// Export one worker's before/after changes into a new destination. Public
-/// worker numbers are 1 and 2. Original-project writes and deletion application
+/// worker numbers start at 1. Original-project writes and deletion application
 /// are intentionally separate actions; the manifest records both explicitly.
 pub fn export_recovery(bundle: &Path, destination: &Path, worker: usize) -> Result<RecoveryExport> {
-    ensure!((1..=2).contains(&worker), "Select worker 1 or 2");
+    ensure!(
+        (1..=crate::config::MAX_WORKER_COUNT).contains(&worker),
+        "Select a worker from 1 to {}",
+        crate::config::MAX_WORKER_COUNT
+    );
     let (bundle, blobs, saved, _) = load(bundle)?;
     let selected = saved
         .workers

@@ -47,7 +47,7 @@ pub enum Command {
         #[arg(long)]
         run_id: String,
         /// Export this worker's saved changes; requires --output.
-        #[arg(long, requires = "output", value_parser = clap::value_parser!(u8).range(1..=2))]
+        #[arg(long, requires = "output", value_parser = clap::value_parser!(u8).range(1..=4))]
         worker: Option<u8>,
         /// New folder outside the project. Existing files are never overwritten.
         #[arg(long, requires = "worker")]

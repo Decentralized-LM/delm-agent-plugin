@@ -32,13 +32,17 @@ async function fixture(options = {}) {
       handler: typeof matcher === 'function' ? matcher : handler});
     return {catch: () => {}};
   });
-  const requests = [], commands = [], timers = [], notices = [], prompts = [], directories = [];
+  const requests = [], commands = [], timers = [], notices = [], prompts = [], directories = [], questions = [];
   const agents = new Map(), store = options.store || new Map();
   let session = options.session || 'session-fixture', revision = 1;
   let finalization = null, generation = 0;
-  const streams = [];
-  function createStream() {
-    const state = {queued: [{stream: 'stdout', text: JSON.stringify({...ready, session_id: session}) + '\n'}], waiting: null};
+  const streams = [], starts = [];
+  function createStream(input) {
+    const start = input ? JSON.parse(input) : {};
+    starts.push(start);
+    const count = options.readyWorkers ?? start.workers ?? 2;
+    const workers = Array.from({length: count}, (_, index) => ({slot: index + 1, cwd: '/fixture/worker-' + (index + 1)}));
+    const state = {queued: [{stream: 'stdout', text: JSON.stringify({...ready, workers, session_id: session}) + '\n'}], waiting: null};
     streams.push(state);
     return {
       next: () => state.queued.length ? Promise.resolve({value: state.queued.shift(), done: false})
@@ -51,12 +55,13 @@ async function fixture(options = {}) {
     mcp: {connect: async () => ({isConnected: true, server: 'plugin:delm:delm'})},
     session: {
       id: async () => session, cwd: async () => '/observed/native/cwd',
+      ...(options.surfaces ? {surfaces: async () => options.surfaces} : {}),
       append: async input => { prompts.push(input); return {uuid: 'stored-update', message: input.message}; },
     },
     store: {get: async key => store.get(key), set: async (key, value) => { store.set(key, structuredClone(value)); }},
     fs: {read: async () => 'Shared DeLM worker contract.'},
     process: {
-      spawn: () => createStream(),
+      spawn: init => createStream(init?.input),
       run: async (argv, init) => {
         directories.push({argv: argv.slice(1, 3).join(' '), cwd: init.cwd});
         const request = JSON.parse(init.stdin);
@@ -95,7 +100,8 @@ async function fixture(options = {}) {
       if (milliseconds <= 1000) timers.push(callback);
       return {cancel() {}};
     }, every: () => ({cancel() {}}), sleep: async () => {}},
-    ui: {log: line => { notices.push(line); }},
+    ui: {log: line => { notices.push(line); },
+      ...(options.ask ? {ask: async (question, choices) => { questions.push({question, choices}); return options.ask(question, choices); }} : {})},
     prompt: {submit: async input => { prompts.push(input); }},
     agent: {list: async () => [...agents].map(([id, status]) => ({id, status}))},
     tool: {call: async input => {
@@ -132,11 +138,12 @@ async function fixture(options = {}) {
     for await (const chunk of iterator) chunks.push(chunk);
     return chunks;
   }
-  async function launch() {
+  async function launch(args = 'Build a useful tool.', expected = /exactly two native fork/) {
     await call('session.start', {cwd: '/fixture/project'});
-    const result = await call('command.run', {command: 'delm:run', args: 'Build a useful tool.'});
-    assert.match(result.args, /exactly two native fork/);
+    const result = await call('command.run', {command: 'delm:run', args});
+    assert.match(result.args, expected);
     await call('turn.start', {turnId: 'parent-turn', text: 'launch'});
+    return result;
   }
   async function spawn(id = 'peer-1') {
     let input;
@@ -157,6 +164,7 @@ async function fixture(options = {}) {
     await setImmediate();
   }
   return {host, call, step, launch, spawn, event, requests, agents, timers, prompts, store, notices, directories,
+    questions, starts,
     retryFinish: () => module.retryFinish(host,session), select: id => { session = id; }};
 }
 
@@ -198,7 +206,7 @@ test('only two native forks bind to separate workspaces before model execution',
   const first = await f.spawn('peer-1'), second = await f.spawn('peer-2');
   assert.equal(first.input.cwd, ready.workers[0].cwd);
   assert.equal(second.input.cwd, ready.workers[1].cwd);
-  assert.equal((await f.spawn('peer-3')).result.deny.includes('two native peers'), true);
+  assert.equal((await f.spawn('peer-3')).result.deny.includes('its 2 native peers'), true);
   await f.step('peer-1');
   assert.deepEqual(f.requests.filter(r => ['bind', 'configure_scopes', 'step'].includes(r.op)).map(r => r.op),
     ['bind', 'configure_scopes', 'bind', 'configure_scopes', 'step']);
@@ -209,8 +217,8 @@ test('only two native forks bind to separate workspaces before model execution',
 test('a parent ending without both native peers cancels the incomplete launch', async () => {
   const f = await fixture(); await f.launch(); await f.spawn();
   await f.call('turn.complete', {turnId: 'parent-turn', reason: 'answer', isAborted: false, answer: 'Launched.'});
-  assert.ok(f.requests.some(request => request.op === 'cancel' && /two-peer/.test(request.reason)));
-  assert.ok(f.notices.some(notice => /two-peer/.test(notice)));
+  assert.ok(f.requests.some(request => request.op === 'cancel' && /required native peer launch/.test(request.reason)));
+  assert.ok(f.notices.some(notice => /required native peer launch/.test(notice)));
   const normal = await fixture(); await normal.launch(); await normal.spawn('peer-1'); await normal.spawn('peer-2');
   await normal.call('turn.complete', {turnId: 'parent-turn', reason: 'answer', isAborted: false, answer: 'Launched.'});
   assert.equal(normal.requests.some(request => request.op === 'cancel'), false);
@@ -1135,4 +1143,110 @@ test('a final report that cannot be posted says so without marking the finished 
     f.notices.join('\n'));
   assert.equal(f.notices.some(line => /needs attention/.test(line)), false);
   assert.equal(f.store.get('native-run:session-fixture').phase, 'delivered');
+});
+
+test('agent counts are 2 or 4, chosen before launch, and the launch contract names the count', () => {
+  const four = {...ready, workers: [1, 2, 3, 4].map(slot => ({slot, cwd: '/fixture/worker-' + slot}))};
+  assert.equal(protocol.validateReady(four), four);
+  assert.equal(protocol.validateReady(four, 4), four);
+  assert.throws(() => protocol.validateReady(four, 2));
+  assert.throws(() => protocol.validateReady({...four, workers: four.workers.slice(0, 3)}));
+  assert.throws(() => protocol.validateReady({...four, workers: [...four.workers.slice(0, 3), {slot: 4, cwd: '/fixture/worker-1'}]}));
+  assert.deepEqual(protocol.parseAgents('Build it'), {agents: null, task: 'Build it'});
+  assert.deepEqual(protocol.parseAgents('--agents 4 Build it'), {agents: 4, task: 'Build it'});
+  assert.deepEqual(protocol.parseAgents('--agents=2 Build\nit'), {agents: 2, task: 'Build\nit'});
+  assert.deepEqual(protocol.parseAgents('Mention --agents 4 in the docs'), {agents: null, task: 'Mention --agents 4 in the docs'});
+  for (const args of ['--agents 3 Build', '--agents four Build', '--agents', '--agents=']) {
+    assert.throws(() => protocol.parseAgents(args), /2 or 4/, args);
+  }
+  assert.equal(protocol.agentsFromAnswer(protocol.AGENT_CHOICES[0]), 2);
+  assert.equal(protocol.agentsFromAnswer(protocol.AGENT_CHOICES[1]), 4);
+  assert.equal(protocol.agentsFromAnswer('4'), 4);
+  assert.throws(() => protocol.agentsFromAnswer('3'), /2 or 4/);
+  const two = protocol.nativeLaunchContext('Task', 'Contract');
+  assert.match(two, /exactly two native fork/);
+  assert.match(two, /Both forks inherit/);
+  assert.match(two, /one of two peers/);
+  const fourContext = protocol.nativeLaunchContext('Task', 'Contract', 4);
+  assert.match(fourContext, /exactly four native fork/);
+  assert.match(fourContext, /All four forks inherit/);
+  assert.match(fourContext, /one of four peers/);
+  assert.throws(() => protocol.nativeLaunchContext('Task', 'Contract', 3));
+});
+
+test('the picker asks before any workspace is prepared and its answer sets the agent count', async () => {
+  const f = await fixture({surfaces: ['terminal'], ask: () => protocol.AGENT_CHOICES[1]});
+  const result = await f.launch('Build a useful tool.', /exactly four native fork/);
+  assert.equal(f.questions.length, 1);
+  assert.deepEqual(f.questions[0].choices, {header: 'Agents', options: protocol.AGENT_CHOICES});
+  assert.equal(f.starts.length, 1);
+  assert.equal(f.starts[0].workers, 4);
+  assert.equal(f.starts[0].task, 'Build a useful tool.');
+  assert.match(result.args, /User request:\nBuild a useful tool\.$/);
+  const plain = await fixture({surfaces: ['terminal'], ask: () => protocol.AGENT_CHOICES[0]});
+  await plain.launch();
+  assert.equal(plain.starts[0].workers, 2);
+});
+
+test('--agents skips the picker, and headless sessions keep two agents without asking', async () => {
+  const never = () => { throw new Error('The picker must not open.'); };
+  const flagged = await fixture({surfaces: ['terminal'], ask: never});
+  await flagged.launch('--agents 4 Build a useful tool.', /exactly four native fork/);
+  assert.equal(flagged.questions.length, 0);
+  assert.deepEqual([flagged.starts[0].workers, flagged.starts[0].task], [4, 'Build a useful tool.']);
+  const headless = await fixture({surfaces: [], ask: never});
+  await headless.launch();
+  assert.equal(headless.questions.length, 0);
+  assert.equal(headless.starts[0].workers, 2);
+  const older = await fixture({surfaces: ['terminal']});
+  await older.launch();
+  assert.equal(older.starts[0].workers, 2);
+  assert.ok(older.notices.some(notice => /--agents 4/.test(notice)));
+});
+
+test('a dismissed picker or an unsupported count starts nothing', async () => {
+  const dismissed = await fixture({surfaces: ['terminal'], ask: () => { throw new Error('Dismissed'); }});
+  const result = await dismissed.call('command.run', {command: 'delm:run', args: 'Build a useful tool.'});
+  assert.match(result.text, /did not start/);
+  assert.equal(dismissed.starts.length, 0);
+  assert.equal([...dismissed.store.keys()].some(key => key.startsWith('native-run:')), false);
+  for (const [options, args] of [
+    [{surfaces: ['terminal'], ask: () => '3'}, 'Build a useful tool.'],
+    [{surfaces: ['terminal']}, '--agents 3 Build a useful tool.'],
+    [{surfaces: ['terminal']}, '--agents 4'],
+  ]) {
+    const f = await fixture(options);
+    const refused = await f.call('command.run', {command: 'delm:run', args});
+    assert.match(refused.text, /2 or 4|followed by the task/, args);
+    assert.equal(refused.args, undefined, args);
+    assert.equal(f.starts.length, 0, args);
+  }
+  const retry = await fixture({surfaces: ['terminal'], ask: () => { throw new Error('Dismissed'); }});
+  await retry.call('command.run', {command: 'delm:run', args: 'First try.'});
+  retry.host.ui.ask = async () => protocol.AGENT_CHOICES[1];
+  await retry.launch('Second try.', /exactly four native fork/);
+});
+
+test('four native forks bind to four separate workspaces and the launch must complete', async () => {
+  const f = await fixture({surfaces: ['terminal']});
+  await f.launch('--agents 4 Build a useful tool.', /exactly four native fork/);
+  const spawned = [];
+  for (const id of ['peer-1', 'peer-2', 'peer-3', 'peer-4']) spawned.push(await f.spawn(id));
+  assert.deepEqual(spawned.map(item => item.input.cwd), [1, 2, 3, 4].map(slot => '/fixture/worker-' + slot));
+  assert.match((await f.spawn('peer-5')).result.deny, /its 4 native peers/);
+  assert.deepEqual(f.requests.filter(r => r.op === 'bind').map(r => r.slot), [1, 2, 3, 4]);
+  await f.call('turn.complete', {turnId: 'parent-turn', reason: 'answer', isAborted: false, answer: 'Launched.'});
+  assert.equal(f.requests.some(request => request.op === 'cancel'), false);
+  const partial = await fixture({surfaces: ['terminal']});
+  await partial.launch('--agents 4 Build a useful tool.', /exactly four native fork/);
+  for (const id of ['peer-1', 'peer-2', 'peer-3']) await partial.spawn(id);
+  await partial.call('turn.complete', {turnId: 'parent-turn', reason: 'answer', isAborted: false, answer: 'Launched.'});
+  assert.ok(partial.requests.some(request => request.op === 'cancel' && /required native peer launch/.test(request.reason)));
+});
+
+test('a runtime that prepares a different count than requested is refused', async () => {
+  const f = await fixture({surfaces: ['terminal'], readyWorkers: 2});
+  const result = await f.call('command.run', {command: 'delm:run', args: '--agents 4 Build a useful tool.'});
+  assert.match(result.text, /invalid native launch contract/);
+  assert.equal(result.args, undefined);
 });

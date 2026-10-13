@@ -1,6 +1,6 @@
 import {
-  TOOL_PREFIX, commandOutcome, completeState, decodeLines,
-  followupText, nativeLaunchContext, parseReply, toolArguments, validateReady,
+  AGENT_CHOICES, DEFAULT_AGENTS, TOOL_PREFIX, agentsFromAnswer, commandOutcome, completeState,
+  decodeLines, followupText, nativeLaunchContext, parseAgents, parseReply, toolArguments, validateReady,
 } from './protocol.js';
 import {registerBoard, observeBoard} from './board-view.js';
 
@@ -159,7 +159,29 @@ async function drain($, run, stream, initial) {
   }
 }
 
-async function start($, task, session) {
+// The count comes from the person: their --agents option or this picker,
+// never from a model turn. A session with no surface has no one to ask.
+async function chooseAgents($) {
+  let surfaces = [];
+  try { surfaces = await $.session.surfaces(); } catch { /* Treated as headless. */ }
+  if (!surfaces.length) return DEFAULT_AGENTS;
+  if (typeof $.ui.ask !== 'function') {
+    $.ui.log('This Claude Code version cannot show the DeLM agent picker, so DeLM is starting '
+      + DEFAULT_AGENTS + ' agents. Use /delm:run --agents 4 <task> to run four.');
+    return DEFAULT_AGENTS;
+  }
+  let answer;
+  try {
+    answer = await $.ui.ask('How many agents should DeLM run?', {header: 'Agents', options: AGENT_CHOICES});
+  } catch { return null; }
+  return agentsFromAnswer(answer);
+}
+
+function peerList(names) {
+  return names.length < 3 ? names.join(' and ') : names.slice(0, -1).join(', ') + ' and ' + names.at(-1);
+}
+
+async function start($, task, session, agents = DEFAULT_AGENTS) {
   const generation = generations.get(session) || 0;
   if (await $.session.id() !== session) throw new Error('The conversation changed before preparation. Retry /delm:run here.');
   const connection = await $.mcp.connect('delm');
@@ -174,7 +196,8 @@ async function start($, task, session) {
   try { hostVersion = (await $.session.version()).version; } catch { /* Optional diagnostic metadata. */ }
   const stream = $.process.spawn({
     argv: [$.plugin.root + '/bin/delm', 'claude', 'serve'],
-    input: JSON.stringify({project, session_id: session, task, host_version: hostVersion, package_root: $.plugin.root}) + '\n',
+    input: JSON.stringify({project, session_id: session, task, host_version: hostVersion,
+      package_root: $.plugin.root, workers: agents}) + '\n',
   });
   let buffer = '';
   let stderr = '';
@@ -188,7 +211,7 @@ async function start($, task, session) {
     const decoded = decodeLines(buffer, chunk.value.text);
     buffer = decoded.rest;
     if (!decoded.events.length) continue;
-    const ready = validateReady(decoded.events[0]);
+    const ready = validateReady(decoded.events[0], agents);
     if (ready.session_id !== session) throw new Error('DeLM returned workspaces for another conversation.');
     const run = {
       ready, session, prompt, task, revision: ready.revision, agents: {}, descendants: {},
@@ -521,9 +544,11 @@ async function retryFinish($, session) {
 }
 
 async function recover($, stored, requestedIntent = null) {
+  const ready = validateReady(stored.ready);
   const run = {
-    ...stored, ready: validateReady(stored.ready), writes: Promise.resolve(),
-    bindings: [], deliveries: {}, updating: null, launches: 2, awaitingLaunch: false, failure: null, stopping: true, ending: false,
+    ...stored, ready, writes: Promise.resolve(),
+    bindings: [], deliveries: {}, updating: null, launches: ready.workers.length, awaitingLaunch: false,
+    failure: null, stopping: true, ending: false,
     phase: 'recovery_required', restored: true, settlement: null, retryTimer: null, retryCount: 0, proofVersion: 0,
   };
   run.cancelRequested = Boolean(stored.cancelRequested || requestedIntent === 'cancel');
@@ -593,7 +618,7 @@ function peerNotification(run, session, e) {
   }
   const names = [...slots].sort((a, b) => a - b);
   return 'DeLM handled ' + (names.length === 1 ? 'a status notice from peer ' + names[0]
-    : 'status notices from peers ' + names.join(' and ')) + ' itself; see /delm-status for progress.';
+    : 'status notices from peers ' + peerList(names)) + ' itself; see /delm-status for progress.';
 }
 
 async function waitForOwnBinding(run, agentId) {
@@ -626,15 +651,20 @@ export function register(on) {
   on('command.run', {command: 'delm:run'}, async ($, e, next) => {
     const session = await $.session.id();
     if (starts.has(session)) return {text: 'DeLM is preparing this conversation. Wait for its native peers to start.'};
-    if (!e.args.trim()) return {text: 'Use /delm:run followed by the task you want to complete.'};
+    let request;
+    try { request = parseAgents(e.args); }
+    catch (error) { return {text: String(error.message || error)}; }
+    if (!request.task) return {text: 'Use /delm:run followed by the task you want to complete.'};
     starts.add(session);
     try {
       const known = await currentRun($);
       if (known && !known.finished) return {text: ownsConversation(known)
         ? 'DeLM is already working in this conversation. Send a follow-up, or use /delm-stop first.'
         : 'The previous DeLM run needs finishing or recovery before another run can start. You can use Claude normally here. Open /delm-status for its recovery state, or use /delm-stop to save unfinished changes.'};
-      const run = await start($, e.args.trim(), session);
-      return next({...e, args: nativeLaunchContext(run.task, run.prompt)});
+      const agents = request.agents ?? await chooseAgents($);
+      if (agents === null) return {text: 'DeLM did not start. No agents were launched.'};
+      const run = await start($, request.task, session, agents);
+      return next({...e, args: nativeLaunchContext(run.task, run.prompt, run.ready.workers.length)});
     } catch (error) {
       const run = runs.get(session);
       if (run && !run.finished) await reportFailure($, run, error);
@@ -712,7 +742,9 @@ export function register(on) {
       return result;
     }
     if (e.parentAgentId || run.mainTurn !== run.launchTurn) return next(e);
-    if (run.launches >= 2) return {deny: 'DeLM already started its two native peers. Resume an existing peer if needed.'};
+    if (run.launches >= run.ready.workers.length) {
+      return {deny: 'DeLM already started its ' + run.ready.workers.length + ' native peers. Resume an existing peer if needed.'};
+    }
     if (!e.fork || e.subagentType !== 'fork' || e.name || e.isTeammate) {
       return {deny: 'DeLM requires an unnamed native fork to preserve the current conversation and setup.'};
     }
@@ -939,8 +971,8 @@ export function register(on) {
     if (run && !await current($, run)) return next(e);
     const worker = run?.agents[e.agentId];
     if (run && !run.finished && !e.agentId && e.turnId === run.launchTurn
-        && Object.keys(run.agents).length !== 2) {
-      const reason = 'Claude did not complete the required two-peer native launch.';
+        && Object.keys(run.agents).length !== run.ready.workers.length) {
+      const reason = 'Claude did not complete the required native peer launch.';
       await reportFailure($, run, new Error(reason));
       try { await request($, run, 'cancel', {reason}); }
       catch (error) { await reportFailure($, run, error); }

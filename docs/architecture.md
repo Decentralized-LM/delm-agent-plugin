@@ -1,6 +1,6 @@
 # Architecture
 
-DeLM adds parallel execution to an explicitly requested Codex or Claude Code task. Two peers contribute to one result through a shared task queue, publications, and recorded checks.
+DeLM adds parallel execution to an explicitly requested Codex or Claude Code task. Peers contribute to one result through a shared task queue, publications, and recorded checks: two in Codex, and two or four in Claude Code as the user chooses. The diagram shows two.
 
 ```mermaid
 flowchart LR
@@ -13,7 +13,7 @@ flowchart LR
   W2 <--> Board
   Board --> Result[One assembled result]
   Result --> Delivery[Guarded delivery to current project]
-  Delivery --> Cleanup[Remove both temporary workspaces]
+  Delivery --> Cleanup[Remove all temporary workspaces]
 ```
 
 ## Source layout
@@ -44,7 +44,7 @@ Exact live-session parity is not met: a native fixture demonstrates a parent-pro
 
 ### Claude Code
 
-Claude resources live in `hosts/claude/`. The official plugin module intercepts `/delm:run`, confirms its native MCP connection, and starts the shared Rust runtime before model work. The runtime captures the project and prepares two private working directories. A short parent model turn issues two native `fork` Agent calls together; spawn middleware assigns the prepared directories and binds the returned native identities. Both forks inherit the complete conversation and the shared worker policy. The parent passes a short instruction pointer instead of emitting that policy twice.
+Claude resources live in `hosts/claude/`. The official plugin module intercepts `/delm:run`, confirms its native MCP connection, and starts the shared Rust runtime before model work. Before preparation, the module takes the agent count from a leading `--agents 2|4` option or from Claude's native question dialog, so no model turn chooses it; a session without an interactive surface uses two. The runtime validates that count, captures the project, and prepares one private working directory per agent. A short parent model turn issues that many native `fork` Agent calls together; spawn middleware assigns the prepared directories in slot order, binds the returned native identities, and refuses any extra fork. Every fork inherits the complete conversation and the shared worker policy. The parent passes a short instruction pointer instead of emitting that policy twice.
 
 This launch turn is necessary in the qualified Auto permission mode: a plugin-origin direct spawn has no model-response classifier verdict. DeLM uses ordinary native Agent and SendMessage calls rather than overriding permissions. The parent handles launch, resume, and final handoff; peers do the implementation and checks.
 
@@ -62,7 +62,7 @@ Private working directories separate edits; they do not replace the user's nativ
 
 When a worker declares a dependency wait, the runtime records the board position internally and checks readiness again after the native turn ends. Task creation, released work, and relevant peer contributions can resume the existing worker. Event ordering cannot discard a useful change between the declaration and the end of the turn, and duplicate events cannot start duplicate resumptions. These internal cursors do not alter the shared board returned to agents. Worker instructions require useful independent work before yielding, prohibit shell sleeps for peer dependencies, and cap necessary timed polling intervals at 30 seconds. Runtime dependency wake-ups are event-driven.
 
-Both workers claim useful implementation work and expose follow-on tasks. Claims are versioned; updates, releases, and splits cannot let stale owners finish reassigned work. Either worker can temporarily own integration, with at most one active integration owner. The team owes one complete result, without a permanent manager or a requirement that both independently finish the whole task.
+Every worker claims useful implementation work and exposes follow-on tasks. Claims are versioned; updates, releases, and splits cannot let stale owners finish reassigned work. Any worker can temporarily own integration, with at most one active integration owner. The team owes one complete result, without a permanent manager or a requirement that each worker independently finish the whole task. A board keeps the worker count it was created with; worker identities are slots 1 through that count, and the `peer` task filter means any other worker. When a worker stops with a live preview, the next active worker in slot order inherits it.
 
 Compact board responses include collection totals and truncation indicators. `delm_list` provides bounded worker discovery with cursors and optional task filters; it does not expand every record into every turn. A request revision change invalidates old cursors, and changed task ownership invalidates filtered task cursors. Stable task display numbers are separate from event-backed mutation IDs. Task dependencies refer to immutable publications.
 
@@ -82,7 +82,7 @@ A service claim coordinates preview ownership before a worker starts a server th
 
 The selected folder is the project boundary. If it has no Git administration, preparation initializes an independent repository there through an atomic no-replace publication; it never discovers an ancestor or replaces an existing `.git` entry. Partial capture failures clean only identity-checked directories recorded in the preparation journal.
 
-Updates and answers reach both existing worker sessions. Native interruption, explicit stop, owner exit, and the task deadline cancel work. Cleanup requires confirmed shutdown of owned execution. Unresolved shutdown preserves work and reports the cleanup limitation.
+Updates and answers reach every existing worker session. Native interruption, explicit stop, owner exit, and the task deadline cancel work. Cleanup requires confirmed shutdown of owned execution. Unresolved shutdown preserves work and reports the cleanup limitation.
 
 Codex owns separate app-server processes. Its supervisor stops the owned native turns, terminals, private hosts, and observed descendants before workspace removal. Claude shares the user's native host and does not terminate it. Its module stops recorded agents and background tasks through native APIs; terminal states and exact stop acknowledgments precede a scoped process-reference fence. That fence checks processes created since runtime startup and explicitly tracked processes, including registered services, without deriving kill authority from a working directory. It is a DeLM-scoped check, not a guarantee against arbitrary pre-existing external writers.
 

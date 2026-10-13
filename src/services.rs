@@ -232,7 +232,10 @@ impl Services {
     }
 
     pub fn call(&mut self, worker: usize, args: Value, host: u32, board: &Board) -> Result<Value> {
-        ensure!((1..=2).contains(&worker), "Unknown worker");
+        ensure!(
+            (1..=board.worker_count()).contains(&worker),
+            "Unknown worker"
+        );
         let action = field(&args, "action")?;
         if action == "list" {
             for entry in self.entries.values_mut() {
@@ -400,10 +403,16 @@ impl Services {
     }
 
     /// Release a stopped worker's check leases. Empty/dead service claims are
-    /// removed; a live owned server transfers to the peer with a new generation
-    /// and retains its source scope. No process is signalled by this operation.
-    pub fn retire_worker(&mut self, worker: usize) -> Result<Value> {
-        ensure!((1..=2).contains(&worker), "Unknown worker");
+    /// removed; a live owned server transfers to `successor`, the peer the host
+    /// selected, with a new generation and its source scope retained. No process
+    /// is signalled by this operation.
+    pub fn retire_worker(&mut self, worker: usize, successor: usize) -> Result<Value> {
+        ensure!(
+            (1..=crate::config::MAX_WORKER_COUNT).contains(&worker)
+                && (1..=crate::config::MAX_WORKER_COUNT).contains(&successor)
+                && successor != worker,
+            "Unknown worker"
+        );
         let mut removed = Vec::new();
         let mut transferred = Vec::new();
         for (name, entry) in &mut self.entries {
@@ -420,7 +429,7 @@ impl Services {
                 .transpose()?
                 .unwrap_or(false)
             {
-                entry.owner = 3 - worker;
+                entry.owner = successor;
                 entry.generation = uuid::Uuid::new_v4().to_string();
                 transferred.push(name.clone());
             } else {
@@ -719,7 +728,7 @@ mod tests {
             .call(1, ready(generation, &server), host, board)
             .unwrap();
         services.call(1,json!({"action":"acquire_check","name":"web","generation":generation,"revision":"publication:7"}),host,board).unwrap();
-        let retired = services.retire_worker(1).unwrap();
+        let retired = services.retire_worker(1, 2).unwrap();
         assert_eq!(retired["transferred"], json!(["web"]));
         let adopted = services.call(2, claim(), host, board).unwrap();
         let next = &adopted["service"]["generation"];
@@ -744,7 +753,7 @@ mod tests {
         assert_eq!(checked["check_valid"], true);
         server.stop();
         assert_eq!(
-            services.retire_worker(2).unwrap()["removed"],
+            services.retire_worker(2, 1).unwrap()["removed"],
             json!(["web"])
         );
     }

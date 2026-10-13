@@ -145,6 +145,16 @@ function agentState(agent) {
   return native || (agent.taskIds?.length ? 'Claimed' : 'Status unavailable');
 }
 
+// One line for every agent: names for two, grouped states for more, so four
+// agents still fit a narrow pane.
+function agentsLine(view) {
+  if (!view.agents.length) return 'Waiting for agents to start';
+  if (view.agents.length <= 2) return view.agents.map(agent => `${agent.name} · ${agentState(agent)}`).join('  ');
+  const counts = new Map();
+  for (const agent of view.agents) counts.set(agentState(agent), (counts.get(agentState(agent)) || 0) + 1);
+  return `${view.agents.length} agents · ${[...counts].map(([state, count]) => `${count} ${state}`).join(' · ')}`;
+}
+
 function compactSummary(view) {
   if (view.disconnected) return `${phaseLabel(view)} · Updates disconnected`;
   const phase = phaseLabel(view);
@@ -247,9 +257,7 @@ function tinyOverview(h, view, actions) {
       children.push(h.line(`${agent.name} · ${agentState(agent)}${task ? ` · ${taskLabel(task)} ${task.title}` : ''}`));
     }
     if (!view.agents.length) children.push(h.line('Waiting for agents to start', {dimColor: true}));
-  } else if (rows >= 5) children.push(h.line(view.agents.length
-    ? view.agents.map(agent => `${agent.name} · ${agentState(agent)}`).join('  ')
-    : 'Waiting for agents to start'));
+  } else if (rows >= 5) children.push(h.line(agentsLine(view)));
   const unavailable = view.freshness.unavailable?.includes('board');
   const knownCount = view.agents.length && view.agents.every(agent => Number.isSafeInteger(agent.task_count) && agent.task_count >= 0);
   const claimed = knownCount ? view.agents.reduce((total, agent) => total + agent.task_count, 0)

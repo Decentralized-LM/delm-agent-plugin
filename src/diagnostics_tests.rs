@@ -111,6 +111,15 @@ fn lifecycle_reports_original_metadata_without_exporting_arbitrary_errors() {
     assert_eq!(report["lifecycle"]["intent"], "deliver");
     assert_eq!(report["lifecycle"]["attempt"], 2);
     assert!(!report.to_string().contains("PRIVATE_OUTPUT"));
+    state["worker_count"] = json!(4);
+    fs::write(&path, state.to_string()).unwrap();
+    assert_eq!(report_at(&run).unwrap()["run_identity"]["worker_count"], 4);
+    state["worker_count"] = json!(99);
+    fs::write(&path, state.to_string()).unwrap();
+    assert_eq!(
+        report_at(&run).unwrap()["run_identity"]["worker_count"],
+        Value::Null
+    );
     state["finalization"]["reason"] = json!("PRIVATE_REASON");
     state["host_version"] = json!("PRIVATE_VERSION");
     fs::write(&path, state.to_string()).unwrap();

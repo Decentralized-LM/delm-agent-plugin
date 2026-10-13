@@ -738,6 +738,24 @@ fn version_number(value: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Agents in the run, so timing reports can compare runs of different sizes.
+/// Older records omit `worker_count`; their saved worker list gives the count.
+fn worker_count(state: &Value) -> Value {
+    state["worker_count"]
+        .as_u64()
+        .or_else(|| {
+            state["workers"]
+                .as_array()
+                .map(|workers| workers.len() as u64)
+        })
+        .filter(|count| {
+            (crate::config::DEFAULT_WORKER_COUNT as u64..=crate::config::MAX_WORKER_COUNT as u64)
+                .contains(count)
+        })
+        .map(|count| json!(count))
+        .unwrap_or(Value::Null)
+}
+
 fn lifecycle_summary(state: &Value) -> Value {
     let phase = &state["finalization"];
     let choice = |key: &str, choices: &[&str]| {
@@ -775,7 +793,8 @@ fn report_at(path: &Path) -> Result<Value> {
         json!({"schema_version":1,"report_runtime_version":env!("CARGO_PKG_VERSION"),
         "run_id":info.id,"host":info.host,"status":info.status,
         "run_identity":{"runtime_version":version_number(&info.state["runtime_version"]),
-            "host_version":version_number(if info.host == "codex" { &info.state["request"]["auth_settings"]["host_version"] } else { &info.state["host_version"] })},
+            "host_version":version_number(if info.host == "codex" { &info.state["request"]["auth_settings"]["host_version"] } else { &info.state["host_version"] }),
+            "worker_count":worker_count(&info.state)},
         "lifecycle":lifecycle_summary(&info.state),
         "storage":{"logical_bytes":info.bytes,"meaning":"Logical file sizes; APFS shared blocks and reclaimable physical space are not measured."},
         "delivery":delivery_summary(&info.delivery),"timing":timing,"scoped_checks":checks,

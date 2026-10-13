@@ -53,6 +53,13 @@ struct Start {
     task: String,
     host_version: Option<String>,
     package_root: Option<PathBuf>,
+    /// Agents the user chose (2 or 4). Older plugin modules omit it and get 2.
+    #[serde(default = "default_worker_count")]
+    workers: usize,
+}
+
+fn default_worker_count() -> usize {
+    crate::config::DEFAULT_WORKER_COUNT
 }
 
 async fn line(input: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<Vec<u8>>> {
@@ -134,6 +141,7 @@ async fn serve() -> Result<()> {
         .context("Missing Claude launch request")?;
     let start: Start = serde_json::from_slice(&bytes)?;
     ensure!(start.project.is_absolute(), "Project path must be absolute");
+    crate::config::validate_claude_worker_count(start.workers)?;
     let native_host =
         crate::supervisor::ProcessIdentity::capture(unsafe { libc::getppid() } as u32)?;
     let executable = crate::package::retained_executable()?;
@@ -149,8 +157,13 @@ async fn serve() -> Result<()> {
     };
     let mut termination =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut controller =
-        controller::Controller::new(&start.project, start.session_id, start.task, native_host)?;
+    let mut controller = controller::Controller::new(
+        &start.project,
+        start.session_id,
+        start.task,
+        native_host,
+        start.workers,
+    )?;
     if let Err(error) = controller.handle(
         json!({"op":"transport","token_digest":format!("{:x}",Sha256::digest(token.as_bytes())),"host_version":start.host_version,"package_root":start.package_root}),
     ) {

@@ -82,8 +82,10 @@ pub(super) struct Controller {
     sequence: u64,
     native_host: ProcessIdentity,
     runtime: ProcessIdentity,
-    workers: [Worker; 2],
-    worker_scopes: [Option<Vec<FilesystemScope>>; 2],
+    /// One entry per prepared worker, in slot order. The count is fixed when the
+    /// run is prepared and never changes for the life of the run.
+    workers: Vec<Worker>,
+    worker_scopes: Vec<Option<Vec<FilesystemScope>>>,
     board: Board,
     services: Services,
     tickets: HashMap<String, Ticket>,
@@ -107,12 +109,14 @@ impl Controller {
         session_id: String,
         task: String,
         native_host: ProcessIdentity,
+        worker_count: usize,
     ) -> Result<Self> {
         ensure!(
             !session_id.trim().is_empty() && session_id.len() <= 256,
             "Native session identity is missing"
         );
         ensure!(!task.trim().is_empty(), "Enter a task after /delm:run");
+        crate::config::validate_claude_worker_count(worker_count)?;
         ensure!(
             native_host.is_running()?,
             "Native Claude host is not running"
@@ -130,12 +134,17 @@ impl Controller {
         let run_dir = state::create_run()?;
         atomic_json(
             &run_dir.join("claude.json"),
-            &json!({"version":1,"host":"claude","project":project,
+            &json!({"version":1,"host":"claude","project":project,"worker_count":worker_count,
             "session_id":session_id,"task":task,"runtime":runtime,"native_host":native_host,"status":"preparing","finished":false}),
         )?;
         let mut preparation_journal = Journal::open(&run_dir)?;
         preparation_journal.observe("phase", &json!({"phase":"preparation","boundary":"start"}))?;
-        let prepared = workspace::prepare(&project, &run_dir, crate::config::MAX_REPO_SIZE_BYTES);
+        let prepared = workspace::prepare_workers(
+            &project,
+            &run_dir,
+            crate::config::MAX_REPO_SIZE_BYTES,
+            worker_count,
+        );
         preparation_journal.observe(
             "phase",
             &json!({"phase":"preparation","boundary":"end","success":prepared.is_ok()}),
@@ -153,7 +162,7 @@ impl Controller {
                     });
                 atomic_json(
                     &run_dir.join("claude.json"),
-                    &json!({"version":1,"host":"claude","project":project,
+                    &json!({"version":1,"host":"claude","project":project,"worker_count":worker_count,
                     "session_id":session_id,"task":task,"runtime":runtime,"native_host":native_host,
                     "status":"preparation_failed","finished":clean,"reason":error.to_string()}),
                 )?;
@@ -175,7 +184,8 @@ impl Controller {
         // recovery. No native identity or launch path has been published yet.
         let saved = serde_json::to_value(&workspace)?;
         let failure_record = json!({"version":1,"host":"claude","session_id":session_id,"task":task,
-            "project":workspace.original,"workspace":saved,"runtime":runtime,"native_host":native_host});
+            "project":workspace.original,"worker_count":workspace.workers.len(),"workspace":saved,
+            "runtime":runtime,"native_host":native_host});
         match Self::assemble(workspace, session_id, task, native_host, runtime) {
             Ok(mut controller) => {
                 controller._lock = Some(lock);
@@ -223,7 +233,9 @@ impl Controller {
         // The adapter grants own-workspace board access under the dedicated
         // DeLM MCP tool permission. This is separate from native Read/Edit
         // rules, never authority supplied by model arguments.
-        for slot in 1..=2 {
+        let worker_count = workspace.workers.len();
+        crate::config::validate_claude_worker_count(worker_count)?;
+        for slot in 1..=worker_count {
             board.set_worker_scopes(slot, Vec::new())?;
         }
         let journal = Journal::open(&workspace.run_dir)?;
@@ -239,10 +251,12 @@ impl Controller {
                     .to_path_buf(),
             ],
         };
-        let workers = std::array::from_fn(|_| Worker {
-            result_policy: python_policy.clone(),
-            ..Worker::default()
-        });
+        let workers = (0..worker_count)
+            .map(|_| Worker {
+                result_policy: python_policy.clone(),
+                ..Worker::default()
+            })
+            .collect();
         let mut result = Self {
             _lock: None,
             workspace,
@@ -253,7 +267,7 @@ impl Controller {
             native_host,
             runtime,
             workers,
-            worker_scopes: [None, None],
+            worker_scopes: vec![None; worker_count],
             board,
             services: Services::default(),
             tickets: HashMap::new(),
@@ -314,10 +328,16 @@ impl Controller {
     }
 
     pub(super) fn ready(&self) -> Value {
+        let workers: Vec<Value> = self
+            .workspace
+            .workers
+            .iter()
+            .enumerate()
+            .map(|(index, cwd)| json!({"slot":index + 1,"cwd":cwd}))
+            .collect();
         json!({"run_id":self.workspace.run_dir.file_name().unwrap_or_default().to_string_lossy(),
             "run_dir":self.workspace.run_dir,"session_id":self.session_id,"revision":self.revision,
-            "workers":[{"slot":1,"cwd":self.workspace.workers[0]},{"slot":2,"cwd":self.workspace.workers[1]}],
-            "task":self.task,"status":self.status,"finalization":self.finalization})
+            "workers":workers,"task":self.task,"status":self.status,"finalization":self.finalization})
     }
 
     pub(super) fn finished(&self) -> bool {
@@ -500,10 +520,12 @@ impl Controller {
 
     fn bind(&mut self, r: &Value) -> Result<Value> {
         ensure!(!self.stop_requested, "Run is stopping");
+        let count = self.workers.len();
         let slot = r["slot"]
             .as_u64()
-            .filter(|slot| (1..=2).contains(slot))
-            .context("Worker slot must be 1 or 2")? as usize
+            .filter(|slot| (1..=count as u64).contains(slot))
+            .with_context(|| format!("Worker slot must be between 1 and {count}"))?
+            as usize
             - 1;
         let agent = text(r, "agent_id", 256)?;
         ensure!(
@@ -512,7 +534,7 @@ impl Controller {
                 .iter()
                 .enumerate()
                 .any(|(i, w)| i != slot && w.agent_id.as_deref() == Some(agent)),
-            "Native agent is already bound to the other worker"
+            "Native agent is already bound to another worker"
         );
         ensure!(
             self.workers[slot]
@@ -525,7 +547,7 @@ impl Controller {
         self.workers[slot].agent_id = Some(agent.into());
         self.status = "running".into();
         let mut actions = Vec::new();
-        // Both native forks inherited the original launch contract. A user
+        // Every native fork inherited the original launch contract. A user
         // update may arrive before either spawn result can bind its identity.
         // Deliver the cumulative request once, without relabeling that old
         // inherited context as an acknowledgment of the current revision.
@@ -824,8 +846,8 @@ impl Controller {
         if reason != "completed" {
             self.workers[i].blocked = true;
             self.board.release_worker_claims(i + 1, reason)?;
-            self.services.retire_worker(i + 1)?;
-            self.wake_waiting(&mut actions,"Your peer stopped. Read the released tasks and continue useful work from its published contributions.")?;
+            self.services.retire_worker(i + 1, self.successor(i) + 1)?;
+            self.wake_waiting(&mut actions,"A peer stopped. Read the released tasks and continue useful work from its published contributions.")?;
         } else if !self.stop_requested
             && self.workers[i].revision == self.revision
             && self.candidate.is_none()
@@ -870,7 +892,7 @@ impl Controller {
                 .iter()
                 .all(|w| w.turn_id.is_none() && !w.resume_pending)
         {
-            for j in 0..2 {
+            for j in 0..self.workers.len() {
                 if self.workers[j].waiting && !self.workers[j].wait_repaired {
                     self.workers[j].wait_repaired = true;
                     self.workers[j].waiting = false;
@@ -895,6 +917,19 @@ impl Controller {
         Ok(json!({"actions":actions}))
     }
 
+    /// The worker that inherits a stopped worker's live previews: the next slot
+    /// after it, wrapping, that is bound and not blocked; otherwise the next
+    /// slot. With two workers this is always the other one.
+    fn successor(&self, stopped: usize) -> usize {
+        let count = self.workers.len();
+        let mut order = (1..count).map(|offset| (stopped + offset) % count);
+        order
+            .clone()
+            .find(|&j| self.workers[j].agent_id.is_some() && !self.workers[j].blocked)
+            .or_else(|| order.next())
+            .unwrap_or((stopped + 1) % count)
+    }
+
     fn resume(&mut self, i: usize, message: &str) -> Value {
         self.workers[i].resume_pending = true;
         json!({"type":"resume","agent_id":self.workers[i].agent_id,"revision":self.revision,"message":message})
@@ -913,7 +948,7 @@ impl Controller {
         {
             return Ok(());
         }
-        for i in 0..2 {
+        for i in 0..self.workers.len() {
             if self.workers[i].waiting
                 && !self.workers[i].blocked
                 && !self.workers[i].resume_pending
@@ -971,7 +1006,7 @@ impl Controller {
             &json!({"revision":self.revision,"text":update}),
         )?;
         let mut actions = Vec::new();
-        for i in 0..2 {
+        for i in 0..self.workers.len() {
             if self.workers[i].agent_id.is_some() {
                 if self.workers[i].turn_id.is_some() {
                     // Hold liveness if an old native turn finishes before the
@@ -1052,7 +1087,7 @@ impl Controller {
             if let Some((i, candidate)) = &self.candidate {
                 ensure!(
                     self.workers.iter().all(|worker| worker.agent_id.is_some()),
-                    "Both native peers must be bound before result delivery"
+                    "Every native peer must be bound before result delivery"
                 );
                 ensure!(
                     !self.stop_requested && candidate.revision == self.revision,
@@ -1141,7 +1176,7 @@ impl Controller {
     fn persist(&self) -> Result<()> {
         atomic_json(
             &self.workspace.run_dir.join("claude.json"),
-            &json!({"version":1,"host":"claude","runtime_version":env!("CARGO_PKG_VERSION"),"host_version":self.host_version,"package_root":self.package_root,"session_id":self.session_id,
+            &json!({"version":1,"host":"claude","runtime_version":env!("CARGO_PKG_VERSION"),"host_version":self.host_version,"package_root":self.package_root,"session_id":self.session_id,"worker_count":self.workers.len(),
             "workspace":self.workspace,"project":self.workspace.original,"token_digest":self.token_digest,"task":self.task,"revision":self.revision,"sequence":self.sequence,"native_host":self.native_host,
             "runtime":self.runtime,"workers":self.workers,"worker_scopes":self.worker_scopes,"services":self.services.process_identities(),"candidate":self.candidate,"status":self.status,
             "stop_requested":self.stop_requested,"finished":self.finished,"finalization":self.finalization,"final_result":self.final_result,"retained_artifacts":self.retained_artifacts}),
@@ -1158,7 +1193,8 @@ fn stop_reason(reason: &str) -> &'static str {
             "bridge_unloaded"
         }
         "Native peer launch failed"
-        | "Claude did not complete the required two-peer native launch." => "launch_failed",
+        | "Claude did not complete the required two-peer native launch."
+        | "Claude did not complete the required native peer launch." => "launch_failed",
         _ if reason.starts_with("Conversation") => "conversation_ended",
         _ if reason.starts_with("Native launch output") => "transport_failed",
         _ => "cancelled",
@@ -1272,13 +1308,10 @@ fn recover_at(run_dir: &Path, request: &Value) -> Result<Value> {
     ensure!(
         prepared.run_dir == run_dir
             && prepared.baseline == run_dir.join("workspace/baseline")
-            && prepared.workers
-                == [
-                    run_dir.join("workspace/worker-1"),
-                    run_dir.join("workspace/worker-2")
-                ],
+            && prepared.owns_worker_layout(&run_dir.join("workspace")),
         "Recovery workspace paths do not match this run"
     );
+    let worker_count = prepared.workers.len();
     let run_id = run_dir
         .file_name()
         .and_then(|id| id.to_str())
@@ -1302,7 +1335,10 @@ fn recover_at(run_dir: &Path, request: &Value) -> Result<Value> {
         let workers = saved["workers"]
             .as_array()
             .context("Missing native worker bindings")?;
-        ensure!(workers.len() == 2, "Invalid native worker bindings");
+        ensure!(
+            workers.len() == worker_count,
+            "Invalid native worker bindings"
+        );
         let bound: HashSet<_> = workers
             .iter()
             .filter_map(|w| w["agent_id"].as_str())
@@ -1353,17 +1389,17 @@ fn recover_at(run_dir: &Path, request: &Value) -> Result<Value> {
         ensure!(
             saved["workers"]
                 .as_array()
-                .is_some_and(|workers| workers.len() == 2
+                .is_some_and(|workers| workers.len() == worker_count
                     && workers
                         .iter()
                         .all(|worker| worker["agent_id"].as_str().is_some())),
-            "Both native peers must be bound before recovery delivery"
+            "Every native peer must be bound before recovery delivery"
         );
         let (worker, candidate): (usize, Completion) =
             serde_json::from_value(saved["candidate"].clone())
                 .context("The selected result is unavailable; preserve this run for recovery")?;
         ensure!(
-            worker < 2
+            worker < worker_count
                 && saved["revision"].as_u64() == Some(candidate.revision)
                 && saved["finalization"]["revision"].as_u64() == Some(candidate.revision),
             "The selected result belongs to an obsolete request revision"
@@ -1474,16 +1510,20 @@ mod tests {
     use std::fs;
 
     fn prepared_controller() -> (tempfile::TempDir, Controller) {
+        prepared_controller_with(2)
+    }
+    fn prepared_controller_with(count: usize) -> (tempfile::TempDir, Controller) {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         fs::create_dir(&project).unwrap();
         fs::write(project.join("source.txt"), "original\n").unwrap();
         let project = project.canonicalize().unwrap();
         let lock = RunLock::acquire(&project).unwrap();
-        let workspace = workspace::prepare(
+        let workspace = workspace::prepare_workers(
             &project,
             &temp.path().join(uuid::Uuid::new_v4().to_string()),
             1_000_000,
+            count,
         )
         .unwrap();
         let runtime = ProcessIdentity::capture(std::process::id()).unwrap();
@@ -1499,8 +1539,11 @@ mod tests {
         (temp, c)
     }
     fn controller() -> (tempfile::TempDir, Controller) {
-        let (temp, mut c) = prepared_controller();
-        for slot in 1..=2 {
+        controller_with(2)
+    }
+    fn controller_with(count: usize) -> (tempfile::TempDir, Controller) {
+        let (temp, mut c) = prepared_controller_with(count);
+        for slot in 1..=count {
             c.handle(json!({"op":"bind","slot":slot,"agent_id":format!("agent-{slot}")}))
                 .unwrap();
             c.handle(json!({"op":"configure_scopes","agent_id":format!("agent-{slot}"),"scopes":[FilesystemScope {path:c.workspace.workers[slot-1].clone(),access:FilesystemAccess::Write}]})).unwrap();
@@ -2686,6 +2729,226 @@ mod tests {
             assert!(actions.is_empty(), "{state} worker resumed");
         }
     }
+    fn stopped(slots: std::ops::RangeInclusive<usize>) -> Value {
+        json!(
+            slots
+                .map(|slot| json!({"id":format!("agent-{slot}"),"status":"killed"}))
+                .collect::<Vec<_>>()
+        )
+    }
+
+    #[test]
+    fn four_worker_runs_bind_every_slot_and_deliver_only_after_every_peer_stops() {
+        let (_temp, mut c) = prepared_controller_with(4);
+        let ready = c.ready();
+        let slots: Vec<_> = ready["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|worker| worker["slot"].as_u64().unwrap())
+            .collect();
+        assert_eq!(slots, [1, 2, 3, 4]);
+        assert!(
+            c.handle(json!({"op":"bind","slot":5,"agent_id":"agent-5"}))
+                .is_err()
+        );
+        for slot in 1..=4 {
+            c.handle(json!({"op":"bind","slot":slot,"agent_id":format!("agent-{slot}")}))
+                .unwrap();
+            c.handle(json!({"op":"configure_scopes","agent_id":format!("agent-{slot}"),"scopes":[FilesystemScope {path:c.workspace.workers[slot-1].clone(),access:FilesystemAccess::Write}]})).unwrap();
+            c.handle(json!({"op":"step","agent_id":format!("agent-{slot}"),"turn_id":format!("turn-{slot}"),"revision":1})).unwrap();
+        }
+        assert!(
+            c.handle(json!({"op":"bind","slot":4,"agent_id":"agent-1"}))
+                .is_err()
+        );
+        fs::write(
+            c.workspace.workers[2].join("source.txt"),
+            "finished by three\n",
+        )
+        .unwrap();
+        tool(
+            &mut c,
+            3,
+            "complete",
+            "delm_complete",
+            json!({"idempotency_key":"complete","expected_revision":1,"outcome":"complete","summary":"Implemented","artifacts":[],"checks":[]}),
+        );
+        let result = c.handle(json!({"op":"turn_end","agent_id":"agent-3","turn_id":"turn-3","reason":"completed","answer":"Implemented."})).unwrap();
+        assert_eq!(result["actions"][0]["type"], "candidate");
+        assert_eq!(result["actions"][0]["agent_id"], "agent-3");
+        let fence = c.finalization.clone().unwrap();
+        c.handle(
+            json!({"op":"begin_settle","generation":fence.generation,"revision":fence.revision}),
+        )
+        .unwrap();
+        // Three of four acknowledgments are not a shutdown proof.
+        assert!(
+            c.handle(
+                json!({"op":"settle","generation":fence.generation,"revision":fence.revision,
+            "agents":stopped(1..=3),"background_tasks_stopped":true})
+            )
+            .is_err()
+        );
+        assert!(c.workspace.workers.iter().all(|root| root.exists()));
+        let delivered = c
+            .handle(
+                json!({"op":"settle","generation":fence.generation,"revision":fence.revision,
+            "agents":stopped(1..=4),"background_tasks_stopped":true}),
+            )
+            .unwrap();
+        assert_eq!(delivered["actions"][0]["status"], "complete", "{delivered}");
+        assert_eq!(
+            fs::read_to_string(c.workspace.original.join("source.txt")).unwrap(),
+            "finished by three\n"
+        );
+        assert!(c.workspace.workers.iter().all(|root| !root.exists()));
+    }
+
+    #[test]
+    fn four_worker_updates_reach_every_peer_and_stopped_work_returns_to_the_queue() {
+        let (_temp, mut c) = controller_with(4);
+        let task = tool(
+            &mut c,
+            2,
+            "create",
+            "delm_task_create",
+            json!({"idempotency_key":"create","title":"Parser","description":"Parse the input"}),
+        )["result"]["task_id"]
+            .as_i64()
+            .unwrap();
+        tool(
+            &mut c,
+            2,
+            "claim",
+            "delm_task_claim",
+            json!({"idempotency_key":"claim","task_id":task}),
+        );
+        let failed = c.handle(json!({"op":"turn_end","agent_id":"agent-2","turn_id":"turn-2","reason":"failed","answer":""})).unwrap();
+        assert!(
+            failed["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|action| action["type"] != "stop")
+        );
+        let view = c.board.view().unwrap();
+        let released = view["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["task_id"] == task)
+            .unwrap();
+        assert_eq!(released["state"], "available");
+        assert!(released["owner"].is_null());
+        let update = c
+            .handle(json!({"op":"update","text":"Also document the parser"}))
+            .unwrap();
+        let mut agents: Vec<_> = update["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|action| {
+                (
+                    action["agent_id"].as_str().unwrap().to_owned(),
+                    action["type"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        agents.sort();
+        assert_eq!(
+            agents,
+            [
+                ("agent-1".into(), "context".into()),
+                ("agent-2".into(), "resume".into()),
+                ("agent-3".into(), "context".into()),
+                ("agent-4".into(), "context".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stopped_peer_hands_previews_to_the_next_active_peer() {
+        let (_temp, mut c) = controller_with(4);
+        assert_eq!(c.successor(1), 2);
+        assert_eq!(c.successor(3), 0);
+        c.workers[2].blocked = true;
+        assert_eq!(c.successor(1), 3);
+        for index in [0, 2, 3] {
+            c.workers[index].blocked = true;
+        }
+        // With no active peer, the next slot keeps ownership for shutdown checks.
+        assert_eq!(c.successor(1), 2);
+        let (_temp, two) = controller();
+        assert_eq!((two.successor(0), two.successor(1)), (1, 0));
+    }
+
+    #[test]
+    fn four_worker_recovery_requires_every_native_acknowledgment() {
+        let (_temp, mut c) = controller_with(4);
+        let token = "four-worker-recovery-token";
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("0.15")
+            .spawn()
+            .unwrap();
+        let runtime = ProcessIdentity::capture(child.id()).unwrap();
+        child.wait().unwrap();
+        c.runtime = runtime;
+        c.token_digest = Some(format!("{:x}", Sha256::digest(token)));
+        c.persist().unwrap();
+        let run_dir = c.workspace.run_dir.clone();
+        let roots = c.workspace.workers.clone();
+        fs::write(roots[3].join("partial.txt"), "worker four progress").unwrap();
+        drop(c);
+        let mut request = json!({"token":token,"session_id":"session","agents":stopped(1..=3),"background_tasks_stopped":true});
+        assert!(recover_at(&run_dir, &request).is_err());
+        assert!(roots.iter().all(|root| root.exists()));
+        request["agents"] = stopped(1..=4);
+        let result = recover_at(&run_dir, &request).unwrap();
+        assert_eq!(result["status"], "stopped");
+        assert!(roots.iter().all(|root| !root.exists()));
+        let bundle = Path::new(result["recovery"]["recovery"].as_str().unwrap());
+        let saved = workspace::inspect_recovery(bundle).unwrap();
+        assert!(saved.workers.iter().any(|worker| {
+            worker.worker == 4
+                && worker
+                    .changes
+                    .iter()
+                    .any(|change| change.path == "partial.txt")
+        }));
+    }
+
+    #[test]
+    fn claude_runs_refuse_counts_other_than_two_or_four() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("source.txt"), "original\n").unwrap();
+        let project = project.canonicalize().unwrap();
+        let lock = RunLock::acquire(&project).unwrap();
+        let workspace = workspace::prepare_workers(
+            &project,
+            &temp.path().join(uuid::Uuid::new_v4().to_string()),
+            1_000_000,
+            3,
+        )
+        .unwrap();
+        let roots = workspace.workers.clone();
+        let runtime = ProcessIdentity::capture(std::process::id()).unwrap();
+        let error = Controller::from_workspace(
+            lock,
+            workspace,
+            "session".into(),
+            "Make a useful change".into(),
+            runtime,
+            runtime,
+        )
+        .err()
+        .unwrap();
+        assert!(format!("{error:#}").contains("2 or 4"), "{error:#}");
+        assert!(roots.iter().all(|root| !root.exists()));
+    }
+
     #[test]
     fn orphan_recovery_authenticates_native_stop_then_preserves_work_and_reopens_admission() {
         let (temp, mut c) = controller();

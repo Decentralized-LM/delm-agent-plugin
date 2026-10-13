@@ -4,7 +4,7 @@ Claude Code and Codex share DeLM's worker policy, task board, contribution forma
 
 ## Native execution
 
-The official `/delm:run` skill is explicit-only. A plugin module intercepts it, checks the MCP connection, and prepares the project before the parent makes a short launch turn. That turn issues exactly two native `fork` Agent calls together. Spawn middleware assigns the two prepared directories and binds each returned agent identity. Forks inherit the conversation, system prompt, model, and available native tools. The worker policy appears once in the inherited context, with a short pointer in each launch call.
+The official `/delm:run` skill is explicit-only. A plugin module intercepts it, checks the MCP connection, and prepares the project before the parent makes a short launch turn. That turn issues exactly as many native `fork` Agent calls as the user chose, two or four, together. The count comes from a leading `--agents` option or Claude's native question dialog before preparation; a session with no interactive surface uses two. Spawn middleware assigns the prepared directories in slot order, binds each returned agent identity, and refuses extra forks. Forks inherit the conversation, system prompt, model, and available native tools. The worker policy appears once in the inherited context, with a short pointer in each launch call.
 
 The parent launch turn is deliberate. On Claude Code 2.1.289 in Auto mode, direct plugin-origin `$.agent.spawn` has no server classifier verdict and is refused. Native model-issued Agent calls receive the ordinary permission review. DeLM uses this supported path without changing permission mode or adding allow rules. Finished peers resume through native SendMessage under their existing identities. Active peers receive context updates through native session append.
 
@@ -20,7 +20,7 @@ Shared checks validate their explicitly named input files independently of the s
 
 ## Lifecycle and delivery
 
-Each peer can claim, split, publish, import, verify, and integrate work. Both contribute to one assembled result. There is no separate Claude collaboration algorithm or mandatory duplicate full-suite pass.
+Each peer can claim, split, publish, import, verify, and integrate work. All of them contribute to one assembled result. There is no separate Claude collaboration algorithm or mandatory duplicate full-suite pass.
 
 The module records peer identities, their descendants, and native background-task IDs. A completion candidate creates a durable finalization generation and request revision. Before stopping any native task, the controller closes update admission for that generation. An update accepted first invalidates the older finalizer; a later update is refused accurately. Settlement confirms terminal states and stopped services, then checks for live references to the private trees. DeLM's own runtime helpers and board observers start outside those trees, so they never hold such a reference themselves. The runtime's final result settles the run: bookkeeping for a stopped peer that arrives after the runtime has exited cannot mark a delivered or stopped run as needing recovery. A successful native stop acknowledgment may precede the host's updated agent status; bounded native polling handles that interval without assuming shutdown. Failed settlement has bounded retries, and later native shutdown evidence can trigger another attempt.
 
@@ -42,7 +42,7 @@ The implementation and native qualification checklist are in the [board plan](te
 
 ## Follow-up instructions
 
-Text updates include the prompt and additional text context accepted by Claude's prompt middleware. A rejected native submission does not advance the DeLM request revision. Both peers receive each accepted update; their next model requests acknowledge it only after complete native delivery and a fresh turn. If native middleware refuses or changes a required context append, DeLM pauses rather than reporting that the full update arrived.
+Text updates include the prompt and additional text context accepted by Claude's prompt middleware. A rejected native submission does not advance the DeLM request revision. Every peer receives each accepted update; their next model requests acknowledge it only after complete native delivery and a fresh turn. If native middleware refuses or changes a required context append, DeLM pauses rather than reporting that the full update arrived.
 
 Owning worker resources is separate from owning conversation input. Only a healthy working run forwards normal prompts. Finishing, stopping, failed and restored recovery states pass ordinary input back to Claude unchanged, while preventing old peers from starting new work. An undelivered update is not replayed in the parent. Recovery and its storage or transport failures cannot install a persistent parent-turn prohibition.
 
@@ -66,6 +66,8 @@ The implementation followed these stages:
 Native boundary checks use Claude Code 2.1.289 on Apple Silicon with the existing Auto permissions. They establish inherited conversation markers, project instructions, skills, model and observed tools, actual worker working directories, active updates, same-identity resumption, and exact native agent/background-task stops. The real collaboration fixture and its evidence format are documented in [development](development.md#claude-code). It requires useful publications from both workers, checked output delivered to the original project, preservation of original files and staging, and removal of both worker trees.
 
 A small fixture establishes the exercised behavior, not universal task quality or a speedup guarantee. Intel native qualification and checks against the exact signed release candidate remain release requirements. [Release qualification](releases.md) distinguishes model-free CI checks, development fixtures, and publication evidence. Routine tests do not use an account or change the user's saved host settings. The conversation-lifecycle changes were checked with deterministic regressions, native API validation, and distribution checks; an account-backed task was not repeated for this revision. The host regression suite exercises conversation changes without a new `session.start`, delayed callbacks, recovery isolation, rejected inputs, accepted context rewrites, both-peer delivery, and inherited fork settings. Native `claude plugin validate --strict` checks the adapter against the installed host's supported events and APIs.
+
+The account-backed fixture runs headless, so it qualifies the default two-agent launch. Four-agent runs are covered by deterministic controller, board and module tests; qualify them against a real host before treating them as release-ready.
 
 ## Official references
 

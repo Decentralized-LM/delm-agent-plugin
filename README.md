@@ -67,11 +67,19 @@ and keyboard controls. Include a README and test the main interactions.
 
 Use `$delm:run` for the same request in Codex. Send clarifications in the same conversation while the agents work.
 
+In Claude Code, DeLM asks **How many agents should DeLM run?** before it starts: choose **2 agents (default)** or **4 agents**. Pressing Esc cancels without starting anything. To skip the question, put the count first:
+
+```text
+/delm:run --agents 4 Build a task board with drag-and-drop columns.
+```
+
+Headless runs (`claude -p`) have no one to ask and use two agents unless `--agents 4` is given.
+
 In Claude Code, a live board opens automatically in the same terminal. It shows the agents, task queue, and shared context while you keep using the normal prompt. Click a row for details. **Hide board** leaves work running; `/delm-status` reopens it without asking the model for a summary. Use `/delm-stop` to stop the run and save unfinished changes. If a run needs recovery, normal Claude conversation remains available and the board shows the next action. See [run control and recovery](docs/support.md) for details.
 
 Include images and file mentions when starting a Claude run. During a run, send text or paste the relevant file content. Claude's current native API cannot forward new media attachments to existing agents; DeLM explains this before accepting an unsupported update. See [Claude input support](docs/claude-integration.md) for details.
 
-The current version runs two agents in private project copies. They share contributions and divide useful checks, so a recorded check can be reused when it still applies to the result.
+Claude Code runs two or four agents; Codex runs two. Each agent works in a private project copy. They share contributions and divide useful checks, so a recorded check can be reused when it still applies to the result. Four agents use roughly twice the model usage of two, and they help most when a task splits into several independent pieces.
 
 **The result is delivered to your original project.** DeLM applies source changes and requested artifacts, preserves your Git index, merges compatible edits, and retains conflicts for recovery. Saved partial changes can be exported into a new folder for review. Temporary worker directories are removed after safe delivery or recovery. When the delivered project needs dependency setup or a focused check, the parent completes it before reporting the result ready.
 

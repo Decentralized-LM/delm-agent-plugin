@@ -339,7 +339,7 @@ pub fn deliver_result(
     worker: usize,
     _policy: &ResultPolicy,
 ) -> Result<DeliveryReport> {
-    ensure!(worker < 2, "unknown result worker");
+    ensure!(worker < prepared.workers.len(), "unknown result worker");
     if prepared
         .run_dir
         .join("workspace/delivery/result.json")
@@ -359,7 +359,7 @@ pub fn deliver_accepted_result(
     worker: usize,
     accepted: &AcceptedResult,
 ) -> Result<DeliveryReport> {
-    ensure!(worker < 2, "unknown result worker");
+    ensure!(worker < prepared.workers.len(), "unknown result worker");
     deliver_internal(prepared, worker, Some(accepted), || Ok(()))
 }
 
@@ -371,7 +371,7 @@ pub(crate) fn deliver_accepted_result_with_validation(
     accepted: &AcceptedResult,
     validate_inputs: impl FnOnce() -> Result<()>,
 ) -> Result<DeliveryReport> {
-    ensure!(worker < 2, "unknown result worker");
+    ensure!(worker < prepared.workers.len(), "unknown result worker");
     deliver_internal(prepared, worker, Some(accepted), validate_inputs)
 }
 

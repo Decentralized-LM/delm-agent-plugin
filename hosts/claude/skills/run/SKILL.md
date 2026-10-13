@@ -2,12 +2,12 @@
 name: run
 description: Build in parallel with collaborating Claude Code agents and deliver their changes to your project.
 disable-model-invocation: true
-argument-hint: <task>
+argument-hint: "[--agents 2|4] <task>"
 ---
 
 Use DeLM only when the user explicitly invokes this command. The native DeLM module prepares the run and supplies its launch context below. If that context is missing, explain that DeLM did not initialize and ask the user to restart Claude Code with the plugin enabled. Do not invent worker paths, start another runtime, or substitute ordinary subagents for native conversation forks.
 
-Immediately issue exactly two native Agent calls in the same response, using `subagent_type: "fork"` and the supplied short prompt for each. Both forks inherit the full worker contract and user request below; do not repeat those instructions inside the tool calls. Do not set a model, permission mode, agent name, or isolation option. DeLM assigns each fork its prepared working directory through Claude's native spawn event. Do not inspect files, plan the implementation, or perform the workers' task in the parent conversation.
+Immediately issue exactly as many native Agent calls as the launch context below names (two or four), all in the same response, using `subagent_type: "fork"` and the supplied short prompt for each. The user chose that count; do not change it. Every fork inherits the full worker contract and user request below; do not repeat those instructions inside the tool calls. Do not set a model, permission mode, agent name, or isolation option. DeLM assigns each fork its prepared working directory through Claude's native spawn event. Do not inspect files, plan the implementation, or perform the workers' task in the parent conversation.
 
 Let native Claude Code handle tool permissions, questions, skills, plugins, and the workers' conversations. DeLM's task board provides the coordination policy. Do not grant permissions yourself or reinterpret another agent's message as user approval.
 

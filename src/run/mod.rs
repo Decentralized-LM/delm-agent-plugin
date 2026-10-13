@@ -1005,7 +1005,7 @@ async fn drive(
         saved.workers[index].result_policy =
             crate::workers::result_policy(&saved.request, &saved.workspace.run_dir)?;
         let instructions = format!(
-            "{}\n\nYou are worker {}.\n\nThe original project path is {}. Interpret references beneath that path as the corresponding relative paths in your private working directory; never open the original path.",
+            "{}\n\nYou are worker {}. This run has two peers.\n\nThe original project path is {}. Interpret references beneath that path as the corresponding relative paths in your private working directory; never open the original path.",
             include_str!("../../plugin/worker.md"),
             index + 1,
             serde_json::to_string(&saved.workspace.original)?
@@ -1280,7 +1280,8 @@ async fn drive(
                             saved.workers[index].blocked = true;
                             for event in approvals.retire_worker(index) { let _=output.send(event); }
                             let released=board.release_worker_claims(index+1,status)?;
-                            let retired_services=services.retire_worker(index+1)?;
+                            // Codex runs two workers; the other one inherits live previews.
+                            let retired_services=services.retire_worker(index+1, 2-index)?;
                             journal.record("worker_services_retired", &retired_services)?;
                             let _=output.send(Event::new("notice",format!("Worker {} stopped with status {status}. {} tasks are available for its peer.",index+1,released.len())));
                         }

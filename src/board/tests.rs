@@ -7,16 +7,22 @@ struct Fixture {
     _temp: tempfile::TempDir,
     run: PathBuf,
     baseline: PathBuf,
-    workers: [PathBuf; 2],
+    workers: Vec<PathBuf>,
 }
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_workers(2)
+    }
+
+    fn with_workers(count: usize) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let run = temp.path().join("run");
         let baseline = temp.path().join("baseline");
-        let workers = [temp.path().join("worker1"), temp.path().join("worker2")];
-        for path in [&run, &baseline, &workers[0], &workers[1]] {
+        let workers: Vec<PathBuf> = (1..=count)
+            .map(|slot| temp.path().join(format!("worker{slot}")))
+            .collect();
+        for path in [&run, &baseline].into_iter().chain(&workers) {
             fs::create_dir(path).unwrap();
         }
         Self {
@@ -28,7 +34,7 @@ impl Fixture {
     }
 
     fn seed(&self, name: &str, bytes: &[u8]) {
-        for root in [&self.baseline, &self.workers[0], &self.workers[1]] {
+        for root in std::iter::once(&self.baseline).chain(&self.workers) {
             let path = root.join(name);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, bytes).unwrap();
@@ -37,7 +43,7 @@ impl Fixture {
 
     fn board(&self) -> Board {
         let mut board = Board::open(&self.run, &self.baseline, self.workers.clone()).unwrap();
-        for worker in 1..=2 {
+        for worker in 1..=self.workers.len() {
             board.set_worker_policy(worker,&json!({"default_permissions":"test","permissions":{"test":{"filesystem":{self.workers[worker-1].to_string_lossy().as_ref():"write"}}}})).unwrap();
         }
         board
@@ -1376,4 +1382,82 @@ fn integration_availability_waits_for_the_current_assembler_to_finish() {
         board.wait_ready(&cursor).unwrap(),
         "previously unavailable integration is now claimable"
     );
+}
+
+fn listed_owners(board: &mut Board, worker: usize, owner: &str) -> Vec<u64> {
+    let mut owners: Vec<u64> = board
+        .call(
+            worker,
+            "delm_list",
+            json!({"collection":"tasks","owner":owner}),
+        )
+        .unwrap()["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["owner"].as_u64().unwrap())
+        .collect();
+    owners.sort();
+    owners
+}
+
+#[test]
+fn four_workers_have_distinct_identities_and_peer_filters_cover_every_other_worker() {
+    let fixture = Fixture::with_workers(4);
+    let mut board = fixture.board();
+    assert_eq!(board.worker_count(), 4);
+    assert_eq!(
+        board.view().unwrap()["workers"].as_array().unwrap().len(),
+        4
+    );
+    for worker in 1..=4 {
+        let task = create_task(&mut board, 1, &format!("task-{worker}"), "implementation");
+        claim_task(&mut board, worker, &format!("claim-{worker}"), task);
+    }
+    // One unclaimed task must never appear under either owner filter.
+    create_task(&mut board, 2, "unclaimed", "implementation");
+    assert_eq!(listed_owners(&mut board, 1, "self"), vec![1]);
+    assert_eq!(listed_owners(&mut board, 1, "peer"), vec![2, 3, 4]);
+    assert_eq!(listed_owners(&mut board, 3, "peer"), vec![1, 2, 4]);
+    assert_eq!(board.dependency_owner("worker:4").unwrap(), Some(4));
+    for dependency in ["worker:0", "worker:5"] {
+        assert!(board.dependency_owner(dependency).is_err(), "{dependency}");
+    }
+    assert!(board.call(5, "delm_status", json!({})).is_err());
+    assert_eq!(
+        board.call(4, "delm_status", json!({})).unwrap()["result"]["worker"],
+        4
+    );
+    // A waiting declaration may name any other peer, but never itself.
+    let waiting = |dependency: &str| {
+        json!({"idempotency_key":format!("wait-{dependency}"),"expected_revision":1,
+            "outcome":"waiting","summary":"Waiting for a peer","dependency":dependency})
+    };
+    assert!(board.call(3, "delm_complete", waiting("worker:4")).is_ok());
+    assert!(board.call(4, "delm_complete", waiting("worker:4")).is_err());
+}
+
+#[test]
+fn a_board_keeps_the_worker_count_it_was_created_with() {
+    for count in [1, 5] {
+        let fixture = Fixture::with_workers(count);
+        assert!(
+            Board::open(&fixture.run, &fixture.baseline, fixture.workers.clone()).is_err(),
+            "{count}"
+        );
+    }
+    let fixture = Fixture::with_workers(4);
+    drop(fixture.board());
+    let error = Board::open(
+        &fixture.run,
+        &fixture.baseline,
+        fixture.workers[..2].to_vec(),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        format!("{error:#}").contains("created for 4 workers"),
+        "{error:#}"
+    );
+    assert_eq!(fixture.board().worker_count(), 4);
 }
