@@ -1,5 +1,6 @@
 import {
-  AGENT_CHOICES, DEFAULT_AGENTS, TOOL_PREFIX, agentsFromAnswer, commandOutcome, completeState,
+  AGENT_CHOICES, AGENT_QUESTION, AGENT_QUESTION_RETRY, DEFAULT_AGENTS, TOOL_PREFIX, agentsFromAnswer,
+  commandOutcome, completeState,
   decodeLines, followupText, nativeLaunchContext, parseAgents, parseReply, toolArguments, validateReady,
 } from './protocol.js';
 import {registerBoard, observeBoard} from './board-view.js';
@@ -165,17 +166,21 @@ async function chooseAgents($) {
   let surfaces = [];
   try { surfaces = await $.session.surfaces(); } catch { /* Treated as headless. */ }
   if (!surfaces.length) return DEFAULT_AGENTS;
-  let answer;
-  try {
-    answer = await $.ui.ask('How many agents should DeLM run?', {header: 'Agents', options: AGENT_CHOICES});
-  } catch (error) {
-    // A host without the question dialog throws a TypeError; a dismissal rejects.
-    if (!(error instanceof TypeError)) return null;
-    $.ui.log('This Claude Code version cannot show the DeLM agent picker, so DeLM is starting '
-      + DEFAULT_AGENTS + ' agents. Use /delm:run --agents 4 <task> to run four.');
-    return DEFAULT_AGENTS;
+  // An unsupported typed answer asks again; only a dismissal ends the choice.
+  for (let question = AGENT_QUESTION; ; question = AGENT_QUESTION_RETRY) {
+    let answer;
+    try {
+      answer = await $.ui.ask(question, {header: 'Agents', options: AGENT_CHOICES});
+    } catch (error) {
+      // A host without the question dialog throws a TypeError; a dismissal rejects.
+      if (!(error instanceof TypeError)) return null;
+      $.ui.log('This Claude Code version cannot show the DeLM agent picker, so DeLM is starting '
+        + DEFAULT_AGENTS + ' agents. Use /delm:run --agents 4 <task> to run four.');
+      return DEFAULT_AGENTS;
+    }
+    const agents = agentsFromAnswer(answer);
+    if (agents) return agents;
   }
-  return agentsFromAnswer(answer);
 }
 
 function peerList(names) {

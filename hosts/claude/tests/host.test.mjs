@@ -1161,8 +1161,9 @@ test('agent counts are 2 or 4, chosen before launch, and the launch contract nam
   }
   assert.equal(protocol.agentsFromAnswer(protocol.AGENT_CHOICES[0]), 2);
   assert.equal(protocol.agentsFromAnswer(protocol.AGENT_CHOICES[1]), 4);
-  assert.equal(protocol.agentsFromAnswer('4'), 4);
-  assert.throws(() => protocol.agentsFromAnswer('3'), /2 or 4/);
+  for (const typed of ['4', 'four', 'Four', '4 agents', ' FOUR AGENTS ']) assert.equal(protocol.agentsFromAnswer(typed), 4, typed);
+  assert.equal(protocol.agentsFromAnswer('two'), 2);
+  for (const typed of ['3', '8', 'eight', '', 'some agents', '4 or so']) assert.equal(protocol.agentsFromAnswer(typed), null, typed);
   const two = protocol.nativeLaunchContext('Task', 'Contract');
   assert.match(two, /exactly two native fork/);
   assert.match(two, /Both forks inherit/);
@@ -1211,7 +1212,6 @@ test('a dismissed picker or an unsupported count starts nothing', async () => {
   assert.equal(dismissed.starts.length, 0);
   assert.equal([...dismissed.store.keys()].some(key => key.startsWith('native-run:')), false);
   for (const [options, args] of [
-    [{surfaces: ['terminal'], ask: () => '3'}, 'Build a useful tool.'],
     [{surfaces: ['terminal']}, '--agents 3 Build a useful tool.'],
     [{surfaces: ['terminal']}, '--agents 4'],
   ]) {
@@ -1249,4 +1249,24 @@ test('a runtime that prepares a different count than requested is refused', asyn
   const result = await f.call('command.run', {command: 'delm:run', args: '--agents 4 Build a useful tool.'});
   assert.match(result.text, /invalid native launch contract/);
   assert.equal(result.args, undefined);
+});
+
+test('a typed answer that names no supported count asks again instead of failing', async () => {
+  const answers = ['8', 'eight', 'four'];
+  const f = await fixture({surfaces: ['terminal'], ask: () => answers.shift()});
+  await f.launch('Build a useful tool.', /exactly four native fork/);
+  assert.deepEqual(f.questions.map(item => item.question),
+    [protocol.AGENT_QUESTION, protocol.AGENT_QUESTION_RETRY, protocol.AGENT_QUESTION_RETRY]);
+  assert.equal(f.starts.length, 1);
+  assert.equal(f.starts[0].workers, 4);
+  const replies = ['8'];
+  const dismissed = await fixture({surfaces: ['terminal'], ask: () => {
+    if (replies.length) return replies.shift();
+    throw new Error('Dismissed');
+  }});
+  const result = await dismissed.call('command.run', {command: 'delm:run', args: 'Build a useful tool.'});
+  assert.match(result.text, /did not start/);
+  assert.equal(result.exitCode, undefined);
+  assert.equal(dismissed.questions.length, 2);
+  assert.equal(dismissed.starts.length, 0);
 });

@@ -43,19 +43,21 @@ export function parseAgents(args) {
   return {agents, task: (match[2] || '').trim()};
 }
 
-// The picker's labels. An answer typed under "Other" may still name a count.
+// The picker's labels. Claude's dialog always adds a free-text row; a typed
+// answer that names a supported count ("4", "four", "4 agents") counts too.
 export const AGENT_CHOICES = Object.freeze(['2 agents (default)', '4 agents']);
+export const AGENT_QUESTION = 'How many agents should DeLM run?';
+export const AGENT_QUESTION_RETRY = 'DeLM runs 2 or 4 agents. How many should it run?';
+const NUMBER_WORDS = {two: 2, four: 4};
 
+// The chosen count, or null when the answer names no supported count.
 export function agentsFromAnswer(answer) {
-  const text = String(answer ?? '').trim();
-  const index = AGENT_CHOICES.indexOf(text);
+  const text = String(answer ?? '').trim().toLowerCase();
+  const index = AGENT_CHOICES.map(choice => choice.toLowerCase()).indexOf(text);
   if (index >= 0) return AGENT_COUNTS[index];
-  const typed = /^(\d+)(?:\s+agents?)?$/i.exec(text);
-  const agents = typed ? Number(typed[1]) : NaN;
-  if (!AGENT_COUNTS.includes(agents)) {
-    throw new Error('DeLM runs 2 or 4 agents. Start again with /delm:run and choose one of those.');
-  }
-  return agents;
+  const typed = /^(\d+|two|four)(?:\s+agents?)?$/.exec(text);
+  const agents = typed ? NUMBER_WORDS[typed[1]] ?? Number(typed[1]) : NaN;
+  return AGENT_COUNTS.includes(agents) ? agents : null;
 }
 
 export function toolArguments(event) {
