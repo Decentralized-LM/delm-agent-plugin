@@ -2,6 +2,7 @@ import {renderBoard, renderCompact, boardSummary, cleanText} from './board-rende
 
 const PANE = 'delm';
 const PANE_SPEC = Object.freeze({id: PANE, title: 'DeLM', rows: 24, columns: 54});
+const NOT_STARTED = 'DeLM did not start. No agents were launched.';
 const STORE = 'native-board:';
 const MAX_LINE = 256 * 1024;
 const COLLECTIONS = new Set(['tasks', 'shared', 'checks']);
@@ -140,7 +141,7 @@ function endStream(state) {
 }
 function dispose(state) {
   if (!state) return;
-  state.choice?.settle(null);
+  state.choice = null;
   state.disposed = true;
   endStream(state); cancel(state.paint); cancel(state.paneTimer); cancel(state.nativeTimer);
   cancel(state.navigationTimer);
@@ -477,8 +478,25 @@ function actions($, state) {
         }
       })());
     },
-    choose: count => { if (valid(state)) state.choice?.settle(count); },
-    cancelChoice: () => { if (valid(state)) state.choice?.settle(null); },
+    // A hook may not wait on the person, so the picker's command has already
+    // returned. The choice hands the keyboard back, shows the board again and
+    // starts the run through the host module's launch action.
+    choose: count => {
+      if (!valid(state) || !state.choice) return;
+      const {launch} = state.choice;
+      state.choice = null; invalidate($, state);
+      ignore((async () => {
+        try { await $.ui.close({id: PANE}); } catch {}
+        if (valid(state)) state.opening = open($, state);
+        await launch(count);
+      })());
+    },
+    cancelChoice: () => {
+      if (!valid(state) || !state.choice) return;
+      state.choice = null;
+      $.ui.log(NOT_STARTED);
+      end($, state.session);
+    },
     hide: () => {
       if (!valid(state)) return;
       state.hidden = true; state.paneShown = false; remember($, state);
@@ -516,38 +534,25 @@ function begin($, session, previousRunId = null) {
     state.opening = open($, state);
     startNativeSync($, state);
 }
-// Ask how many agents to run, inside the board pane the launch just opened.
-// Resolves to the count, null when the person cancels or closes the pane, or
-// undefined when this conversation has no board pane that can be drawn.
-export async function askAgents($, session) {
+// Show the agent picker in the pane this launch just opened, as a keyboard
+// dialog. The caller returns at once: a hook's own waiting counts against its
+// time limit. `launch(count)` is the host module's action, run on a choice.
+// False when this conversation has no board pane that can be drawn.
+export async function showAgentPicker($, session, launch) {
   const state = active;
-  if (!state || !valid(state) || state.session !== session || !state.opening) return undefined;
-  let finish;
-  const choice = {answer: new Promise(resolve => { finish = resolve; })};
-  choice.settle = value => {
-    if (state.choice !== choice) return;
-    state.choice = null;
-    finish(value);
-    if (valid(state)) invalidate($, state);
-  };
+  if (!state || !valid(state) || state.session !== session || !state.opening) return false;
+  const choice = {launch};
   state.choice = choice;
   invalidate($, state);
   let placed = false;
   try {
     placed = await state.opening;
-    // Take the keyboard as a dialog: Enter, the hotkeys and Escape answer it.
     if (placed && valid(state) && state.choice === choice) {
       placed = (await $.ui.open({...PANE_SPEC, focus: true, closeOnEscape: true, holdToasts: true}))?.isPlaced;
     }
   } catch { placed = false; }
-  if (!placed) choice.settle(undefined);
-  const value = await choice.answer;
-  if (value && valid(state)) {
-    // Hand the keyboard back to the prompt and keep the board for the run.
-    try { await $.ui.close({id: PANE}); } catch {}
-    if (valid(state)) state.opening = open($, state);
-  }
-  return value;
+  if (!placed && state.choice === choice) { state.choice = null; invalidate($, state); }
+  return Boolean(placed) && state.choice === choice;
 }
 function failure($, session, error) {
     if (active?.session === session) {
@@ -593,8 +598,13 @@ export function registerBoard(on, {lookup, retryFinish, accepts} = {}) {
     if (state && valid(state) && !result?.deny) {
       state.paneShown = false;
       // Closing the agent picker cancels the launch; it is not a board preference.
-      if (state.choice && e.origin?.kind === 'person') state.choice.settle(null);
-      else if (e.origin?.kind === 'person') { state.hidden = true; remember($, state); restart($, state); }
+      if (state.choice && e.origin?.kind === 'person') {
+        state.choice = null;
+        $.ui.log(NOT_STARTED);
+        end($, state.session);
+        return result;
+      }
+      if (e.origin?.kind === 'person') { state.hidden = true; remember($, state); restart($, state); }
       invalidate($, state);
     }
     return result;
@@ -618,7 +628,8 @@ export function registerBoard(on, {lookup, retryFinish, accepts} = {}) {
         const run = await readRun($, session);
         // The person can still decline before preparation, for example by
         // dismissing the agent picker. Nothing started, so close the board.
-        if (began && (!run || run.ready?.run_id === previousRunId)) end($, session);
+        // A picker still waiting for the person keeps its pane.
+        if (began && (!run || run.ready?.run_id === previousRunId)) { if (!active?.choice) end($, session); }
         else if (run) observe($, run);
       }
     } catch {}

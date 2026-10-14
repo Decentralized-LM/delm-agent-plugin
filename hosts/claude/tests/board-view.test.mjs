@@ -6,7 +6,7 @@ import test from 'node:test';
 const rendererSource = await readFile(new URL('../hooks/board-render.js', import.meta.url), 'utf8');
 const rendererURL = 'data:text/javascript;base64,' + Buffer.from(rendererSource).toString('base64');
 const viewSource = await readFile(new URL('../hooks/board-view.js', import.meta.url), 'utf8');
-const {registerBoard: createBoardView, observeBoard, askAgents, validateSnapshot, acceptsSnapshot, observerReason} = await import('data:text/javascript;base64,'
+const {registerBoard: createBoardView, observeBoard, showAgentPicker, validateSnapshot, acceptsSnapshot, observerReason} = await import('data:text/javascript;base64,'
   + Buffer.from(viewSource.replace("'./board-render.js'", JSON.stringify(rendererURL))).toString('base64'));
 
 const SESSION = 'conversation-1';
@@ -66,6 +66,7 @@ function text(tree) {
 }
 function fixture(options = {}) {
   const hooks = [], opens = [], closes = [], commands = [], timers = [], streams = [], forbidden = [], lookups = [], scrolls = [];
+  const runs = [], logs = [];
   const store = options.store || new Map();
   let session = options.session || SESSION;
   const run = options.run === undefined ? runRecord() : options.run;
@@ -79,7 +80,9 @@ function fixture(options = {}) {
       const timer = {kind, milliseconds, callback, cancelled: false, cancel() { this.cancelled = true; }};
       timers.push(timer); return timer;
     }])),
+    command: {run: async input => { runs.push(input); return {}; }},
     ui: {
+      log: line => { logs.push(line); },
       open: spec => { opens.push(spec); return options.open ? options.open(spec) : Promise.resolve({isPlaced: true}); },
       close: async spec => { closes.push(spec); return {}; },
       scroll: async spec => { scrolls.push(spec); return {}; },
@@ -132,7 +135,7 @@ function fixture(options = {}) {
   }
   function stop() { view.end(host, session); for (const stream of streams) stream.end(); }
   return {host, view, render, press, call, emit, tick, stop, select: id => { session = id; },
-    streams, commands, opens, closes, forbidden, timers, store, lookups, scrolls};
+    streams, commands, opens, closes, forbidden, timers, store, lookups, scrolls, runs, logs};
 }
 
 test('begin opens synchronously without taking prompt focus or starting an observer', async () => {
@@ -876,56 +879,74 @@ test('arguments the host refuses never open the board', async () => {
   assert.deepEqual(f.render(), {type: 'NativeFallback'});
 });
 
-// Wrapped so awaiting the helper does not also await the person's answer.
+
 async function picking(f) {
   f.view.begin(f.host, SESSION);
-  const answer = askAgents(f.host, SESSION);
-  await flush(); await flush();
-  return {answer};
+  f.launches = [];
+  return showAgentPicker(f.host, SESSION, count => { f.launches.push(count); });
 }
 
-test('the agent picker takes the keyboard as a dialog and a choice returns it to the prompt', async () => {
+test('the agent picker takes the keyboard and a choice hands it back and launches that count', async () => {
   const f = fixture({native: true});
-  const {answer} = await picking(f);
+  assert.equal(await picking(f), true);
   assert.deepEqual(f.opens.map(spec => Boolean(spec.focus && spec.closeOnEscape)), [false, true]);
   assert.match(text(f.render()), /How many agents should DeLM run\?/);
-  await f.press('agents-4');
-  assert.equal(await answer, 4);
+  await f.press('agents-4'); await flush(); await flush();
+  assert.deepEqual(f.launches, [4]);
   assert.equal(f.closes.length, 1, 'The dialog closes to hand back the keyboard');
-  assert.equal(f.opens.length, 3);
+  assert.equal(f.opens.length, 3, 'The board reopens for the run');
   assert.equal(f.opens[2].focus, undefined); assert.equal(f.opens[2].closeOnEscape, undefined);
   assert.match(text(f.render()), /Preparing/);
+  assert.deepEqual(f.logs, []); assert.deepEqual(f.runs, []);
+  assert.throws(() => f.press('agents-2'), /Missing button/, 'The picker is gone after a choice');
+  assert.deepEqual(f.launches, [4]);
   assert.deepEqual(f.forbidden, []); f.stop();
 });
 
-test('cancelling the picker, closing its pane, or ending the session starts nothing', async () => {
+test('cancelling the picker or closing its pane starts nothing and says so', async () => {
   const cancelled = fixture({native: true});
-  const {answer: first} = await picking(cancelled);
+  await picking(cancelled);
   await cancelled.press('agents-cancel');
-  assert.equal(await first, null);
-  assert.equal(cancelled.closes.length, 0); cancelled.stop();
+  assert.deepEqual(cancelled.logs, ['DeLM did not start. No agents were launched.']);
+  assert.deepEqual(cancelled.launches, []);
+  assert.equal(cancelled.closes.length, 1);
+  assert.deepEqual(cancelled.render(), {type: 'NativeFallback'});
 
   const closed = fixture({native: true});
-  const {answer: second} = await picking(closed);
+  await picking(closed);
   await closed.call('ui.close', {id: 'delm', origin: {kind: 'person'}}, async () => ({}));
-  assert.equal(await second, null);
+  assert.deepEqual(closed.logs, ['DeLM did not start. No agents were launched.']);
+  assert.deepEqual(closed.launches, []);
+  assert.deepEqual(closed.render(), {type: 'NativeFallback'});
   await flush();
   assert.notEqual(closed.store.get('native-board:' + SESSION)?.hidden, true, 'Closing the picker is not a hide preference');
-  closed.stop();
 
-  const ended = fixture({native: true});
-  const {answer: third} = await picking(ended);
-  ended.view.end(ended.host, SESSION);
-  assert.equal(await third, null);
+  const replaced = fixture({native: true});
+  await picking(replaced);
+  replaced.view.end(replaced.host, SESSION);
+  assert.deepEqual(replaced.logs, []); assert.deepEqual(replaced.launches, []);
 });
 
 test('the picker reports no pane when one cannot be drawn', async () => {
   const unplaced = fixture({native: true, open: () => Promise.resolve({isPlaced: false, reason: 'No surface places panes'})});
-  assert.equal(await (await picking(unplaced)).answer, undefined);
+  assert.equal(await picking(unplaced), false);
+  assert.match(text(unplaced.render()), /Preparing/);
   unplaced.stop();
   const unsupported = fixture({native: true, unsupported: true});
-  assert.equal(await (await picking(unsupported)).answer, undefined);
+  assert.equal(await picking(unsupported), false);
   const none = fixture({native: true});
-  assert.equal(await askAgents(none.host, SESSION), undefined);
+  assert.equal(await showAgentPicker(none.host, SESSION, () => {}), false);
   assert.equal(none.opens.length, 0);
+});
+
+test('a launch that returns while the picker waits keeps its pane open', async () => {
+  const f = fixture({native: true});
+  const result = await f.call('command.*', {command: 'delm:run', args: 'Build the task'}, async () => {
+    assert.equal(await showAgentPicker(f.host, SESSION, () => {}), true);
+    return {text: 'Choose how many agents in the DeLM panel.'};
+  }, 'command.run');
+  assert.deepEqual(result, {text: 'Choose how many agents in the DeLM panel.'});
+  assert.equal(f.closes.length, 0);
+  assert.match(text(f.render()), /How many agents should DeLM run\?/);
+  f.stop();
 });

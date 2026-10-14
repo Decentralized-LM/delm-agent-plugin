@@ -3,7 +3,7 @@ import {
   commandOutcome, completeState,
   decodeLines, followupText, nativeLaunchContext, parseAgents, parseReply, toolArguments, validateReady,
 } from './protocol.js';
-import {askAgents, registerBoard, observeBoard} from './board-view.js';
+import {registerBoard, observeBoard, showAgentPicker} from './board-view.js';
 
 const runs = new Map();
 const restores = new Map();
@@ -160,14 +160,17 @@ async function drain($, run, stream, initial) {
   }
 }
 
-// The count comes from the person: their --agents option or this picker,
-// never from a model turn. A session with no surface has no one to ask.
-async function chooseAgents($, session) {
+const NOT_STARTED = 'DeLM did not start. No agents were launched.';
+const PICKING = 'picking';
+
+// The count comes from the person: their --agents option or a picker, never
+// from a model turn. A session with no surface has no one to ask. The DeLM
+// pane's picker answers after this command returns, through launchChosen.
+async function chooseAgents($, session, task) {
   let surfaces = [];
   try { surfaces = await $.session.surfaces(); } catch { /* Treated as headless. */ }
   if (!surfaces.length) return DEFAULT_AGENTS;
-  const picked = await askAgents($, session);
-  if (picked !== undefined) return picked;
+  if (await showAgentPicker($, session, count => launchChosen($, session, task, count))) return PICKING;
   // No DeLM pane can be drawn here, so ask in Claude's own question dialog.
   // An unsupported typed answer asks again; only a dismissal ends the choice.
   for (let question = AGENT_QUESTION; ; question = AGENT_QUESTION_RETRY) {
@@ -188,6 +191,29 @@ async function chooseAgents($, session) {
 
 function peerList(names) {
   return names.length < 3 ? names.join(' and ') : names.slice(0, -1).join(', ') + ' and ' + names.at(-1);
+}
+
+// Start a run the person chose in the DeLM pane. Its /delm:run command already
+// returned, so this prepares the run and then runs Claude's /delm:run skill
+// with the launch contract, which is what that command passes on otherwise.
+async function launchChosen($, session, task, agents) {
+  if (starts.has(session)) return;
+  starts.add(session);
+  let run;
+  try {
+    if (await $.session.id() !== session) throw new Error('The conversation changed before DeLM could start. Retry /delm:run here.');
+    const known = await currentRun($);
+    if (known && !known.finished) throw new Error('Another DeLM run is active in this conversation. Use /delm-stop first.');
+    run = await start($, task, session, agents);
+    await $.command.run({command: 'delm:run', args: nativeLaunchContext(run.task, run.prompt, run.ready.workers.length)});
+  } catch (error) {
+    const current = runs.get(session);
+    if (current && !current.finished) {
+      await reportFailure($, current, error);
+      try { await request($, current, 'cancel', {reason: 'Native peer launch failed'}); } catch { /* Durable recovery retains the workspace. */ }
+    }
+    $.ui.log('DeLM could not start: ' + String(error.message || error));
+  } finally { starts.delete(session); }
 }
 
 async function start($, task, session, agents = DEFAULT_AGENTS) {
@@ -663,6 +689,9 @@ export function register(on) {
   });
 
   on('command.run', {command: 'delm:run'}, async ($, e, next) => {
+    // DeLM's own launch of a run it already prepared (launchChosen) goes
+    // straight to the skill; it is never a new task.
+    if (e.origin?.kind === 'plugin' && e.origin.name === $.plugin.name) return next(e);
     const session = await $.session.id();
     if (starts.has(session)) return {text: 'DeLM is preparing this conversation. Wait for its native peers to start.'};
     let invocation;
@@ -675,8 +704,9 @@ export function register(on) {
       if (known && !known.finished) return {text: ownsConversation(known)
         ? 'DeLM is already working in this conversation. Send a follow-up, or use /delm-stop first.'
         : 'The previous DeLM run needs finishing or recovery before another run can start. You can use Claude normally here. Open /delm-status for its recovery state, or use /delm-stop to save unfinished changes.'};
-      const agents = invocation.agents ?? await chooseAgents($, session);
-      if (agents === null) return {text: 'DeLM did not start. No agents were launched.'};
+      const agents = invocation.agents ?? await chooseAgents($, session, invocation.task);
+      if (agents === PICKING) return {text: 'Choose how many agents in the DeLM panel.'};
+      if (agents === null) return {text: NOT_STARTED};
       const run = await start($, invocation.task, session, agents);
       return next({...e, args: nativeLaunchContext(run.task, run.prompt, run.ready.workers.length)});
     } catch (error) {

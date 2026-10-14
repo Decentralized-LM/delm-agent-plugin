@@ -33,6 +33,7 @@ async function fixture(options = {}) {
     return {catch: () => {}};
   });
   const requests = [], commands = [], timers = [], notices = [], prompts = [], directories = [], questions = [], panes = [];
+  const commandRuns = [];
   const agents = new Map(), store = options.store || new Map();
   let session = options.session || 'session-fixture', revision = 1;
   let finalization = null, generation = 0;
@@ -97,7 +98,7 @@ async function fixture(options = {}) {
           isStdoutTruncated: false, isStderrTruncated: false};
       },
     },
-    command: {register: async input => { commands.push(input); }},
+    command: {register: async input => { commands.push(input); }, run: async input => { commandRuns.push(input); return {}; }},
     clock: {after: (milliseconds, callback) => {
       if (milliseconds <= 1000) timers.push(callback);
       return {cancel() {}};
@@ -182,7 +183,7 @@ async function fixture(options = {}) {
     button.props.onPress();
   }
   return {host, call, step, launch, spawn, event, requests, agents, timers, prompts, store, notices, directories,
-    questions, starts, panes, pressPanel,
+    questions, starts, panes, pressPanel, commandRuns,
     retryFinish: () => module.retryFinish(host,session), select: id => { session = id; }};
 }
 
@@ -1289,26 +1290,63 @@ test('a typed answer that names no supported count asks again instead of failing
   assert.equal(dismissed.starts.length, 0);
 });
 
-test('the DeLM panel asks for the count when it can be drawn, without Claude\'s question dialog', async () => {
+
+test('the DeLM panel asks for the count without holding the command or Claude\'s dialog', async () => {
   const never = () => { throw new Error('Claude\'s dialog must not open when the panel can ask.'); };
   const f = await fixture({surfaces: ['terminal'], panel: true, ask: never});
   await f.call('session.start', {cwd: '/fixture/project'});
-  const launching = f.call('command.*', {command: 'delm:run', args: 'Build a useful tool.'}, input => f.call('command.run', input), 'command.run');
-  for (let i = 0; i < 5 && !f.panes.some(spec => spec.focus); i++) await setImmediate();
+  for (let i = 0; i < 5; i++) await setImmediate(); // let the startup board restore settle
+  const asked = await f.call('command.run', {command: 'delm:run', args: 'Build a useful tool.'});
+  assert.deepEqual(asked, {text: 'Choose how many agents in the DeLM panel.'});
   assert.equal(f.starts.length, 0, 'Nothing is prepared before the person chooses');
+  assert.ok(f.panes.some(spec => spec.focus && spec.closeOnEscape));
   await f.pressPanel('agents-4');
-  const result = await launching;
-  assert.match(result.args, /exactly four native fork/);
+  for (let i = 0; i < 20 && !f.commandRuns.length; i++) await setImmediate();
+  assert.equal(f.starts.length, 1);
   assert.equal(f.starts[0].workers, 4);
+  assert.equal(f.starts[0].task, 'Build a useful tool.');
+  assert.equal(f.commandRuns.length, 1);
+  assert.equal(f.commandRuns[0].command, 'delm:run');
+  assert.match(f.commandRuns[0].args, /exactly four native fork/);
+  assert.match(f.commandRuns[0].args, /User request:\nBuild a useful tool\.$/);
+  // Claude runs DeLM's own launch command; DeLM passes it to the skill as is.
+  const launched = await f.call('command.run', {...f.commandRuns[0], origin: {kind: 'plugin', name: 'delm'}});
+  assert.equal(launched.args, f.commandRuns[0].args);
+  assert.equal(f.starts.length, 1, 'DeLM\'s own launch is never a second task');
+  await f.call('turn.start', {turnId: 'parent-turn', text: 'launch'});
+  for (const id of ['peer-1', 'peer-2', 'peer-3', 'peer-4']) await f.spawn(id);
+  assert.match((await f.spawn('peer-5')).result.deny, /its 4 native peers/);
+  await f.call('turn.complete', {turnId: 'parent-turn', reason: 'answer', isAborted: false, answer: 'Launched.'});
+  assert.equal(f.requests.some(request => request.op === 'cancel'), false);
   assert.equal(f.questions.length, 0);
 
   const cancel = await fixture({surfaces: ['terminal'], panel: true, ask: never});
   await cancel.call('session.start', {cwd: '/fixture/project'});
-  const cancelling = cancel.call('command.*', {command: 'delm:run', args: 'Build a useful tool.'}, input => cancel.call('command.run', input), 'command.run');
-  for (let i = 0; i < 5 && !cancel.panes.some(spec => spec.focus); i++) await setImmediate();
+  for (let i = 0; i < 5; i++) await setImmediate(); // let the startup board restore settle
+  await cancel.call('command.run', {command: 'delm:run', args: 'Build a useful tool.'});
   await cancel.pressPanel('agents-cancel');
-  const stopped = await cancelling;
-  assert.match(stopped.text, /did not start/);
+  assert.ok(cancel.notices.includes('DeLM did not start. No agents were launched.'));
+  assert.deepEqual(cancel.commandRuns, []);
   assert.equal(cancel.starts.length, 0);
   assert.ok(cancel.panes.some(spec => spec.closed === 'delm'), 'The unused board closes');
+});
+
+test('a chosen launch that cannot start says so and runs nothing', async () => {
+  const f = await fixture({surfaces: ['terminal'], panel: true});
+  await f.call('session.start', {cwd: '/fixture/project'});
+  for (let i = 0; i < 5; i++) await setImmediate(); // let the startup board restore settle
+  await f.call('command.run', {command: 'delm:run', args: 'Build a useful tool.'});
+  f.host.mcp.connect = async () => ({isConnected: false, reason: 'failed', message: 'Native connection failed'});
+  await f.pressPanel('agents-2');
+  for (let i = 0; i < 20 && !f.notices.some(line => /could not start/.test(line)); i++) await setImmediate();
+  assert.ok(f.notices.some(line => /DeLM could not start: .*Native connection failed/.test(line)));
+  assert.deepEqual(f.commandRuns, []);
+  assert.equal(f.starts.length, 0);
+});
+
+test('only DeLM\'s own launch bypasses the launch handler', async () => {
+  const f = await fixture();
+  const other = await f.call('command.run', {command: 'delm:run', args: 'Build a useful tool.', origin: {kind: 'plugin', name: 'someone-else'}});
+  assert.match(other.args, /exactly two native fork/, 'Another plugin\'s run is an ordinary request');
+  assert.equal(f.starts.length, 1);
 });
