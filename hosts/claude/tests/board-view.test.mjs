@@ -6,7 +6,7 @@ import test from 'node:test';
 const rendererSource = await readFile(new URL('../hooks/board-render.js', import.meta.url), 'utf8');
 const rendererURL = 'data:text/javascript;base64,' + Buffer.from(rendererSource).toString('base64');
 const viewSource = await readFile(new URL('../hooks/board-view.js', import.meta.url), 'utf8');
-const {registerBoard: createBoardView, observeBoard, validateSnapshot, acceptsSnapshot, observerReason} = await import('data:text/javascript;base64,'
+const {registerBoard: createBoardView, observeBoard, askAgents, validateSnapshot, acceptsSnapshot, observerReason} = await import('data:text/javascript;base64,'
   + Buffer.from(viewSource.replace("'./board-render.js'", JSON.stringify(rendererURL))).toString('base64'));
 
 const SESSION = 'conversation-1';
@@ -874,4 +874,58 @@ test('arguments the host refuses never open the board', async () => {
   assert.deepEqual(result, {text: 'Choose 2 or 4 agents.'});
   assert.equal(f.opens.length, 0); assert.equal(f.closes.length, 0);
   assert.deepEqual(f.render(), {type: 'NativeFallback'});
+});
+
+// Wrapped so awaiting the helper does not also await the person's answer.
+async function picking(f) {
+  f.view.begin(f.host, SESSION);
+  const answer = askAgents(f.host, SESSION);
+  await flush(); await flush();
+  return {answer};
+}
+
+test('the agent picker takes the keyboard as a dialog and a choice returns it to the prompt', async () => {
+  const f = fixture({native: true});
+  const {answer} = await picking(f);
+  assert.deepEqual(f.opens.map(spec => Boolean(spec.focus && spec.closeOnEscape)), [false, true]);
+  assert.match(text(f.render()), /How many agents should DeLM run\?/);
+  await f.press('agents-4');
+  assert.equal(await answer, 4);
+  assert.equal(f.closes.length, 1, 'The dialog closes to hand back the keyboard');
+  assert.equal(f.opens.length, 3);
+  assert.equal(f.opens[2].focus, undefined); assert.equal(f.opens[2].closeOnEscape, undefined);
+  assert.match(text(f.render()), /Preparing/);
+  assert.deepEqual(f.forbidden, []); f.stop();
+});
+
+test('cancelling the picker, closing its pane, or ending the session starts nothing', async () => {
+  const cancelled = fixture({native: true});
+  const {answer: first} = await picking(cancelled);
+  await cancelled.press('agents-cancel');
+  assert.equal(await first, null);
+  assert.equal(cancelled.closes.length, 0); cancelled.stop();
+
+  const closed = fixture({native: true});
+  const {answer: second} = await picking(closed);
+  await closed.call('ui.close', {id: 'delm', origin: {kind: 'person'}}, async () => ({}));
+  assert.equal(await second, null);
+  await flush();
+  assert.notEqual(closed.store.get('native-board:' + SESSION)?.hidden, true, 'Closing the picker is not a hide preference');
+  closed.stop();
+
+  const ended = fixture({native: true});
+  const {answer: third} = await picking(ended);
+  ended.view.end(ended.host, SESSION);
+  assert.equal(await third, null);
+});
+
+test('the picker reports no pane when one cannot be drawn', async () => {
+  const unplaced = fixture({native: true, open: () => Promise.resolve({isPlaced: false, reason: 'No surface places panes'})});
+  assert.equal(await (await picking(unplaced)).answer, undefined);
+  unplaced.stop();
+  const unsupported = fixture({native: true, unsupported: true});
+  assert.equal(await (await picking(unsupported)).answer, undefined);
+  const none = fixture({native: true});
+  assert.equal(await askAgents(none.host, SESSION), undefined);
+  assert.equal(none.opens.length, 0);
 });

@@ -1,6 +1,7 @@
 import {renderBoard, renderCompact, boardSummary, cleanText} from './board-render.js';
 
 const PANE = 'delm';
+const PANE_SPEC = Object.freeze({id: PANE, title: 'DeLM', rows: 24, columns: 54});
 const STORE = 'native-board:';
 const MAX_LINE = 256 * 1024;
 const COLLECTIONS = new Set(['tasks', 'shared', 'checks']);
@@ -139,6 +140,7 @@ function endStream(state) {
 }
 function dispose(state) {
   if (!state) return;
+  state.choice?.settle(null);
   state.disposed = true;
   endStream(state); cancel(state.paint); cancel(state.paneTimer); cancel(state.nativeTimer);
   cancel(state.navigationTimer);
@@ -187,7 +189,7 @@ function open($, state) {
   remember($, state);
   // Called directly from the user's command or button, preserving native placement.
   let opened;
-  try { opened = $.ui.open({id: PANE, title: 'DeLM', rows: 24, columns: 54}); }
+  try { opened = $.ui.open(PANE_SPEC); }
   catch (error) { problem($, state, error); return Promise.resolve(false); }
   return Promise.resolve(opened).then(result => {
     if (!valid(state)) return false;
@@ -475,6 +477,8 @@ function actions($, state) {
         }
       })());
     },
+    choose: count => { if (valid(state)) state.choice?.settle(count); },
+    cancelChoice: () => { if (valid(state)) state.choice?.settle(null); },
     hide: () => {
       if (!valid(state)) return;
       state.hidden = true; state.paneShown = false; remember($, state);
@@ -491,7 +495,7 @@ function draw($, e, next, compact) {
   const native = observedRuns.get(state.session);
   const screen = state.screen;
   const pageSource = state.pages[screen.kind] || (screen.item ? screen : null);
-  const rendering = {...state, selectedAgentId: viewed,
+  const rendering = {...state, choice: null, choosing: Boolean(state.choice), selectedAgentId: viewed,
     detailStale: pageSource && (pageSource.view_revision < state.snapshot?.revision
       || pageSource.view_board_sequence < state.snapshot?.source?.board_sequence),
     detailRevision: pageSource?.view_revision,
@@ -509,8 +513,41 @@ function draw($, e, next, compact) {
 function begin($, session, previousRunId = null) {
     const state = replace(session, null);
     state.previousRunId = previousRunId;
-    ignore(open($, state));
+    state.opening = open($, state);
     startNativeSync($, state);
+}
+// Ask how many agents to run, inside the board pane the launch just opened.
+// Resolves to the count, null when the person cancels or closes the pane, or
+// undefined when this conversation has no board pane that can be drawn.
+export async function askAgents($, session) {
+  const state = active;
+  if (!state || !valid(state) || state.session !== session || !state.opening) return undefined;
+  let finish;
+  const choice = {answer: new Promise(resolve => { finish = resolve; })};
+  choice.settle = value => {
+    if (state.choice !== choice) return;
+    state.choice = null;
+    finish(value);
+    if (valid(state)) invalidate($, state);
+  };
+  state.choice = choice;
+  invalidate($, state);
+  let placed = false;
+  try {
+    placed = await state.opening;
+    // Take the keyboard as a dialog: Enter, the hotkeys and Escape answer it.
+    if (placed && valid(state) && state.choice === choice) {
+      placed = (await $.ui.open({...PANE_SPEC, focus: true, closeOnEscape: true, holdToasts: true}))?.isPlaced;
+    }
+  } catch { placed = false; }
+  if (!placed) choice.settle(undefined);
+  const value = await choice.answer;
+  if (value && valid(state)) {
+    // Hand the keyboard back to the prompt and keep the board for the run.
+    try { await $.ui.close({id: PANE}); } catch {}
+    if (valid(state)) state.opening = open($, state);
+  }
+  return value;
 }
 function failure($, session, error) {
     if (active?.session === session) {
@@ -555,7 +592,9 @@ export function registerBoard(on, {lookup, retryFinish, accepts} = {}) {
     const result = await next(e);
     if (state && valid(state) && !result?.deny) {
       state.paneShown = false;
-      if (e.origin?.kind === 'person') { state.hidden = true; remember($, state); restart($, state); }
+      // Closing the agent picker cancels the launch; it is not a board preference.
+      if (state.choice && e.origin?.kind === 'person') state.choice.settle(null);
+      else if (e.origin?.kind === 'person') { state.hidden = true; remember($, state); restart($, state); }
       invalidate($, state);
     }
     return result;

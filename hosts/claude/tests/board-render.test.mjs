@@ -307,3 +307,22 @@ test('four agents stay visible in every pane size', () => {
   assert.equal(normalizeBoard({snapshot: four}).agents.length, 4);
   assert.match(boardSummary({snapshot: four}), /Agent 4 · Working · #4/);
 });
+
+test('the agent picker offers exactly two counts and a cancel', () => {
+  const f = fixture({snapshot: working, choosing: true});
+  const tree = f.render();
+  const buttons = nodes(tree).filter(node => node.type === 'Button');
+  assert.deepEqual(buttons.map(node => node.props.key), ['agents-2', 'agents-4', 'agents-cancel']);
+  assert.deepEqual(buttons.map(node => node.props.hotkey), ['2', '4', 'c']);
+  assert.equal(buttons[0].props.autoFocus, true);
+  assert.equal(buttons.filter(node => node.props.autoFocus).length, 1);
+  const output = text(tree);
+  assert.match(output, /How many agents should DeLM run\?/);
+  assert.match(output, /Two agents \(default\)/); assert.match(output, /Four agents/);
+  assert.doesNotMatch(output, /Task queue|Hide board|Agent 1/);
+  const chosen = [];
+  f.actions.choose = count => chosen.push(count); f.actions.cancelChoice = () => chosen.push('cancel');
+  for (const key of ['agents-2', 'agents-4', 'agents-cancel']) press(f.render(), key);
+  assert.deepEqual(chosen, [2, 4, 'cancel']);
+  assert.equal(renderCompact(f.primitives, {props: {maxRows: 2, bodyColumns: 52}}, {snapshot: working, choosing: true}, f.actions), null);
+});

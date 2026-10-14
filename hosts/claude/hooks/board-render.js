@@ -339,6 +339,24 @@ function overview(h, view, actions) {
   return children;
 }
 
+// Exactly two choices and a cancel. Hotkeys match the counts; Enter picks the
+// default because it holds the initial focus.
+function agentPicker(h, actions) {
+  return [
+    h.row([h.text('DeLM', {bold: true, color: BLUE}), h.text(' · Choose agents')]),
+    h.blank(),
+    h.text('How many agents should DeLM run?', {bold: true}),
+    h.blank(),
+    h.button('agents-2', 'Two agents (default)', () => actions.choose?.(2), {hotkey: '2', autoFocus: true}),
+    h.button('agents-4', 'Four agents', () => actions.choose?.(4), {hotkey: '4'}),
+    h.line('Four agents use about twice as much as two.', {dimColor: true}),
+    h.blank(),
+    h.button('agents-cancel', 'Cancel', actions.cancelChoice, {hotkey: 'c'}),
+    h.blank(),
+    h.line('Enter picks the highlighted choice · Esc cancels', {dimColor: true}),
+  ];
+}
+
 function outcomeLines(h, outcome) {
   const children = [];
   const additionalReview = outcome.artifacts_declared && outcome.delivered;
@@ -462,6 +480,7 @@ export function renderBoard(components, e, state = {}, actions = {}) {
   view.detailError = state.detailError;
   view.detailStale = state.detailStale;
   view.detailRevision = state.detailRevision;
+  if (state.choosing) return h.column(agentPicker(h, actions), {width: h.width, paddingX: h.padding});
   const screen = state.screen || {kind: 'overview'};
   if (state.pages?.[screen.kind]) {
     const page = state.pages[screen.kind];
@@ -472,7 +491,7 @@ export function renderBoard(components, e, state = {}, actions = {}) {
 }
 
 export function renderCompact(components, e, state = {}, actions = {}) {
-  if (e.props?.hasSurvey || Number(e.props?.maxRows) < 1 || state.paneShown || state.suppressCompact) return null;
+  if (e.props?.hasSurvey || Number(e.props?.maxRows) < 1 || state.paneShown || state.suppressCompact || state.choosing) return null;
   const h = helpers(components, e, actions), view = normalizeBoard(state);
   const summary = `DeLM · ${compactSummary(view)}`;
   if (Number(e.props?.maxRows) === 1) {

@@ -32,7 +32,7 @@ async function fixture(options = {}) {
       handler: typeof matcher === 'function' ? matcher : handler});
     return {catch: () => {}};
   });
-  const requests = [], commands = [], timers = [], notices = [], prompts = [], directories = [], questions = [];
+  const requests = [], commands = [], timers = [], notices = [], prompts = [], directories = [], questions = [], panes = [];
   const agents = new Map(), store = options.store || new Map();
   let session = options.session || 'session-fixture', revision = 1;
   let finalization = null, generation = 0;
@@ -61,7 +61,9 @@ async function fixture(options = {}) {
     store: {get: async key => store.get(key), set: async (key, value) => { store.set(key, structuredClone(value)); }},
     fs: {read: async () => 'Shared DeLM worker contract.'},
     process: {
-      spawn: init => createStream(init?.input),
+      // The board's passive observer never yields here; only the bridge is scripted.
+      spawn: init => init?.argv?.includes('view') ? {next: () => new Promise(() => {}), return: async () => ({done: true}),
+        [Symbol.asyncIterator]() { return this; }} : createStream(init?.input),
       run: async (argv, init) => {
         directories.push({argv: argv.slice(1, 3).join(' '), cwd: init.cwd});
         const request = JSON.parse(init.stdin);
@@ -101,7 +103,14 @@ async function fixture(options = {}) {
       return {cancel() {}};
     }, every: () => ({cancel() {}}), sleep: async () => {}},
     ui: {log: line => { notices.push(line); },
-      ...(options.ask ? {ask: async (question, choices) => { questions.push({question, choices}); return options.ask(question, choices); }} : {})},
+      ...(options.ask ? {ask: async (question, choices) => { questions.push({question, choices}); return options.ask(question, choices); }} : {}),
+      ...(options.panel ? {
+        open: spec => { panes.push(spec); return Promise.resolve({isPlaced: true}); },
+        close: async spec => { panes.push({closed: spec.id}); },
+        panes: async () => [{id: 'delm', isPlaced: true, isShown: true}],
+        invalidate: () => {},
+        resolve: () => Object.fromEntries(['Box', 'Text', 'Button'].map(type => [type, props => ({type, props})])),
+      } : {})},
     prompt: {submit: async input => { prompts.push(input); }},
     agent: {list: async () => [...agents].map(([id, status]) => ({id, status}))},
     tool: {call: async input => {
@@ -163,8 +172,17 @@ async function fixture(options = {}) {
     else state.queued.push(item);
     await setImmediate();
   }
+  async function pressPanel(key) {
+    const nodes = tree => !tree || typeof tree !== 'object' ? []
+      : [tree, ...[].concat(tree.props?.children || []).flatMap(nodes)];
+    const tree = await call('ui.render', {component: 'Pane', requestId: 'delm', props: {bodyColumns: 54, scroll: {bodyRows: 24}}},
+      () => ({type: 'NativeFallback'}));
+    const button = nodes(tree).find(node => node.type === 'Button' && node.props.key === key);
+    assert.ok(button, 'Missing panel button: ' + key);
+    button.props.onPress();
+  }
   return {host, call, step, launch, spawn, event, requests, agents, timers, prompts, store, notices, directories,
-    questions, starts,
+    questions, starts, panes, pressPanel,
     retryFinish: () => module.retryFinish(host,session), select: id => { session = id; }};
 }
 
@@ -1269,4 +1287,28 @@ test('a typed answer that names no supported count asks again instead of failing
   assert.equal(result.exitCode, undefined);
   assert.equal(dismissed.questions.length, 2);
   assert.equal(dismissed.starts.length, 0);
+});
+
+test('the DeLM panel asks for the count when it can be drawn, without Claude\'s question dialog', async () => {
+  const never = () => { throw new Error('Claude\'s dialog must not open when the panel can ask.'); };
+  const f = await fixture({surfaces: ['terminal'], panel: true, ask: never});
+  await f.call('session.start', {cwd: '/fixture/project'});
+  const launching = f.call('command.*', {command: 'delm:run', args: 'Build a useful tool.'}, input => f.call('command.run', input), 'command.run');
+  for (let i = 0; i < 5 && !f.panes.some(spec => spec.focus); i++) await setImmediate();
+  assert.equal(f.starts.length, 0, 'Nothing is prepared before the person chooses');
+  await f.pressPanel('agents-4');
+  const result = await launching;
+  assert.match(result.args, /exactly four native fork/);
+  assert.equal(f.starts[0].workers, 4);
+  assert.equal(f.questions.length, 0);
+
+  const cancel = await fixture({surfaces: ['terminal'], panel: true, ask: never});
+  await cancel.call('session.start', {cwd: '/fixture/project'});
+  const cancelling = cancel.call('command.*', {command: 'delm:run', args: 'Build a useful tool.'}, input => cancel.call('command.run', input), 'command.run');
+  for (let i = 0; i < 5 && !cancel.panes.some(spec => spec.focus); i++) await setImmediate();
+  await cancel.pressPanel('agents-cancel');
+  const stopped = await cancelling;
+  assert.match(stopped.text, /did not start/);
+  assert.equal(cancel.starts.length, 0);
+  assert.ok(cancel.panes.some(spec => spec.closed === 'delm'), 'The unused board closes');
 });

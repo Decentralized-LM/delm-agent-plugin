@@ -3,7 +3,7 @@ import {
   commandOutcome, completeState,
   decodeLines, followupText, nativeLaunchContext, parseAgents, parseReply, toolArguments, validateReady,
 } from './protocol.js';
-import {registerBoard, observeBoard} from './board-view.js';
+import {askAgents, registerBoard, observeBoard} from './board-view.js';
 
 const runs = new Map();
 const restores = new Map();
@@ -162,10 +162,13 @@ async function drain($, run, stream, initial) {
 
 // The count comes from the person: their --agents option or this picker,
 // never from a model turn. A session with no surface has no one to ask.
-async function chooseAgents($) {
+async function chooseAgents($, session) {
   let surfaces = [];
   try { surfaces = await $.session.surfaces(); } catch { /* Treated as headless. */ }
   if (!surfaces.length) return DEFAULT_AGENTS;
+  const picked = await askAgents($, session);
+  if (picked !== undefined) return picked;
+  // No DeLM pane can be drawn here, so ask in Claude's own question dialog.
   // An unsupported typed answer asks again; only a dismissal ends the choice.
   for (let question = AGENT_QUESTION; ; question = AGENT_QUESTION_RETRY) {
     let answer;
@@ -672,7 +675,7 @@ export function register(on) {
       if (known && !known.finished) return {text: ownsConversation(known)
         ? 'DeLM is already working in this conversation. Send a follow-up, or use /delm-stop first.'
         : 'The previous DeLM run needs finishing or recovery before another run can start. You can use Claude normally here. Open /delm-status for its recovery state, or use /delm-stop to save unfinished changes.'};
-      const agents = invocation.agents ?? await chooseAgents($);
+      const agents = invocation.agents ?? await chooseAgents($, session);
       if (agents === null) return {text: 'DeLM did not start. No agents were launched.'};
       const run = await start($, invocation.task, session, agents);
       return next({...e, args: nativeLaunchContext(run.task, run.prompt, run.ready.workers.length)});
