@@ -165,15 +165,16 @@ async function chooseAgents($) {
   let surfaces = [];
   try { surfaces = await $.session.surfaces(); } catch { /* Treated as headless. */ }
   if (!surfaces.length) return DEFAULT_AGENTS;
-  if (typeof $.ui.ask !== 'function') {
+  let answer;
+  try {
+    answer = await $.ui.ask('How many agents should DeLM run?', {header: 'Agents', options: AGENT_CHOICES});
+  } catch (error) {
+    // A host without the question dialog throws a TypeError; a dismissal rejects.
+    if (!(error instanceof TypeError)) return null;
     $.ui.log('This Claude Code version cannot show the DeLM agent picker, so DeLM is starting '
       + DEFAULT_AGENTS + ' agents. Use /delm:run --agents 4 <task> to run four.');
     return DEFAULT_AGENTS;
   }
-  let answer;
-  try {
-    answer = await $.ui.ask('How many agents should DeLM run?', {header: 'Agents', options: AGENT_CHOICES});
-  } catch { return null; }
   return agentsFromAnswer(answer);
 }
 
@@ -651,19 +652,19 @@ export function register(on) {
   on('command.run', {command: 'delm:run'}, async ($, e, next) => {
     const session = await $.session.id();
     if (starts.has(session)) return {text: 'DeLM is preparing this conversation. Wait for its native peers to start.'};
-    let request;
-    try { request = parseAgents(e.args); }
+    let invocation;
+    try { invocation = parseAgents(e.args); }
     catch (error) { return {text: String(error.message || error)}; }
-    if (!request.task) return {text: 'Use /delm:run followed by the task you want to complete.'};
+    if (!invocation.task) return {text: 'Use /delm:run followed by the task you want to complete.'};
     starts.add(session);
     try {
       const known = await currentRun($);
       if (known && !known.finished) return {text: ownsConversation(known)
         ? 'DeLM is already working in this conversation. Send a follow-up, or use /delm-stop first.'
         : 'The previous DeLM run needs finishing or recovery before another run can start. You can use Claude normally here. Open /delm-status for its recovery state, or use /delm-stop to save unfinished changes.'};
-      const agents = request.agents ?? await chooseAgents($);
+      const agents = invocation.agents ?? await chooseAgents($);
       if (agents === null) return {text: 'DeLM did not start. No agents were launched.'};
-      const run = await start($, request.task, session, agents);
+      const run = await start($, invocation.task, session, agents);
       return next({...e, args: nativeLaunchContext(run.task, run.prompt, run.ready.workers.length)});
     } catch (error) {
       const run = runs.get(session);
