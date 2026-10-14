@@ -339,21 +339,21 @@ function overview(h, view, actions) {
   return children;
 }
 
+// The picker's choices, in the order the arrow keys move through them.
+export const PICKER_KEYS = Object.freeze(['agents-2', 'agents-4', 'agents-cancel']);
+// Rows the picker needs; it fits without scrolling, so the arrows move the
+// focus between choices instead of scrolling the pane.
+export const PICKER_ROWS = 5;
+
 // Exactly two choices and a cancel. Hotkeys match the counts; Enter picks the
 // default because it holds the initial focus.
 function agentPicker(h, actions) {
   return [
-    h.row([h.text('DeLM', {bold: true, color: BLUE}), h.text(' · Choose agents')]),
-    h.blank(),
-    h.text('How many agents should DeLM run?', {bold: true}),
-    h.blank(),
-    h.button('agents-2', 'Two agents (default)', () => actions.choose?.(2), {hotkey: '2', autoFocus: true}),
-    h.button('agents-4', 'Four agents', () => actions.choose?.(4), {hotkey: '4'}),
-    h.line('Four agents use about twice as much as two.', {dimColor: true}),
-    h.blank(),
-    h.button('agents-cancel', 'Cancel', actions.cancelChoice, {hotkey: 'c'}),
-    h.blank(),
-    h.line('Enter picks the highlighted choice · Esc cancels', {dimColor: true}),
+    h.row([h.text('DeLM', {bold: true, color: BLUE}), h.text(fitText(' · How many agents should DeLM run?', Math.max(1, h.inner - 4)), {bold: true})]),
+    h.button(PICKER_KEYS[0], 'Two agents (default)', () => actions.choose?.(2), {hotkey: '2', autoFocus: true}),
+    h.button(PICKER_KEYS[1], 'Four agents (about twice the usage)', () => actions.choose?.(4), {hotkey: '4'}),
+    h.button(PICKER_KEYS[2], 'Cancel', actions.cancelChoice, {hotkey: 'c'}),
+    h.line('Arrows move · Enter chooses · Esc cancels', {dimColor: true}),
   ];
 }
 

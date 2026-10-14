@@ -66,7 +66,7 @@ function text(tree) {
 }
 function fixture(options = {}) {
   const hooks = [], opens = [], closes = [], commands = [], timers = [], streams = [], forbidden = [], lookups = [], scrolls = [];
-  const runs = [], logs = [];
+  const runs = [], logs = [], focuses = [];
   const store = options.store || new Map();
   let session = options.session || SESSION;
   const run = options.run === undefined ? runRecord() : options.run;
@@ -86,6 +86,7 @@ function fixture(options = {}) {
       open: spec => { opens.push(spec); return options.open ? options.open(spec) : Promise.resolve({isPlaced: true}); },
       close: async spec => { closes.push(spec); return {}; },
       scroll: async spec => { scrolls.push(spec); return {}; },
+      focus: async spec => { focuses.push(spec); return {}; },
       panes: async () => options.panes || [{id: 'delm', isPlaced: true, isShown: true}],
       invalidate: () => {},
       resolve: e => options.resolve ? options.resolve(e) : {Box: nativeNode('Box'), Text: nativeNode('Text'), Button: nativeNode('Button')},
@@ -135,7 +136,7 @@ function fixture(options = {}) {
   }
   function stop() { view.end(host, session); for (const stream of streams) stream.end(); }
   return {host, view, render, press, call, emit, tick, stop, select: id => { session = id; },
-    streams, commands, opens, closes, forbidden, timers, store, lookups, scrolls, runs, logs};
+    streams, commands, opens, closes, forbidden, timers, store, lookups, scrolls, runs, logs, focuses};
 }
 
 test('begin opens synchronously without taking prompt focus or starting an observer', async () => {
@@ -890,6 +891,7 @@ test('the agent picker takes the keyboard and a choice hands it back and launche
   const f = fixture({native: true});
   assert.equal(await picking(f), true);
   assert.deepEqual(f.opens.map(spec => Boolean(spec.focus && spec.closeOnEscape)), [false, true]);
+  assert.equal(f.opens[1].rows, 5, 'The dialog asks for just the rows the picker needs');
   assert.match(text(f.render()), /How many agents should DeLM run\?/);
   await f.press('agents-4'); await flush(); await flush();
   assert.deepEqual(f.launches, [4]);
@@ -949,4 +951,31 @@ test('a launch that returns while the picker waits keeps its pane open', async (
   assert.equal(f.closes.length, 0);
   assert.match(text(f.render()), /How many agents should DeLM run\?/);
   f.stop();
+});
+
+test('while the picker is up, the arrow keys move between its choices instead of scrolling', async () => {
+  const f = fixture({native: true});
+  await picking(f);
+  const scroll = (by, extra = {}) => f.call('ui.scroll', {component: 'Pane', requestId: 'delm', offset: 0, by,
+    bodyRows: 3, contentRows: 5, origin: {kind: 'person'}, ...extra}, async () => ({scrolled: true}));
+  await f.call('ui.focus', {component: 'Pane', requestId: 'delm', plugin: 'delm', element: 'agents-2',
+    origin: {kind: 'plugin', name: 'delm'}}, async () => ({}));
+  assert.deepEqual(await scroll(1), {});
+  assert.deepEqual(f.focuses.at(-1), {requestId: 'delm', key: 'agents-4'});
+  await f.call('ui.focus', {component: 'Pane', requestId: 'delm', plugin: 'delm', element: 'agents-4',
+    origin: {kind: 'plugin', name: 'delm'}}, async () => ({}));
+  await scroll(1);
+  assert.deepEqual(f.focuses.at(-1), {requestId: 'delm', key: 'agents-cancel'});
+  await f.call('ui.focus', {component: 'Pane', requestId: 'delm', plugin: 'delm', element: 'agents-cancel',
+    origin: {kind: 'person'}}, async () => ({}));
+  await scroll(1);
+  assert.deepEqual(f.focuses.at(-1), {requestId: 'delm', key: 'agents-cancel'}, 'The last choice stays put');
+  await scroll(-1);
+  assert.deepEqual(f.focuses.at(-1), {requestId: 'delm', key: 'agents-4'});
+  assert.deepEqual(f.scrolls.at(-1), {to: {key: 'agents-4'}, in: 'delm', block: 'nearest'});
+  const focused = f.focuses.length;
+  assert.deepEqual(await scroll(1, {pointer: {row: 1, column: 2}}), {scrolled: true}, 'The wheel still scrolls');
+  await f.press('agents-cancel');
+  assert.deepEqual(await scroll(1), {scrolled: true}, 'The board scrolls normally once the picker is gone');
+  assert.equal(f.focuses.length, focused);
 });

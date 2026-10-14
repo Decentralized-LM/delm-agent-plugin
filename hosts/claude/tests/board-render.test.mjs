@@ -320,6 +320,8 @@ test('the agent picker offers exactly two counts and a cancel', () => {
   assert.match(output, /How many agents should DeLM run\?/);
   assert.match(output, /Two agents \(default\)/); assert.match(output, /Four agents/);
   assert.doesNotMatch(output, /Task queue|Hide board|Agent 1/);
+  assert.equal(tree.props.children.length, 5, 'The picker fits in five rows');
+  assert.match(output, /Arrows move · Enter chooses · Esc cancels/);
   const chosen = [];
   f.actions.choose = count => chosen.push(count); f.actions.cancelChoice = () => chosen.push('cancel');
   for (const key of ['agents-2', 'agents-4', 'agents-cancel']) press(f.render(), key);

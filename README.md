@@ -67,7 +67,7 @@ and keyboard controls. Include a README and test the main interactions.
 
 Use `$delm:run` for the same request in Codex. Send clarifications in the same conversation while the agents work.
 
-In Claude Code, the DeLM panel asks **How many agents should DeLM run?** before anything starts. Press **2** or **4**, or Enter for two. Esc or **Cancel** starts nothing. To skip the question, put the count first:
+In Claude Code, the DeLM panel asks **How many agents should DeLM run?** before anything starts. Press **2** or **4**, or use the arrow keys and Enter. Esc or **Cancel** starts nothing. To skip the question, put the count first:
 
 ```text
 /delm:run --agents 4 Build a task board with drag-and-drop columns.

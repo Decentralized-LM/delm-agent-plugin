@@ -1,4 +1,4 @@
-import {renderBoard, renderCompact, boardSummary, cleanText} from './board-render.js';
+import {renderBoard, renderCompact, boardSummary, cleanText, PICKER_KEYS, PICKER_ROWS} from './board-render.js';
 
 const PANE = 'delm';
 const PANE_SPEC = Object.freeze({id: PANE, title: 'DeLM', rows: 24, columns: 54});
@@ -548,7 +548,7 @@ export async function showAgentPicker($, session, launch) {
   try {
     placed = await state.opening;
     if (placed && valid(state) && state.choice === choice) {
-      placed = (await $.ui.open({...PANE_SPEC, focus: true, closeOnEscape: true, holdToasts: true}))?.isPlaced;
+      placed = (await $.ui.open({...PANE_SPEC, rows: PICKER_ROWS, focus: true, closeOnEscape: true, holdToasts: true}))?.isPlaced;
     }
   } catch { placed = false; }
   if (!placed && state.choice === choice) { state.choice = null; invalidate($, state); }
@@ -608,6 +608,22 @@ export function registerBoard(on, {lookup, retryFinish, accepts} = {}) {
       invalidate($, state);
     }
     return result;
+  });
+  // While the picker is up, the up and down keys move between its choices,
+  // even in a pane too short to show them all. The wheel still scrolls.
+  on('ui.focus', {requestId: PANE}, ($, e, next) => {
+    const state = active;
+    if (state && valid(state) && state.choice && e.element) state.choice.focused = e.element;
+    return next(e);
+  });
+  on('ui.scroll', {requestId: PANE}, async ($, e, next) => {
+    const state = active;
+    if (!state || !valid(state) || !state.choice || e.pointer || e.origin?.kind !== 'person' || !e.by) return next(e);
+    const at = Math.max(0, PICKER_KEYS.indexOf(state.choice.focused ?? PICKER_KEYS[0]));
+    const key = PICKER_KEYS[Math.min(PICKER_KEYS.length - 1, Math.max(0, at + Math.sign(e.by)))];
+    try { await $.ui.focus({requestId: PANE, key}); } catch {}
+    try { await $.ui.scroll({to: {key}, in: PANE, block: 'nearest'}); } catch {}
+    return {};
   });
   on('command.*', async ($, e, next) => {
     const session = await clearForeignView($);
