@@ -99,8 +99,8 @@ function fixture(options = {}) {
   const view = createBoardView((name, matcher, handler) => {
     hooks.push({name, matcher: typeof matcher === 'function' ? null : matcher,
       handler: typeof matcher === 'function' ? matcher : handler});
-  }, options.native ? {retryFinish: options.retryFinish} : {
-    retryFinish: options.retryFinish,
+  }, options.native ? {retryFinish: options.retryFinish, accepts: options.accepts} : {
+    retryFinish: options.retryFinish, accepts: options.accepts,
     lookup: async ($, id) => { lookups.push(id); return options.lookup ? options.lookup($, id) : run; },
   });
   async function call(name, event = {}, next = async () => ({}), nativeEvent = name) {
@@ -845,4 +845,33 @@ test('board observers run from the plugin directory, never a peer workspace', as
   assert.ok(helpers.length >= 2);
   for (const command of helpers) assert.equal(command.cwd, '/installed/current-plugin');
   f.stop();
+});
+
+test('a launch that starts nothing closes the board it opened', async () => {
+  const f = fixture({native: true});
+  const result = await f.call('command.*', {command: 'delm:run', args: 'Build the task'},
+    async () => ({text: 'DeLM did not start. No agents were launched.'}), 'command.run');
+  assert.deepEqual(result, {text: 'DeLM did not start. No agents were launched.'});
+  assert.equal(f.opens.length, 1);
+  assert.equal(f.closes.length, 1);
+  assert.deepEqual(f.render(), {type: 'NativeFallback'});
+  assert.equal(f.streams.length, 0); assert.deepEqual(f.forbidden, []);
+});
+
+test('a finished run stays closed when the next launch starts nothing', async () => {
+  const f = fixture({native: true});
+  observeBoard(runRecord({finished: true, phase: 'complete'}));
+  await f.call('command.*', {command: 'delm:run', args: 'Build the task'},
+    async () => ({text: 'DeLM did not start. No agents were launched.'}), 'command.run');
+  assert.equal(f.closes.length, 1);
+  assert.deepEqual(f.render(), {type: 'NativeFallback'});
+});
+
+test('arguments the host refuses never open the board', async () => {
+  const f = fixture({native: true, accepts: args => !args.startsWith('--agents 3')});
+  const result = await f.call('command.*', {command: 'delm:run', args: '--agents 3 Build the task'},
+    async () => ({text: 'Choose 2 or 4 agents.'}), 'command.run');
+  assert.deepEqual(result, {text: 'Choose 2 or 4 agents.'});
+  assert.equal(f.opens.length, 0); assert.equal(f.closes.length, 0);
+  assert.deepEqual(f.render(), {type: 'NativeFallback'});
 });

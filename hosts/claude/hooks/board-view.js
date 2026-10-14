@@ -7,6 +7,10 @@ const COLLECTIONS = new Set(['tasks', 'shared', 'checks']);
 const observedRuns = new Map();
 const retryFinishActions = new Map();
 const preferenceWrites = new Map();
+const anyTask = args => Boolean(args?.trim());
+// Whether /delm:run arguments can start a run. The host module supplies its
+// parser so a refused option never opens the board.
+let acceptsLaunch = anyTask;
 
 export function observeBoard(run, retryFinish) {
   // An explicit action closure stays in the host module's native API scope.
@@ -540,9 +544,10 @@ async function clearForeignView($) {
     return null;
   }
 }
-export function registerBoard(on, {lookup, retryFinish} = {}) {
+export function registerBoard(on, {lookup, retryFinish, accepts} = {}) {
   dispose(active); active = null; generation++;
   observedRuns.clear(); retryFinishActions.clear(); lookupOverride = lookup; retryFinishAction = retryFinish;
+  acceptsLaunch = accepts || anyTask;
   on('ui.render', {component: 'Pane', requestId: PANE}, ($, e, next) => draw($, e, next, false));
   on('ui.render', {component: 'AbovePrompt'}, ($, e, next) => draw($, e, next, true));
   on('ui.close', {id: PANE}, async ($, e, next) => {
@@ -558,14 +563,25 @@ export function registerBoard(on, {lookup, retryFinish} = {}) {
   on('command.*', async ($, e, next) => {
     const session = await clearForeignView($);
     if (!session || !next.is('command.run', e) || e.command !== 'delm:run') return next(e);
+    let began = false, previousRunId = null;
     try {
       const current = await readRun($, session);
-      if (e.args?.trim() && (!current || current.finished)) begin($, session, current?.ready?.run_id);
+      if (acceptsLaunch(e.args) && (!current || current.finished)) {
+        previousRunId = current?.ready?.run_id ?? null;
+        begin($, session, previousRunId);
+        began = true;
+      }
     } catch {}
     const result = await next(e);
     try {
       if (result.exitCode) failure($, session, result.text);
-      else { const run = await readRun($, session); if (run) observe($, run); }
+      else {
+        const run = await readRun($, session);
+        // The person can still decline before preparation, for example by
+        // dismissing the agent picker. Nothing started, so close the board.
+        if (began && (!run || run.ready?.run_id === previousRunId)) end($, session);
+        else if (run) observe($, run);
+      }
     } catch {}
     return result;
   });

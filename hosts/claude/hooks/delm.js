@@ -640,8 +640,13 @@ function* stoppedStep(event, answer) {
   return {turnId: event.turnId, index: event.index, answer, toolUses: [], stopReason: 'end_turn', usage: null};
 }
 
+function launchable(args) {
+  try { return Boolean(parseAgents(args).task); }
+  catch { return false; }
+}
+
 export function register(on) {
-  registerBoard(on);
+  registerBoard(on, {accepts: launchable});
   on('session.start', async ($, e, next) => {
     await $.command.register({name: 'delm-status', description: 'Show the DeLM board', immediate: true});
     await $.command.register({name: 'delm-stop', description: 'Stop DeLM and save unfinished changes', immediate: true});
