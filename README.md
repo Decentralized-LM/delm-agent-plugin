@@ -97,7 +97,16 @@ Codex workers preserve saved skills, plugins, hooks, MCP configuration, and perm
 
 DeLM builds on **Decentralized Multi-Agent Systems with Shared Context**. See the [paper](https://arxiv.org/abs/2606.10662), [project website](https://yuzhenmao.github.io/DeLM/), and [research code](https://github.com/yuzhenmao/DeLM) for the method, evaluations, and agent trajectories.
 
-The Codex and Claude Code plugins were created by [Jerry Gu](https://github.com/jerry2247).
+Development of the Codex and Claude Code plugins was led by [Jerry Gu](https://github.com/jerry2247).
+
+## Contributors
+
+Thanks to all contributors:
+
+<p>
+  <a href="https://github.com/jerry2247"><img src="https://avatars.githubusercontent.com/u/88354083?v=4&amp;s=128" width="64" height="64" alt="Jerry Gu" title="Jerry Gu"></a>
+  <a href="https://github.com/ZachDeLong"><img src="https://avatars.githubusercontent.com/u/242496128?v=4&amp;s=128" width="64" height="64" alt="ZachDeLong" title="ZachDeLong"></a>
+</p>
 
 ## License
 
