@@ -112,4 +112,6 @@ test('billing refusals and real 404s are account errors; a 404 inside a 5xx body
   assert.match(explainModelError('400 {"error":{"message":"Your credit balance is too low to access the Anthropic API."}}'), /no credit/);
   assert.match(explainModelError('404 {"error":{"type":"not_found_error","message":"model: nope"}}'), /does not offer/);
   assert.doesNotMatch(explainModelError('500 Internal server error, 404 tokens were processed'), /does not offer/);
+  assert.match(explainModelError('429 {"error":{"type":"rate_limit_error","message":"You have reached your specified API usage limits. You will regain access on 2026-12-01 at 00:00 UTC."}}'),
+    /monthly usage limit.*Anthropic Console/);
 });

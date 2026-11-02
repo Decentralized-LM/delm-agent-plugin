@@ -188,6 +188,9 @@ export function explainModelError(raw: string): string {
   if (/\b429\b|rate[ _]limit|overloaded|\b529\b/i.test(whole)) {
     return 'The provider is rate limiting or overloaded (' + text.slice(0, 160) + '). Wait a minute and run /delm:run again.';
   }
+  if (/specified API usage limits?|spend(ing)? limit|regain access on/i.test(whole)) {
+    return 'The API key has reached the monthly usage limit set for it (' + text.slice(0, 160) + '). Raise the limit in the Anthropic Console under Settings, Limits, or use another key, then run /delm:run again.';
+  }
   if (/credit balance|insufficient_quota|billing_not_active|payment required|\b402\b/i.test(whole)) {
     return 'The provider account has no credit for this login (' + text.slice(0, 160) + '). Add credit or run /login in Pi with another account.';
   }

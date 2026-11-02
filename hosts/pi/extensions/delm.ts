@@ -334,7 +334,7 @@ export default function (pi: ExtensionAPI) {
 
   /** Login and quota refusals are about the account; stop at once, before Pi retries them. */
   function accountError(raw: string): boolean {
-    return /out of extra usage|\b401\b|authentication|invalid[ -_]?(x-)?api[ -_]?key|unauthorized|token expired|not logged in|model not found|does not exist|unsupported model|\b404\b/i.test(raw);
+    return /out of extra usage|specified API usage limits?|spend(ing)? limit|regain access on|credit balance|insufficient_quota|\b401\b|authentication|invalid[ -_]?(x-)?api[ -_]?key|unauthorized|token expired|not logged in|model not found|does not exist|unsupported model|not_found_error|^\s*404\b/i.test(raw);
   }
 
   /** Context overflow is recovered by Pi's own compaction; the run goes on. */
