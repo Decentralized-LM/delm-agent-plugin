@@ -717,7 +717,8 @@ export default function (pi: ExtensionAPI) {
     const fence = {...current.finalization};
     current.settling = (async () => {
       try {
-        const begun = await controlOn(current, 'begin_settle', {generation: fence.generation, revision: fence.revision});
+        // Delivery compares and copies whole workspaces; large projects take minutes, so these waits are long.
+        const begun = await controlOn(current, 'begin_settle', {generation: fence.generation, revision: fence.revision}, 10 * 60 * 1000);
         if (current.stopRequested && (begun.finalization as {intent?: string})?.intent !== 'cancel') {
           const cancelled = await controlOn(current, 'cancel', {reason: 'User requested /delm-stop'});
           await applyActions((cancelled.actions as Action[]) || [], current);
@@ -726,7 +727,7 @@ export default function (pi: ExtensionAPI) {
         const agents = await stopWorkers(current);
         const final = await controlOn(current, 'settle', {
           generation: fence.generation, revision: fence.revision, agents, background_tasks_stopped: true,
-        });
+        }, 60 * 60 * 1000);
         await applyActions((final.actions as Action[]) || [], current);
       } catch (error) {
         if (run !== current || current.finished) return;   // abandon or a final action already reported
@@ -735,8 +736,10 @@ export default function (pi: ExtensionAPI) {
         // A cancel or an update replaced this finalization while it was being settled; the newer one is handled below.
         if (/obsolete/i.test(message) && (!current.finalization || current.finalization.generation !== fence.generation)) return;
         try { await controlOn(current, 'settlement_failed', {generation: fence.generation, revision: fence.revision}); } catch { /* Recovery. */ }
+        // A failed delivery ends the run: the runtime keeps the private workspaces, and this session
+        // releases the project through the same path as a lost runtime, saving what it can.
         current.failure = message;
-        notify('DeLM: ' + current.failure + ' Private workspaces are preserved for recovery.', 'error');
+        await abandon(current, 'delivery failed (' + message.replace(/\.$/, '') + ')');
       }
     })();
     try { await current.settling; } finally { current.settling = null; }
