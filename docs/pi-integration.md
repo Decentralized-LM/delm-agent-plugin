@@ -162,6 +162,10 @@ Exercised so far:
   the project unchanged with no worker process (checked by pid), and a second run delivered nine files with the final
   board repainted at Complete and no Pi truncation notice.
 
+- Pi 1.5.0 (2026-11-02): the 18-test suite, the installer's Pi tests and the three live scenarios on Haiku
+  workers pass unchanged. The release's one adapter-relevant change, JSON-Schema coercion of tool
+  arguments before extension hooks, applies equally to the ticket and the sidecar call, so argument
+  parity holds. CI now pins 1.5.0.
 - CI (`.github/workflows/pi-host.yml`, first green run 2026-10-26): the runtime build, package staging and
   validation, the Pi suite with the fake-worker lifecycle, the installer's Pi tests and the controller tests
   pass on both `macos-15` (arm64) and `macos-15-intel` (x86_64) with Pi 1.4.0.
