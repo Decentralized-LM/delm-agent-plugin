@@ -162,6 +162,13 @@ Exercised so far:
   the project unchanged with no worker process (checked by pid), and a second run delivered nine files with the final
   board repainted at Complete and no Pi truncation notice.
 
+- a long DeepSWE task on macOS (2026-11-02/03, `fastapi-deprecation-response-headers`, Haiku 5.5 workers,
+  Pi 1.5.0, auto-compaction forced at 25k tokens): the peers compacted 32 times between them and kept
+  their turns, board tools and check receipts; the result was delivered in 16 minutes and the task's
+  official verifier passed 3,271 of 3,271 tests. An earlier attempt exposed a runtime bug, fixed in the
+  same branch: a nested `.git` directory inside a worker's rebuilt environment refused delivery and
+  recovery alike; nested git metadata is now invisible to capture. An Opus 4.8 run was cut short by the
+  API key's spend limit after 28 minutes and was handled as an account error.
 - Pi 1.5.0 (2026-11-02): the 18-test suite, the installer's Pi tests and the three live scenarios on Haiku
   workers pass unchanged. The release's one adapter-relevant change, JSON-Schema coercion of tool
   arguments before extension hooks, applies equally to the ticket and the sidecar call, so argument
@@ -170,4 +177,4 @@ Exercised so far:
   validation, the Pi suite with the fake-worker lifecycle, the installer's Pi tests and the controller tests
   pass on both `macos-15` (arm64) and `macos-15-intel` (x86_64) with Pi 1.4.0.
 
-Not exercised yet: steering an actively streaming worker from the UI, resuming stopped workers after an extension reload (the tokened `recover` path Claude Code uses; Pi only saves and releases), forked session inheritance against a real session file, a long multi-hour task with auto-compaction, Linux (deferred; the runtime's process supervision is macOS-only), and distribution through the npm installer. See [development](development.md#pi-plugin) for the contributor build.
+Not exercised yet: steering an actively streaming worker from the UI, resuming stopped workers after an extension reload (the tokened `recover` path Claude Code uses; Pi only saves and releases), forked session inheritance against a real session file, a multi-hour task on a frontier model, Linux (deferred; the runtime's process supervision is macOS-only), and distribution through the npm installer. See [development](development.md#pi-plugin) for the contributor build.
