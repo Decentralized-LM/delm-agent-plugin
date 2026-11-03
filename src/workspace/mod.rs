@@ -578,7 +578,12 @@ fn scan_dir(
         let text = name
             .to_str()
             .context("non-UTF-8 repository paths are unsupported")?;
-        if !include_git && prefix.is_empty() && text.eq_ignore_ascii_case(".git") {
+        // Git administration is never content: the repository's own `.git` is left to the
+        // original project, and a nested one (a vendored clone, a package that ships its
+        // repository metadata inside an environment) is invisible to comparison, delivery
+        // and preservation rather than a reason to refuse them. A capture that keeps git
+        // (`include_git`) still carries the repository's own `.git` only.
+        if text.eq_ignore_ascii_case(".git") && (!include_git || !prefix.is_empty()) {
             continue;
         }
         let relative = if prefix.is_empty() {

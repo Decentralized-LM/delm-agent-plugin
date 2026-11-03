@@ -144,7 +144,6 @@ export function hostNotes(): string {
     '- Never supply the _delm field on a board tool; the host binds it.',
     '- After calling delm_complete, finish your reply and end the turn. The runtime resumes you when shared work changes or when the user updates the request.',
     '- Work only inside your current working directory, which is your private copy of the project.',
-    '- Do not create git commits, branches, tags or stashes, even when the request asks for one: the runtime delivers files, not git history, and refuses changes under .git. Leave the changes in the working tree and say in your summary what the user should commit.',
   ].join('\n');
 }
 
