@@ -169,6 +169,11 @@ Exercised so far:
   same branch: a nested `.git` directory inside a worker's rebuilt environment refused delivery and
   recovery alike; nested git metadata is now invisible to capture. An Opus 4.8 run was cut short by the
   API key's spend limit after 28 minutes and was handled as an account error.
+- release integration (2026-11-03): the **Prepare macOS release** workflow ran green on the fork with
+  publishing disabled (identity, both native builds with the full verification, assembly of all three
+  packages with the Pi validation record). A locally assembled unsigned tree pushed to a preview branch
+  installed with `pi install git:…@marketplace-preview`, loaded as a user package, and passed the live
+  stop scenario. The npm installer's `--host pi` has 80 passing tests including an end-to-end CLI run.
 - Pi 1.5.0 (2026-11-02): the 18-test suite, the installer's Pi tests and the three live scenarios on Haiku
   workers pass unchanged. The release's one adapter-relevant change, JSON-Schema coercion of tool
   arguments before extension hooks, applies equally to the ticket and the sidecar call, so argument
