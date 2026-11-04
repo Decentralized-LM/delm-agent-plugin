@@ -14,7 +14,7 @@ import tempfile
 SOURCE = Path(__file__).resolve().parents[1] / "packages/installer"
 PACKAGE_FILES = ["LICENSE", "NOTICE", "README.md", "bin/delm-agent.mjs",
                  "lib/claude.mjs", "lib/hosts.mjs", "lib/installer.mjs", "lib/maintenance.mjs", "lib/native.mjs",
-                 "lib/release.mjs", "package.json", "release.json"]
+                 "lib/pi.mjs", "lib/release.mjs", "package.json", "release.json"]
 REPOSITORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
 UNSET = object()
 
@@ -33,10 +33,10 @@ def readme(repository, previous_repositories):
                   if previous_repositories else "This release has no approved previous repository names.")
     return f"""# DeLM installer
 
-Install and manage native DeLM plugins for Codex or Claude Code. Both use the
+Install and manage native DeLM plugins for Codex, Claude Code or Pi. All three use the
 `marketplace` branch of [the DeLM distribution](https://github.com/{repository})
 and the identity `delm@delm`. One command detects your installed host and offers
-a choice when both Codex and Claude Code are available.
+a choice when more than one host CLI is available.
 
 ## Install
 
@@ -51,8 +51,8 @@ or source checkout is needed.
 npx --yes delm-agent@latest install
 ```
 
-If one host CLI is available, it is selected automatically. If both are available,
-choose **Codex**, **Claude Code**, or **Both**. Cancelling the selection makes no
+If one host CLI is available, it is selected automatically. If several are available,
+choose one of them or **All**. Cancelling the selection makes no
 changes. If neither is available, install a host CLI first.
 
 For Codex, restart, open `/hooks`, and review and trust DeLM when requested.
@@ -95,13 +95,15 @@ All commands use the same host selection. Scripts can skip the menu:
 ```sh
 npx --yes delm-agent@latest install --host codex
 npx --yes delm-agent@latest install --host claude
+npx --yes delm-agent@latest install --host pi
 npx --yes delm-agent@latest install --host both
+npx --yes delm-agent@latest install --host all
 ```
 
-If both CLIs are available, noninteractive commands and `--json` need an explicit
+If more than one CLI is available, noninteractive commands and `--json` need an explicit
 selection. npm's `--yes` skips its download confirmation, not this host choice.
 
-Use `--codex PATH` or `--claude PATH` to select an existing CLI. A single executable
+Use `--codex PATH`, `--claude PATH` or `--pi PATH` to select an existing CLI. A single executable
 option implies that host; supplying both implies both hosts. Options conflicting
 with an explicit single host are rejected. Use `--json` for structured output.
 For one host, output includes `host`; for both, output includes `command`,
@@ -201,7 +203,7 @@ def prepare(repository, output, native_release=None, source=SOURCE, previous_rep
     metadata["repository"] = {"type": "git", "url": f"git+https://github.com/{repository}.git"}
     metadata["homepage"] = f"https://github.com/{repository}#readme"
     metadata["bugs"] = {"url": f"https://github.com/{repository}/issues"}
-    metadata["keywords"] = ["delm", "codex", "claude-code", "ai-agents", "cli"]
+    metadata["keywords"] = ["delm", "codex", "claude-code", "pi", "ai-agents", "cli"]
     metadata["publishConfig"] = {"access": "public", "registry": "https://registry.npmjs.org/",
                                  "tag": "next" if "-" in metadata["version"] else "latest"}
     metadata.pop("scripts", None)

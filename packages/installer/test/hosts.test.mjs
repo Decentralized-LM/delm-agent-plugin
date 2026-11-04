@@ -53,14 +53,20 @@ test('host and executable options have explicit and unambiguous precedence', () 
   assert.deepEqual(validateHostOptions({claude: './custom claude'}), ['claude']);
   assert.deepEqual(validateHostOptions({codex: './a', claude: './b'}), ['codex', 'claude']);
   assert.deepEqual(validateHostOptions({host: 'both', claude: './b'}), ['codex', 'claude']);
+  assert.deepEqual(validateHostOptions({host: 'pi'}), ['pi']);
+  assert.deepEqual(validateHostOptions({pi: './custom pi'}), ['pi']);
+  assert.deepEqual(validateHostOptions({host: 'all'}), ['codex', 'claude', 'pi']);
+  assert.deepEqual(validateHostOptions({host: 'all', pi: './p'}), ['codex', 'claude', 'pi']);
+  assert.deepEqual(validateHostOptions({codex: './a', pi: './p'}), ['codex', 'pi']);
   for (const options of [
-    {host: ''}, {host: 'other'}, {host: 'Codex'}, {codex: ''}, {claude: '  '},
+    {host: ''}, {host: 'other'}, {host: 'Codex'}, {codex: ''}, {claude: '  '}, {pi: ''},
     {codex: false}, {host: 'codex', claude: 'claude'}, {host: 'claude', codex: 'codex'},
+    {host: 'both', pi: './p'}, {host: 'pi', codex: './c'},
   ]) assert.throws(() => validateHostOptions(options), {code: 'USAGE'});
 });
 
 test('a sole available CLI is automatically selected in all output modes', async () => {
-  for (const host of ['codex', 'claude']) {
+  for (const host of ['codex', 'claude', 'pi']) {
     for (const json of [true, false]) {
       assert.deepEqual(await selectHosts({json}, {
         interactive: false,
@@ -81,6 +87,9 @@ test('explicit hosts and executable options skip both discovery and prompting', 
   ]);
   assert.deepEqual(await selectHosts({codex: '/custom codex'}, dependencies), [{host: 'codex', codex: '/custom codex'}]);
   assert.deepEqual(await selectHosts({claude: '/custom claude'}, dependencies), [{host: 'claude', claude: '/custom claude'}]);
+  assert.deepEqual(await selectHosts({host: 'all', pi: '/custom pi'}, dependencies), [
+    {host: 'codex', codex: 'codex'}, {host: 'claude', claude: 'claude'}, {host: 'pi', pi: '/custom pi'},
+  ]);
 });
 
 test('both detected hosts require a selection in JSON or noninteractive mode', async () => {
@@ -89,27 +98,36 @@ test('both detected hosts require a selection in JSON or noninteractive mode', a
       interactive,
       discover: async () => ({codex: '/a', claude: '/b'}),
       prompt: () => assert.fail('Noninteractive mode must not prompt'),
-    }), error => error.code === 'HOST_SELECTION_REQUIRED' && error.message.includes('--host both'));
+    }), error => error.code === 'HOST_SELECTION_REQUIRED' && error.message.includes('--host both') && error.message.includes('--host all'));
   }
+  await assert.rejects(selectHosts({json: true}, {
+    interactive: true,
+    discover: async () => ({claude: '/b', pi: '/c'}),
+    prompt: () => assert.fail('Noninteractive mode must not prompt'),
+  }), error => error.code === 'HOST_SELECTION_REQUIRED' && error.message.startsWith('Claude Code and Pi are available'));
 });
 
-test('interactive selection passes exactly the chosen host and its PATH executable', async () => {
-  for (const chosen of [['codex'], ['claude'], ['codex', 'claude']]) {
-    let prompts = 0;
+test('interactive selection offers only the detected hosts and passes exactly the chosen ones', async () => {
+  const executables = {codex: '/one', claude: '/two', pi: '/three'};
+  for (const chosen of [['codex'], ['claude'], ['pi'], ['codex', 'claude'], ['codex', 'claude', 'pi']]) {
+    let offered = null;
     assert.deepEqual(await selectHosts({}, {
       interactive: true,
-      discover: async () => ({codex: '/one', claude: '/two'}),
-      prompt: async () => { prompts++; return chosen; },
-    }), chosen.map(host => ({host, [host]: host === 'codex' ? '/one' : '/two'})));
-    assert.equal(prompts, 1);
+      discover: async () => executables,
+      prompt: async ({hosts}) => { offered = hosts; return chosen; },
+    }), chosen.map(host => ({host, [host]: executables[host]})));
+    assert.deepEqual(offered, ['codex', 'claude', 'pi']);
   }
+  let offered = null;
+  await selectHosts({}, {interactive: true, discover: async () => ({claude: '/two', pi: '/three'}), prompt: async ({hosts}) => { offered = hosts; return ['pi']; }});
+  assert.deepEqual(offered, ['claude', 'pi']);
 });
 
 test('no available host gives setup guidance without prompting', async () => {
   await assert.rejects(selectHosts({}, {
     discover: async () => ({}),
     prompt: () => assert.fail('Cannot select an unavailable host'),
-  }), error => error.code === 'MISSING_HOST' && error.message.includes('--claude PATH') && error.message.includes('--codex PATH'));
+  }), error => error.code === 'MISSING_HOST' && error.message.includes('--claude PATH') && error.message.includes('--codex PATH') && error.message.includes('--pi PATH'));
 });
 
 function promptFixture() {
@@ -128,8 +146,8 @@ test('selection prompt has no default, retries invalid input, and cleans signal 
   const selected = promptForHosts(streams);
   streams.input.write('\nother\n2\n');
   assert.deepEqual(await selected, ['claude']);
-  assert.match(streams.text(), /1\. Codex[\s\S]*2\. Claude Code[\s\S]*3\. Both/);
-  assert.equal((streams.text().match(/Enter 1, 2, or 3/g) ?? []).length, 2);
+  assert.match(streams.text(), /1\. Codex[\s\S]*2\. Claude Code[\s\S]*3\. Pi[\s\S]*4\. All/);
+  assert.equal((streams.text().match(/Enter 1, 2, 3, or 4/g) ?? []).length, 2);
   assert.deepEqual(streams.signals.listeners('SIGINT'), [existing]);
   assert.equal(streams.signals.listenerCount('SIGTERM'), 0);
   assert.equal(streams.input.listenerCount('data'), 0);

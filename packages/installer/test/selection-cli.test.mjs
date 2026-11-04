@@ -35,10 +35,18 @@ appendFileSync(process.env.DELM_SELECTION_LOG, JSON.stringify({host, args}) + '\
 const output = value => console.log(JSON.stringify(value));
 const removed = process.env.DELM_SELECTION_STATE + '-' + host;
 if (args[0] === '--version') {
-  console.log(host === 'codex' ? 'codex-cli 0.157.0' : '2.1.289 (Claude Code)');
+  console.log(host === 'codex' ? 'codex-cli 0.157.0' : host === 'pi' ? '1.5.0' : '2.1.289 (Claude Code)');
 } else if (host === process.env.DELM_SELECTION_FAIL) {
   console.error('Fixture native manager unavailable');
   process.exitCode = 3;
+} else if (host === 'pi') {
+  const source = 'git:github.com/delm-fixture/selection@marketplace';
+  if (args[0] === 'list') {
+    console.log(existsSync(removed) ? 'No packages installed.' : 'User packages:\\n  ' + source + '\\n    /resolved/selection');
+  } else if (args[0] === 'remove') {
+    writeFileSync(removed, 'removed');
+    console.log('Removed ' + source);
+  } else throw new Error('Unexpected fixture Pi command: ' + args.join(' '));
 } else if (host === 'codex') {
   if (args[1] === 'marketplace' && args[2] === 'list') {
     output({marketplaces: [{name: 'delm', marketplaceSource: {sourceType: 'git', source: 'https://github.com/delm-fixture/selection.git'}}]});
@@ -80,7 +88,7 @@ if (args[0] === '--version') {
   };
 }
 
-for (const host of ['codex', 'claude']) {
+for (const host of ['codex', 'claude', 'pi']) {
   test(`CLI selects the only detected host (${host}) and preserves single-host JSON`, t => {
     const native = fixture(t, [host]);
     const result = native.invoke(['status', '--json']);
@@ -90,12 +98,22 @@ for (const host of ['codex', 'claude']) {
     assert.equal(state.host, host);
     assert.equal(state.command, 'status');
     assert.equal(state.installed, true);
-    assert.equal(state.version, '0.3.0');
+    assert.equal(state.version, host === 'pi' ? null : '0.3.0');
     assert.equal(state.results, undefined);
-    assert.ok(native.calls().some(call => call.args[0] === 'plugin'));
+    assert.ok(native.calls().some(call => call.args[0] === (host === 'pi' ? 'list' : 'plugin')));
     assert.ok(native.calls().every(call => call.host === host));
   });
 }
+
+test('CLI manages all three hosts in sequence with --host all', t => {
+  const native = fixture(t, ['codex', 'claude', 'pi']);
+  const result = native.invoke(['remove', '--host', 'all', '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  const summary = JSON.parse(result.stdout);
+  assert.equal(summary.success, true);
+  assert.deepEqual(summary.results.map(item => item.host), ['codex', 'claude', 'pi']);
+  assert.ok(['codex', 'claude', 'pi'].every(host => native.removed(host)));
+});
 
 test('CLI rejects ambiguous piped and JSON requests before native management', t => {
   const native = fixture(t, ['codex', 'claude']);

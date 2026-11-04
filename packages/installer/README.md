@@ -1,6 +1,6 @@
 # DeLM installer
 
-The published [`delm-agent`](https://www.npmjs.com/package/delm-agent) package installs DeLM for Codex and Claude Code:
+The published [`delm-agent`](https://www.npmjs.com/package/delm-agent) package installs DeLM for Codex, Claude Code and Pi:
 
 ```sh
 npx --yes delm-agent@latest install
@@ -8,7 +8,7 @@ npx --yes delm-agent@latest install
 
 The source package keeps `private: true` and an unconfigured `release.json` to prevent accidental publication. Release preparation supplies the repository address and creates the public npm tarball.
 
-The installer is a small, dependency-free Node CLI. It detects the installed host and delegates installation, updates, removal, and status to its native plugin manager. When both Codex and Claude Code are available, you choose one or both. A prepared package installs `delm@delm` from its configured repository's `marketplace` branch, using that host's native catalog. Preparation takes one GitHub `OWNER/REPO` destination and fixes it inside that package; users cannot override it with a CLI flag. The installer does not replace either host, edit configuration files itself, grant permissions, start workers, or run an updater. The installer version is independent of the plugin version; a new plugin release does not require publishing a new installer.
+The installer is a small, dependency-free Node CLI. It detects the installed host and delegates installation, updates, removal, and status to its native plugin manager. When more than one host CLI is available, you choose which to manage. A prepared package installs `delm@delm` from its configured repository's `marketplace` branch through the Codex and Claude Code catalogs, and the Pi package from that branch as a git source. Preparation takes one GitHub `OWNER/REPO` destination and fixes it inside that package; users cannot override it with a CLI flag. The installer does not replace either host, edit configuration files itself, grant permissions, start workers, or run an updater. The installer version is independent of the plugin version; a new plugin release does not require publishing a new installer.
 
 ## Requirements and commands
 
@@ -28,7 +28,7 @@ npx --yes delm-agent@latest remove
 All four commands use the same selection rules:
 
 - When only one host CLI is available on `PATH`, the installer selects it automatically.
-- When both are available, an interactive terminal offers **Codex**, **Claude Code**, or **Both**. There is no preselected answer; cancelling exits before changing either host.
+- When several are available, an interactive terminal lists the detected hosts and **All**. There is no preselected answer; cancelling exits before changing any host.
 - When neither is available, the installer explains which CLI to install before trying again.
 
 For a script or a specific target, choose explicitly:
@@ -36,18 +36,22 @@ For a script or a specific target, choose explicitly:
 ```sh
 npx --yes delm-agent@latest install --host codex
 npx --yes delm-agent@latest install --host claude
+npx --yes delm-agent@latest install --host pi
 npx --yes delm-agent@latest install --host both
+npx --yes delm-agent@latest install --host all
 ```
 
-`--host` also applies to update, removal, and status. When both CLIs are detected, noninteractive commands and `--json` require an explicit selection instead of guessing. The `--yes` option belongs to npm and suppresses its package-download confirmation; it does not choose a DeLM host.
+`--host` also applies to update, removal, and status. `both` means Codex and Claude Code, `all` every detected host. When more than one CLI is detected, noninteractive commands and `--json` require an explicit selection instead of guessing. The `--yes` option belongs to npm and suppresses its package-download confirmation; it does not choose a DeLM host.
 
-Use `--codex PATH` or `--claude PATH` to select a custom executable, including a relative path. Each option implies its host if `--host` is omitted; supplying both implies both hosts. An option that conflicts with an explicit single host is rejected. All native commands run in temporary directories away from project-specific configuration. Existing `CODEX_HOME` and `CLAUDE_CONFIG_DIR` selections are respected.
+Use `--codex PATH`, `--claude PATH` or `--pi PATH` to select a custom executable, including a relative path. Each option implies its host if `--host` is omitted; supplying several implies those hosts. An option that conflicts with an explicit single host is rejected. All native commands run in temporary directories away from project-specific configuration. Existing `CODEX_HOME` and `CLAUDE_CONFIG_DIR` selections are respected.
 
 Selecting both runs the native operations in sequence and reports each outcome. A failure in one host does not undo a successful operation in the other, and the overall command exits with an error if either fails. Retry only the failed host with its explicit flag. Single-host `--json` output retains its `host` field; a both-host response contains `command`, `success`, `results`, and `errors`, with each error identifying its host and code.
 
 ## Activation and maintenance
 
 After installation, restart Codex, open `/hooks`, and review and trust the DeLM hooks when requested. Restart again after granting trust, then invoke `$delm:run <task>`. Updates retain Codex's native hook-review requirements. Stop active DeLM work before updating or removing its plugin. Removal retains saved work, accounts, unrelated plugins, and the marketplace registration.
+
+For Pi, the installer adds the release's git source (`git:github.com/OWNER/REPO@marketplace`) to your user packages with `pi install`, updates it with `pi update --extension`, and removes it with `pi remove`. It manages only user packages and refuses another registration of the same repository. Start a new Pi session after installing or updating, then invoke `/delm:run <task>`.
 
 For Claude Code, restart to load the plugin, then invoke `/delm:run <task>`. The installer explicitly manages user scope. It validates the marketplace URL and branch and refuses duplicate or other-scope DeLM registrations. Removal calls native `uninstall --keep-data`, retaining the plugin's persistent data and marketplace. Claude's native uninstall can remove the plugin's stored options and secrets; host login credentials are separate and untouched. Native policy refusals remain refusals; the installer never automatically accepts marketplace shell commands or grants tool permissions.
 

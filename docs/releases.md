@@ -1,6 +1,6 @@
 # macOS releases
 
-Public releases contain separate self-contained Codex and Claude Code plugins with identical universal macOS runtime bytes. Each package has its native manifest, run skill, lifecycle integration, and license files; Claude also includes its native MCP sidecar configuration and shared worker instructions. Users need Git and their selected host CLI, without a compiler or source checkout. Claude Code 2.1.289 or newer is the supported native API floor. Windows and Linux are separate future work.
+Public releases contain separate self-contained Codex, Claude Code and Pi plugins with identical universal macOS runtime bytes. Each package has its native manifest, lifecycle integration, and license files; Codex and Claude Code carry the run skill, Claude also its native MCP sidecar configuration, and Claude and Pi the shared worker instructions. The marketplace tree also carries a root `package.json` so Pi can install the whole branch as a git package (`pi install git:github.com/OWNER/REPO@marketplace`) and load `plugins/delm-pi` from it. Users need Git and their selected host CLI, without a compiler or source checkout. Claude Code 2.1.289 or newer is the supported native API floor. Windows and Linux are separate future work.
 
 The public source repository is [Decentralized-LM/delm-agent-plugin](https://github.com/Decentralized-LM/delm-agent-plugin). Native releases are published there. The published [`delm-agent` npm installer](https://www.npmjs.com/package/delm-agent) is **0.1.0** and still uses `jerry2247/delm-agent-plugin`, which redirects to the transferred repository. Preserve that redirect and existing marketplace registrations at the old address; this native release does not require an npm republish.
 
@@ -18,7 +18,7 @@ Run **Prepare macOS release** with `source_ref` set to the clean candidate commi
 
 Successful preparation produces `unsigned-macos-review-not-for-distribution` and `prepared-npm-installer-not-published`. The installer artifact contains its tarball, `preparation.json`, and `SHA256SUMS`. Its preparation record binds the configured repository and source revision to the native package metadata. These artifacts let contributors inspect the exact files before publication.
 
-Keep `Cargo.toml`, `Cargo.lock`, `.codex-plugin/plugin.json`, and `hosts/claude/.claude-plugin/plugin.json` on the same version while iterating. The version can remain unchanged until a public release is ready. Do not add a root `plugin.json`: current Codex interprets it as the portable format and skips native lifecycle hooks.
+Keep `Cargo.toml`, `Cargo.lock`, `.codex-plugin/plugin.json`, `hosts/claude/.claude-plugin/plugin.json` and `hosts/pi/package.json` on the same version while iterating. The version can remain unchanged until a public release is ready. Do not add a root `plugin.json`: current Codex interprets it as the portable format and skips native lifecycle hooks.
 
 The native plugin version in this source is **0.3.1**; the published npm installer is **0.1.0**. These are separate version sequences. The unchanged installer can install newer native marketplace releases through the preserved GitHub redirect without being republished. A future change to installer behavior, its embedded destination, or approved former repository addresses requires a new installer version.
 
@@ -31,6 +31,10 @@ python3 scripts/qualify_release.py smoke --runtime target/release/delm --archite
 ```
 
 Use `x86_64` on an actual Intel Mac. Every smoke output directory must be new; previous evidence is preserved. A local universal binary can also be passed to `package_release.py --runtime ... --output ... --repository OWNER/REPOSITORY --revision <base-commit>`. Uncommitted artifacts record `sourceDirty: true`, a runtime source hash, and explicitly identify `sourceRevision` as the base commit. They cannot pass publication qualification. Cross-compilation and Rosetta checks are useful development evidence; Rosetta is explicitly rejected as native Intel qualification.
+
+## Pi package validation
+
+The Pi package needs no model account to qualify. Release preparation stages it from the same runtime, checks its manifest and TypeScript offline, probes the staged runtime for the Pi commands, and records that in `release.json` as `piValidation`. The repository's CI runs the Pi suite (unit tests and the fake-worker lifecycle against the real controller) on Apple Silicon and Intel with the pinned Pi release; a release should be cut from a commit where that workflow is green.
 
 ## Claude candidate qualification
 

@@ -5,6 +5,7 @@ import {join, resolve} from 'node:path';
 
 import {InstallerError, execute} from './native.mjs';
 import {manageClaude, describeClaude} from './claude.mjs';
+import {managePi, describePi} from './pi.mjs';
 import {assertMaintenanceSafe, installationReadiness} from './maintenance.mjs';
 import {matchesRepositoryUrl, validateRelease} from './release.mjs';
 export {InstallerError, execute} from './native.mjs';
@@ -36,12 +37,13 @@ export function validateRequest(command, {platform = process.platform, release =
 
 // Distribution identity is fixed at package preparation, never by a CLI flag.
 // Unit tests inject release/run; native tests exercise a prepared package.
-export async function manage(command, {host = 'codex', codex, claude, platform = process.platform, run = execute, release = RELEASE, checkMaintenance = assertMaintenanceSafe} = {}) {
-  if (!['codex', 'claude'].includes(host)) throw new InstallerError('Choose --host codex or --host claude.', 'USAGE');
-  if ((host !== 'codex' && codex !== undefined) || (host !== 'claude' && claude !== undefined)) {
-    throw new InstallerError('The executable option must match --host. Use --codex with codex or --claude with claude.', 'USAGE');
+export async function manage(command, {host = 'codex', codex, claude, pi, platform = process.platform, run = execute, release = RELEASE, checkMaintenance = assertMaintenanceSafe} = {}) {
+  const executables = {codex, claude, pi};
+  if (!(host in executables)) throw new InstallerError('Choose --host codex, --host claude, or --host pi.', 'USAGE');
+  if (Object.entries(executables).some(([name, value]) => name !== host && value !== undefined)) {
+    throw new InstallerError('The executable option must match --host. Use --codex with codex, --claude with claude, or --pi with pi.', 'USAGE');
   }
-  let executable = (host === 'codex' ? codex : claude) ?? host;
+  let executable = executables[host] ?? host;
   if (typeof executable !== 'string' || !executable.trim()) throw new InstallerError(`--${host} requires an executable path.`, 'USAGE');
   if (executable.includes('/') || executable.includes('\\')) executable = resolve(executable);
   validateRequest(command, {platform, release});
@@ -51,7 +53,9 @@ export async function manage(command, {host = 'codex', codex, claude, platform =
     const beforeMutation = () => checkMaintenance({host});
     const result = host === 'claude'
       ? await manageClaude(command, {claude: executable, release, run: nativeRun, beforeMutation})
-      : await manageNative(command, {codex: executable, release, run: nativeRun, beforeMutation});
+      : host === 'pi'
+        ? await managePi(command, {pi: executable, release, run: nativeRun, beforeMutation})
+        : await manageNative(command, {codex: executable, release, run: nativeRun, beforeMutation});
     return {host, ...result, readiness: installationReadiness(host, result)};
   } finally {
     await rm(cwd, {recursive: true, force: true});
@@ -153,6 +157,7 @@ async function manageNative(command, {codex, release: RELEASE, run, beforeMutati
 
 export function describe(result) {
   if (result.host === 'claude') return describeClaude(result);
+  if (result.host === 'pi') return describePi(result);
   const label = result.version ? `DeLM ${result.version}` : 'DeLM';
   if (result.command === 'status') {
     const lines = result.installed

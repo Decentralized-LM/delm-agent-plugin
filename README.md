@@ -32,20 +32,27 @@ DeLM uses your existing host account and starts agents only when you ask.
 
 ## Install on macOS
 
-Install either or both plugins with one command:
+Install the plugin for any of the three hosts with one command:
 
 ```sh
 npx --yes delm-agent@latest install
 ```
 
-Requires macOS, Node.js 22 or later, Git, and the CLI for your chosen host with its login completed. Claude Code requires version **2.1.289 or later**.
+Requires macOS, Node.js 22 or later, Git, and the CLI for your chosen host with its login completed. Claude Code requires version **2.1.289 or later**; Pi requires **1.4.0 or later**.
 
-The installer detects your installed host. If both Codex and Claude Code are available, choose **Codex**, **Claude Code**, or **Both**. Explicit host flags are available for [scripted installation](packages/installer/README.md#host-selection). Each plugin uses its host's native plugin manager.
+The installer detects your installed hosts. If more than one is available, choose one of them or **All**. Explicit host flags are available for [scripted installation](packages/installer/README.md#host-selection). Each plugin uses its host's native package manager.
+
+Pi can also install the plugin directly from a published release:
+
+```sh
+pi install git:github.com/Decentralized-LM/delm-agent-plugin@marketplace
+```
 
 | Host | After installation |
 | --- | --- |
 | Codex | Restart, open `/hooks`, and review and trust the DeLM hooks. Restart once more to load them. |
 | Claude Code | Restart to load DeLM. Review any trust or permission prompts Claude presents. |
+| Pi | Start a new Pi session to load DeLM. |
 
 See [support](docs/support.md) for updates, removal, and troubleshooting, or the [release guide](docs/releases.md) for publication requirements.
 
@@ -57,7 +64,7 @@ Open your host in the project you want to change, then invoke DeLM with a reques
 | --- | --- |
 | Codex | `$delm:run <your task>` |
 | Claude Code | `/delm:run <your task>` |
-| Pi | `/delm:run <your task>`; a live board opens above the editor, `/delm:board` and `/delm:status` control it, `/delm:stop` cancels, `/delm:recover` after an interrupted session (contributor build; see [development](docs/development.md#pi-plugin)) |
+| Pi | `/delm:run <your task>`; a live board opens above the editor, `/delm:board` and `/delm:status` control it, `/delm:stop` cancels, `/delm:recover` after an interrupted session |
 
 For example, in Claude Code:
 

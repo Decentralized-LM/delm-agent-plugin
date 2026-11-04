@@ -4,24 +4,27 @@ import {delimiter, resolve} from 'node:path';
 import {createInterface} from 'node:readline';
 import {InstallerError, manage, validateRequest} from './installer.mjs';
 
-export const HOST_LABELS = {codex: 'Codex', claude: 'Claude Code'};
+export const HOST_LABELS = {codex: 'Codex', claude: 'Claude Code', pi: 'Pi'};
 const HOSTS = Object.keys(HOST_LABELS);
+// `both` predates the Pi host and keeps its meaning; `all` covers every host.
+const GROUPS = {both: ['codex', 'claude'], all: [...HOSTS]};
+const CHOICES = 'Choose --host codex, --host claude, --host pi, --host both, or --host all.';
 
-export function validateHostOptions({host, codex, claude} = {}) {
-  if (host !== undefined && ![...HOSTS, 'both'].includes(host)) {
-    throw new InstallerError('Choose --host codex, --host claude, or --host both.', 'USAGE');
+export function validateHostOptions({host, codex, claude, pi} = {}) {
+  const executables = {codex, claude, pi};
+  if (host !== undefined && ![...HOSTS, ...Object.keys(GROUPS)].includes(host)) {
+    throw new InstallerError(CHOICES, 'USAGE');
   }
-  for (const [name, executable] of Object.entries({codex, claude})) {
+  for (const [name, executable] of Object.entries(executables)) {
     if (executable !== undefined && (typeof executable !== 'string' || !executable.trim())) {
       throw new InstallerError(`--${name} requires an executable path.`, 'USAGE');
     }
-    if (executable !== undefined && host !== undefined && host !== 'both' && host !== name) {
-      throw new InstallerError(`--${name} requires --host ${name} or --host both.`, 'USAGE');
+    if (executable !== undefined && host !== undefined && !(GROUPS[host] ?? [host]).includes(name)) {
+      throw new InstallerError(`--${name} requires --host ${name}, or a host group that includes it.`, 'USAGE');
     }
   }
-  if (host === 'both') return [...HOSTS];
-  if (host !== undefined) return [host];
-  const explicit = HOSTS.filter(name => ({codex, claude})[name] !== undefined);
+  if (host !== undefined) return [...(GROUPS[host] ?? [host])];
+  const explicit = HOSTS.filter(name => executables[name] !== undefined);
   return explicit.length ? explicit : null;
 }
 
@@ -50,7 +53,11 @@ export async function discoverHosts({env = process.env, platform = process.platf
   return available;
 }
 
-export function promptForHosts({input = process.stdin, output = process.stderr, signals = process} = {}) {
+export function promptForHosts({input = process.stdin, output = process.stderr, signals = process, hosts = HOSTS} = {}) {
+  const offered = HOSTS.filter(host => hosts.includes(host));
+  const everything = offered.length > 2 ? 'All' : 'Both';
+  const choices = Object.fromEntries([...offered.map((host, index) => [String(index + 1), [host]]), [String(offered.length + 1), [...offered]]]);
+  const range = offered.length > 1 ? offered.map((_, index) => index + 1).join(', ') + `, or ${offered.length + 1}` : '1 or 2';
   return new Promise((resolveSelection, reject) => {
     const terminal = createInterface({input, output, terminal: Boolean(input.isTTY && output.isTTY)});
     let settled = false;
@@ -68,10 +75,10 @@ export function promptForHosts({input = process.stdin, output = process.stderr, 
     };
     const cancel = () => finish(null, new InstallerError('Cancelled. No plugins were changed.', 'CANCELLED'));
     const onLine = answer => {
-      const choice = {'1': ['codex'], '2': ['claude'], '3': [...HOSTS]}[answer.trim()];
+      const choice = choices[answer.trim()];
       if (choice) finish(choice);
       else {
-        output.write('Enter 1, 2, or 3. Press Ctrl-C to cancel.\n');
+        output.write(`Enter ${range}. Press Ctrl-C to cancel.\n`);
         terminal.prompt();
       }
     };
@@ -80,8 +87,9 @@ export function promptForHosts({input = process.stdin, output = process.stderr, 
     terminal.once('SIGINT', cancel);
     signals.once('SIGINT', cancel);
     signals.once('SIGTERM', cancel);
-    output.write('Choose where to manage DeLM:\n\n  1. Codex\n  2. Claude Code\n  3. Both\n\n');
-    terminal.setPrompt('Choose 1, 2, or 3: ');
+    const menu = [...offered.map((host, index) => `  ${index + 1}. ${HOST_LABELS[host]}`), `  ${offered.length + 1}. ${everything}`];
+    output.write('Choose where to manage DeLM:\n\n' + menu.join('\n') + '\n\n');
+    terminal.setPrompt(`Choose ${range}: `);
     terminal.prompt();
   });
 }
@@ -97,12 +105,12 @@ export async function selectHosts(options = {}, {
     available = await discover();
     const detected = HOSTS.filter(host => available[host]);
     if (!detected.length) {
-      throw new InstallerError('No Codex or Claude Code CLI was found on PATH. Install either CLI first, or pass --codex PATH or --claude PATH. A desktop or IDE installation alone is insufficient.', 'MISSING_HOST');
+      throw new InstallerError('No Codex, Claude Code or Pi CLI was found on PATH. Install one first, or pass --codex PATH, --claude PATH or --pi PATH. A desktop or IDE installation alone is insufficient.', 'MISSING_HOST');
     }
     if (detected.length === 1) selected = detected;
     else if (options.json || !interactive) {
-      throw new InstallerError('Both Codex and Claude Code are available. Choose --host codex, --host claude, or --host both. Host selection requires an interactive terminal without --json.', 'HOST_SELECTION_REQUIRED');
-    } else selected = await prompt();
+      throw new InstallerError(`${detected.map(host => HOST_LABELS[host]).join(' and ')} are available. ${CHOICES} Host selection requires an interactive terminal without --json.`, 'HOST_SELECTION_REQUIRED');
+    } else selected = await prompt({hosts: detected});
   }
   return selected.map(host => ({host, [host]: options[host] ?? available[host] ?? host}));
 }

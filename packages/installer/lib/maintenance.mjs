@@ -94,7 +94,9 @@ export async function assertMaintenanceSafe({host, home = homedir()} = {}) {
       const claude = await record(join(path, 'claude.json'));
       const codex = await record(join(path, 'run.json'));
       if (claude && codex) throw new Error('Conflicting native host records');
-      if (claude && host === 'codex' || codex && host === 'claude') continue;
+      // Pi shares the Claude record layout and names its host in the record.
+      const recordHost = claude ? (claude.host === 'pi' ? 'pi' : 'claude') : codex ? 'codex' : null;
+      if (recordHost && recordHost !== host) continue;
       const value = claude ?? codex;
       const workspace = join(path, 'workspace');
       const workspaceInfo = await metadata(workspace);
@@ -115,7 +117,7 @@ export async function assertMaintenanceSafe({host, home = homedir()} = {}) {
       if (!value || !(TERMINAL.has(value.status) || failedBeforeStart || savedRecovery) || (claude && claude.finished !== true) || shutdownUnconfirmed || remaining) {
         const action = !value || ['preparation_failed', 'startup_failed', 'recovery_required'].includes(value.status)
           ? 'Inspect this run using the run-management commands in the DeLM support guide and resolve its recovery state'
-          : claude ? 'Use /delm-stop in its Claude conversation' : 'Stop DeLM in its owning conversation';
+          : claude?.host === 'pi' ? 'Use /delm:stop in its Pi session' : claude ? 'Use /delm-stop in its Claude conversation' : 'Stop DeLM in its owning conversation';
         throw new InstallerError(`DeLM run ${entry.name} is active or still needs recovery. ${action}, wait for confirmed shutdown and workspace cleanup, then retry. Saved work was not changed.`, 'ACTIVE_DELM_RUN');
       }
     }
@@ -134,6 +136,7 @@ export function installationReadiness(host, state) {
   else if (installation === 'disabled') nextSteps.push('Run install to enable the plugin.');
   else if (installation === 'not_installed') nextSteps.push('Run install to add the plugin.');
   else if (host === 'codex') nextSteps.push('Restart Codex, review DeLM in /hooks, and restart after granting trust.', 'Use $delm:run <task> in your project.');
+  else if (host === 'pi') nextSteps.push('Start a new Pi session to load the plugin.', 'Use /delm:run <task> in your project.');
   else nextSteps.push('Restart Claude Code and review its native trust or permission prompts.', 'Use /delm:run <task> in your project.');
   return {installation, session: 'not_checked', nextSteps};
 }

@@ -569,8 +569,17 @@ class BuildTests(unittest.TestCase):
             self.assertFalse((output / "plugins/delm/skills/run/local-notes.txt").exists())
             metadata = json.loads((output / "release.json").read_text())
             self.assertIn("hooks/hooks.json", metadata["files"])
-            self.assertEqual(set(metadata["hostPackages"]), {"codex", "claude"})
+            self.assertEqual(set(metadata["hostPackages"]), {"codex", "claude", "pi"})
             self.assertEqual(metadata["hostPackages"]["claude"]["files"]["bin/delm"], metadata["files"]["bin/delm"])
+            self.assertEqual(metadata["hostPackages"]["pi"]["files"]["bin/delm"], metadata["files"]["bin/delm"])
+            self.assertEqual(set(metadata["hostPackages"]["pi"]["files"]), {*build.PI_PACKAGE_FILES, "bin/delm"})
+            self.assertEqual(metadata["piValidation"]["kind"], "pi-package-validation")
+            root_manifest = json.loads((output / "package.json").read_text())
+            self.assertEqual(root_manifest["pi"]["extensions"], package_release.PI_EXTENSIONS)
+            self.assertEqual(root_manifest["repository"], "https://github.com/example/delm")
+            self.assertEqual(json.loads((output / "plugins/delm-pi/package.json").read_text())["repository"], "https://github.com/example/delm")
+            self.assertEqual((output / "plugins/delm-pi/worker.md").read_bytes(), (source / "plugin/worker.md").read_bytes())
+            self.assertIn("pi install git:github.com/example/delm@marketplace", (output / "README.md").read_text())
             self.assertEqual((output / "plugins/delm-claude/hooks/worker.md").read_bytes(),
                              (source / "plugin/worker.md").read_bytes())
             self.assertEqual(json.loads((output / ".claude-plugin/marketplace.json").read_text())["plugins"][0]["source"],
