@@ -20,7 +20,7 @@ Successful preparation produces `unsigned-macos-review-not-for-distribution` and
 
 Keep `Cargo.toml`, `Cargo.lock`, `.codex-plugin/plugin.json`, `hosts/claude/.claude-plugin/plugin.json` and `hosts/pi/package.json` on the same version while iterating. The version can remain unchanged until a public release is ready. Do not add a root `plugin.json`: current Codex interprets it as the portable format and skips native lifecycle hooks.
 
-The native plugin version in this source is **0.3.1**; the published npm installer is **0.1.0**. These are separate version sequences. The unchanged installer can install newer native marketplace releases through the preserved GitHub redirect without being republished. A future change to installer behavior, its embedded destination, or approved former repository addresses requires a new installer version.
+The native plugin version in this source is **0.4.0**, the first release with the Pi host; the installer in this source is **0.2.0**, which adds `--host pi` and `--host all`, and the published npm installer is still **0.1.0**. These are separate version sequences. The unchanged 0.1.0 installer keeps installing Codex and Claude Code from newer native marketplace releases through the preserved GitHub redirect; installing the Pi host through the installer needs 0.2.0 published. A change to installer behavior, its embedded destination, or approved former repository addresses always requires a new installer version.
 
 For uncommitted local work, build both host packages and exercise the runtime in disposable directories:
 
@@ -83,11 +83,11 @@ The release recorder requires both startup results through `--startup-root`, con
 
 When ready to publish:
 
-1. Commit the reviewed version metadata and create the matching source tag (`v0.3.1` for this release). Protect source tags and `delm-plugin-*` tags against replacement, and protect the `marketplace` branch.
+1. Commit the reviewed version metadata and create the matching source tag (`v0.4.0` for this release). Protect source tags and `delm-plugin-*` tags against replacement, and protect the `marketplace` branch.
 2. Configure the GitHub `release` environment with a required reviewer and these environment secrets: `APPLE_CERTIFICATE_BASE64` (Developer ID Application certificate as a base64-encoded P12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, and `CLAUDE_CODE_OAUTH_TOKEN` for the real Claude checks.
 3. Dispatch **Prepare macOS release** from that same tag with the tag as `source_ref`, `release_repository: Decentralized-LM/delm-agent-plugin`, `previous_repositories: ["jerry2247/delm-agent-plugin"]`, and `publish` disabled. Record the successful candidate run ID and verify its `headSha` equals the source tag's commit.
 4. Dispatch **Publish verified macOS candidate** with that `source_ref` tag and `candidate_run` ID. Leave `qualification_run` and `signed_run` empty for a new candidate. After environment approval, the workflow qualifies real Claude collaboration on both native architectures, signs the exact candidate, checks both signed native executions, and publishes automatically; the publisher receives repository write permission but no Apple credentials. Do not rebuild the candidate between qualification and publication.
-5. Verify installation, update, status, and removal through both hosts before announcing the release. Keep the published npm installer at **0.1.0**; the native 0.3.1 release does not require publishing the prepared npm artifact.
+5. Verify installation, update, status, and removal through all three hosts before announcing the release. Publish the prepared **0.2.0** npm installer after the signed marketplace is available, so `npx delm-agent install --host pi` works; until then Pi users install with `pi install git:github.com/OWNER/REPO@marketplace`.
 
 Failed native checks retain their evidence. Publication requires a valid signature, not Apple notarization. Release metadata records signing separately from notarization; signed-only packages never claim to be notarized. The supported installation path uses the hosts' Git-based plugin managers. Browser-downloaded copies can encounter additional macOS checks. Never disable Gatekeeper or remove quarantine to bypass a failure.
 
@@ -124,9 +124,9 @@ Restart Claude Code and use `/delm:run <task>`. Update with `claude plugin marke
 
 Repository-hosted installation is distinct from listing in OpenAI's public plugin directory. Publication does not imply directory approval.
 
-The `delm-agent` npm installer detects the installed host and delegates marketplace registration and installation to its native CLI. When both hosts are available, it offers Codex, Claude Code, or both. Scripts can choose explicitly with `--host codex`, `--host claude`, or `--host both`. Public installation requires Node.js 22 or later, Git, and the selected host CLI with its login completed.
+The `delm-agent` npm installer detects the installed hosts and delegates registration and installation to each native package manager. When several are available, it lists them and offers all. Scripts can choose explicitly with `--host codex`, `--host claude`, `--host pi`, `--host both` (Codex and Claude Code) or `--host all`. Public installation requires Node.js 22 or later, Git, and the selected host CLI with its login completed.
 
-The published **0.1.0** npm installer remains the installation path for this native release. Do not try to republish that immutable npm version. Only when releasing a separately versioned installer change, prepare its tarball with the intended repository and approved former addresses, verify its `SHA256SUMS`, and publish it after the signed native marketplace is available. The tarball contains the selected repository address, package metadata, and an explicit file allowlist. The source package retains `private: true`; publish the prepared tarball rather than changing that source setting.
+The published **0.1.0** npm installer keeps working for Codex and Claude Code; do not try to republish that immutable npm version. The Pi host is an installer change, so release **0.2.0**: prepare its tarball with the intended repository and approved former addresses, verify its `SHA256SUMS`, and publish it after the signed native marketplace is available. The tarball contains the selected repository address, package metadata, and an explicit file allowlist. The source package retains `private: true`; publish the prepared tarball rather than changing that source setting.
 
 ```sh
 gh run download RUN_ID --name prepared-npm-installer-not-published --dir .validation/installer-publication
@@ -136,7 +136,7 @@ npm login
 npm publish ./delm-agent-<new-installer-version>.tgz --access public
 ```
 
-These publication commands are for a future installer release, not native 0.3.1. Run them from this repository's checkout, replacing `RUN_ID` with the run containing the intentionally prepared new installer and `<new-installer-version>` with its version. Registry account ownership and authentication are required. Each published installer version is immutable; increment its package version when its code or embedded destination changes. Users can already install with:
+Run them from this repository's checkout, replacing `RUN_ID` with the run containing the intentionally prepared new installer and `<new-installer-version>` with its version. Registry account ownership and authentication are required. Each published installer version is immutable; increment its package version when its code or embedded destination changes. Users can already install with:
 
 ```sh
 npx --yes delm-agent@latest install
@@ -148,7 +148,7 @@ The destination repository must be public for installation without GitHub access
 
 This repository was transferred from `jerry2247/delm-agent-plugin` to `Decentralized-LM/delm-agent-plugin`. GitHub redirects existing Git clone, fetch, and push URLs to the new location. Creating a copy in another repository does not transfer those URLs. Do not create a new repository or fork at `jerry2247/delm-agent-plugin`: GitHub says that reusing the old location permanently removes its redirects. See [GitHub's transfer documentation](https://docs.github.com/en/repositories/creating-and-managing-repositories/transferring-a-repository).
 
-For this native release, keep npm **0.1.0** and the redirect in place. A future installer release can adopt the new address as follows:
+Keep the redirect in place. The 0.2.0 installer release adopts the new address as follows:
 
 1. Update the maintainer checkout's `origin` and public documentation to the new repository. Confirm its release environment, workflow permissions, and release protections.
 2. Keep existing plugin tags unchanged. Publish qualified native releases from the new home when updating their distribution metadata; an existing `delm-plugin-v<version>` tag cannot be replaced.

@@ -1,6 +1,6 @@
 {
   "name": "delm-pi",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Build in parallel with collaborating Pi agents and deliver their changes to your project.",
   "license": "MIT",
   "type": "module",
