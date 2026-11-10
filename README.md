@@ -1,6 +1,6 @@
-# DeLM 0.3.1 for macOS
+# DeLM 0.4.0 for macOS
 
-Prebuilt native plugins for Codex and Claude Code on Apple Silicon and Intel. Requires the selected host CLI and Git; no Rust or Python is needed.
+Prebuilt native plugins for Codex, Claude Code and Pi on Apple Silicon and Intel. Requires the selected host CLI and Git; no Rust or Python is needed.
 
 Developer ID-signed release; not notarized.
 
@@ -22,6 +22,14 @@ claude plugin install delm@delm --scope user
 ```
 
 Restart Claude Code, then use `/delm:run <task>`. Update with `claude plugin marketplace update delm` followed by `claude plugin update delm@delm --scope user`. Remove with `claude plugin uninstall delm@delm --scope user --keep-data`. Native plugin validation checks packaging, separately from runtime qualification.
+
+For Pi:
+
+```sh
+pi install git:github.com/Decentralized-LM/delm-agent-plugin@marketplace
+```
+
+Start a new Pi session, then use `/delm:run <task>`. Update with `pi update --extension git:github.com/Decentralized-LM/delm-agent-plugin@marketplace`. Remove with `pi remove git:github.com/Decentralized-LM/delm-agent-plugin@marketplace`; saved DeLM runs are retained.
 
 Claude architectures with matching real native task evidence: arm64, x86_64.
 

@@ -1,10 +1,10 @@
 {
   "schema": 1,
-  "version": "0.3.1",
-  "sourceRevision": "3bd42f9199cfef676e8b17c048346af1bbeb338e",
+  "version": "0.4.0",
+  "sourceRevision": "5b957b3e1aac0aa90260968d4a5486ad0591cc50",
   "repository": "Decentralized-LM/delm-agent-plugin",
   "sourceDirty": false,
-  "runtimeSourcesSha256": "ad625bf2b126fd2ab71daeafe5689dc3a2aa636129a2cc94c634aa341747fdee",
+  "runtimeSourcesSha256": "69f1d9735b47eea5f939526c6a93c1f7de668a095f039e2352321fc250ec8875",
   "platform": "darwin",
   "architectures": [
     "arm64",
@@ -15,7 +15,7 @@
   "signedAndNotarized": false,
   "files": {
     ".codex-plugin/plugin.json": {
-      "sha256": "b56220a09906dedbe09d593803ae98b4811d807003308f7264afef4fccaa9691",
+      "sha256": "9b358e07e1ff6e111c9d3bbd008b2f3483337fc3788d8c6ab3d4efe0a6b2244b",
       "mode": 420
     },
     "LICENSE": {
@@ -27,11 +27,11 @@
       "mode": 420
     },
     "THIRD_PARTY_NOTICES.txt": {
-      "sha256": "c2fbcf6746486becd305d88726db688b64f6435a7a7f664b31ba7f820448295f",
+      "sha256": "7a02189d8faa8d515aca14d320d2d30d872beeaf605d11f1c9ac91d94d70785d",
       "mode": 420
     },
     "bin/delm": {
-      "sha256": "f1e331d6965c2818eaf976149fa32334d52f8be0ec59acb3baf08f22d9b48946",
+      "sha256": "97aac51f49a259dcd94036bbb2dc321d665f2fd31327fc5ab494a88dd440fabc",
       "mode": 493
     },
     "hooks/hooks.json": {
@@ -52,7 +52,7 @@
       "path": "plugins/delm",
       "files": {
         ".codex-plugin/plugin.json": {
-          "sha256": "b56220a09906dedbe09d593803ae98b4811d807003308f7264afef4fccaa9691",
+          "sha256": "9b358e07e1ff6e111c9d3bbd008b2f3483337fc3788d8c6ab3d4efe0a6b2244b",
           "mode": 420
         },
         "LICENSE": {
@@ -64,11 +64,11 @@
           "mode": 420
         },
         "THIRD_PARTY_NOTICES.txt": {
-          "sha256": "c2fbcf6746486becd305d88726db688b64f6435a7a7f664b31ba7f820448295f",
+          "sha256": "7a02189d8faa8d515aca14d320d2d30d872beeaf605d11f1c9ac91d94d70785d",
           "mode": 420
         },
         "bin/delm": {
-          "sha256": "f1e331d6965c2818eaf976149fa32334d52f8be0ec59acb3baf08f22d9b48946",
+          "sha256": "97aac51f49a259dcd94036bbb2dc321d665f2fd31327fc5ab494a88dd440fabc",
           "mode": 493
         },
         "hooks/hooks.json": {
@@ -89,7 +89,7 @@
       "path": "plugins/delm-claude",
       "files": {
         ".claude-plugin/plugin.json": {
-          "sha256": "87d5eb9f0b6ad5e98f28b2c1ab0136e39f07acf6e7b3de249283bbbb493b6d49",
+          "sha256": "12f7b42ed76ec1d024833701d29dfc90da8218b1eb40c5bc9014859b48d77065",
           "mode": 420
         },
         ".mcp.json": {
@@ -105,11 +105,11 @@
           "mode": 420
         },
         "THIRD_PARTY_NOTICES.txt": {
-          "sha256": "c2fbcf6746486becd305d88726db688b64f6435a7a7f664b31ba7f820448295f",
+          "sha256": "7a02189d8faa8d515aca14d320d2d30d872beeaf605d11f1c9ac91d94d70785d",
           "mode": 420
         },
         "bin/delm": {
-          "sha256": "f1e331d6965c2818eaf976149fa32334d52f8be0ec59acb3baf08f22d9b48946",
+          "sha256": "97aac51f49a259dcd94036bbb2dc321d665f2fd31327fc5ab494a88dd440fabc",
           "mode": 493
         },
         "hooks/board-render.js": {
@@ -141,6 +141,67 @@
           "mode": 420
         }
       }
+    },
+    "pi": {
+      "path": "plugins/delm-pi",
+      "files": {
+        "LICENSE": {
+          "sha256": "9f83987a9c2283fe33cb7f49f72ecc3e3dfd45ea4bfed324ce8b536955fa06a2",
+          "mode": 420
+        },
+        "NOTICE": {
+          "sha256": "e2a39758ee47f884ba8e433a25dfaa6e508275ac7e3950911e215d07e6a4524a",
+          "mode": 420
+        },
+        "README.md": {
+          "sha256": "75c3490ca8e8dfbace5edc378fa0bbcafc554597fd0358f4706057ee49321729",
+          "mode": 420
+        },
+        "THIRD_PARTY_NOTICES.txt": {
+          "sha256": "7a02189d8faa8d515aca14d320d2d30d872beeaf605d11f1c9ac91d94d70785d",
+          "mode": 420
+        },
+        "bin/delm": {
+          "sha256": "97aac51f49a259dcd94036bbb2dc321d665f2fd31327fc5ab494a88dd440fabc",
+          "mode": 493
+        },
+        "extensions/delm-worker.ts": {
+          "sha256": "4b6cb0773ccb31068cab6a2b8bd99dacfe8c9016c2022ee66fbef57e633799c3",
+          "mode": 420
+        },
+        "extensions/delm.ts": {
+          "sha256": "4299395d026b96688647cdef8b414175d316c843fbd00207fa7482a10abaca51",
+          "mode": 420
+        },
+        "lib/board.ts": {
+          "sha256": "bb4d74238e80bfaff467bb9c33ffb461d2be7df44fa957dd9f5b71bfdcc90a19",
+          "mode": 420
+        },
+        "lib/bridge.ts": {
+          "sha256": "47ebe20d6ccb90545eba148b6327f583ee77ede83f7d0d4d5aa9b944e7cf0b41",
+          "mode": 420
+        },
+        "lib/control.ts": {
+          "sha256": "270afbf633b2526460abe2f466198d8a2d655678dc719e7d09b8172f9076a1e6",
+          "mode": 420
+        },
+        "lib/protocol.ts": {
+          "sha256": "6602bc6ac9c907ac5012dc512d2ddc1c6e60c8a910b4f824c079a3bf6b62db65",
+          "mode": 420
+        },
+        "lib/rpc.ts": {
+          "sha256": "c368f9fb7ed8466efcd810bdce84630a63aeed2f7de318655d0124548ef47dde",
+          "mode": 420
+        },
+        "package.json": {
+          "sha256": "d17ae42b543f1d580abc5288cd56a1fcddb842b144d086820c043beca47a85f4",
+          "mode": 420
+        },
+        "worker.md": {
+          "sha256": "693ef3088bc7e417a4112d76397f69c4444e1d0d1c1f08beeee38a52dedbbbbb",
+          "mode": 420
+        }
+      }
     }
   },
   "claudeValidation": {
@@ -149,44 +210,19 @@
     "strict": true,
     "passed": true,
     "modelCalls": 0,
-    "payloadSha256": "88a12eb18e0a619f2df19b121bc628940f4969844f7c25861098485a58a05eba"
+    "payloadSha256": "ee893c455f70a9aba66b6725114aded9cf8e65ab94e73062daa1a87606c350bd"
   },
-  "claudeAdapterSha256": "aec77333682d984c202094d4023494fc5575aa0a45ba20a5b61ca9e0d37e3a48",
+  "claudeAdapterSha256": "1c3b2a80c788bb4aca9c306e1e1fde87742fecb92e0c16fd5c5b0f4643b0274a",
   "claudeQualification": {
     "arm64": {
       "schema": 1,
       "kind": "claude-native-qualification",
       "architecture": "arm64",
       "hostVersion": "2.1.289 (Claude Code)",
-      "runtimeSha256": "6ce62c216283229e5af5d989915b9a4a526e9516859703701373e55b9678d46a",
-      "runtimeSourcesSha256": "ad625bf2b126fd2ab71daeafe5689dc3a2aa636129a2cc94c634aa341747fdee",
+      "runtimeSha256": "d8f732a415d19974e303fd8c72ecf09ca5e1d5af9daa78d4e09385420578ac55",
+      "runtimeSourcesSha256": "69f1d9735b47eea5f939526c6a93c1f7de668a095f039e2352321fc250ec8875",
       "fixtureSha256": "1cd245219de0fb929b0719c3a91983a8b18dd1562ee1976f267259698cf4e541",
-      "adapterSha256": "aec77333682d984c202094d4023494fc5575aa0a45ba20a5b61ca9e0d37e3a48",
-      "passed": true,
-      "workerCount": 2,
-      "exactlyTwoNativeForks": true,
-      "bothWorkersPublishedFiles": true,
-      "matchingNativeToolPools": true,
-      "originalPreserved": true,
-      "workspacesRemoved": true,
-      "deliveredOutputChecked": true,
-      "outputProof": {
-        "slug.mjs": "cb679e9f8978bb7e0bf260a662163b5b663bd9116b7b654b105ef6a6d9699e8d",
-        "stats.mjs": "168bc47f377825ea8caf0ccb1da762b7183d035f20b6bdc1cf72c66871a9c51f",
-        "demo.mjs": "f5e8bff40ae9913d377efdbfcbf4535af66d92cd437f8f3ca85dda5f56a3be32",
-        "test.mjs": "be84e84044e09b281587ba64f2a88a00467874ff2722e7470348b0d9ea65b2cb"
-      },
-      "modelCalls": 33
-    },
-    "x86_64": {
-      "schema": 1,
-      "kind": "claude-native-qualification",
-      "architecture": "x86_64",
-      "hostVersion": "2.1.289 (Claude Code)",
-      "runtimeSha256": "6ce62c216283229e5af5d989915b9a4a526e9516859703701373e55b9678d46a",
-      "runtimeSourcesSha256": "ad625bf2b126fd2ab71daeafe5689dc3a2aa636129a2cc94c634aa341747fdee",
-      "fixtureSha256": "1cd245219de0fb929b0719c3a91983a8b18dd1562ee1976f267259698cf4e541",
-      "adapterSha256": "aec77333682d984c202094d4023494fc5575aa0a45ba20a5b61ca9e0d37e3a48",
+      "adapterSha256": "1c3b2a80c788bb4aca9c306e1e1fde87742fecb92e0c16fd5c5b0f4643b0274a",
       "passed": true,
       "workerCount": 2,
       "exactlyTwoNativeForks": true,
@@ -199,9 +235,34 @@
         "slug.mjs": "cb679e9f8978bb7e0bf260a662163b5b663bd9116b7b654b105ef6a6d9699e8d",
         "stats.mjs": "5165f0abb92b4773397e6259826e27e8275d3f20d7a240ffbbd46d64bde8a87c",
         "demo.mjs": "f5e8bff40ae9913d377efdbfcbf4535af66d92cd437f8f3ca85dda5f56a3be32",
-        "test.mjs": "25141a2e692770a3b2616984a2e976305e79f0f615c3e953e5cf19dfe3479d4b"
+        "test.mjs": "9fc30a5ebb75bea8646fbb5a9448767e38e139880e38397fb5c99392fddaf6ca"
       },
-      "modelCalls": 24
+      "modelCalls": 23
+    },
+    "x86_64": {
+      "schema": 1,
+      "kind": "claude-native-qualification",
+      "architecture": "x86_64",
+      "hostVersion": "2.1.289 (Claude Code)",
+      "runtimeSha256": "d8f732a415d19974e303fd8c72ecf09ca5e1d5af9daa78d4e09385420578ac55",
+      "runtimeSourcesSha256": "69f1d9735b47eea5f939526c6a93c1f7de668a095f039e2352321fc250ec8875",
+      "fixtureSha256": "1cd245219de0fb929b0719c3a91983a8b18dd1562ee1976f267259698cf4e541",
+      "adapterSha256": "1c3b2a80c788bb4aca9c306e1e1fde87742fecb92e0c16fd5c5b0f4643b0274a",
+      "passed": true,
+      "workerCount": 2,
+      "exactlyTwoNativeForks": true,
+      "bothWorkersPublishedFiles": true,
+      "matchingNativeToolPools": true,
+      "originalPreserved": true,
+      "workspacesRemoved": true,
+      "deliveredOutputChecked": true,
+      "outputProof": {
+        "slug.mjs": "cb679e9f8978bb7e0bf260a662163b5b663bd9116b7b654b105ef6a6d9699e8d",
+        "stats.mjs": "5165f0abb92b4773397e6259826e27e8275d3f20d7a240ffbbd46d64bde8a87c",
+        "demo.mjs": "f5e8bff40ae9913d377efdbfcbf4535af66d92cd437f8f3ca85dda5f56a3be32",
+        "test.mjs": "a54ab01225b8580df658d7a2b27f3261178c6228dd9a2a8e5847c37a66248b99"
+      },
+      "modelCalls": 31
     }
   },
   "claudeQualifiedArchitectures": [
@@ -209,17 +270,24 @@
     "x86_64"
   ],
   "claudeQualificationFixtureSha256": "1cd245219de0fb929b0719c3a91983a8b18dd1562ee1976f267259698cf4e541",
+  "piValidation": {
+    "kind": "pi-package-validation",
+    "extensions": [
+      "./extensions/delm.ts",
+      "./extensions/delm-worker.ts"
+    ]
+  },
   "qualification": {
     "arm64": {
       "schema": 1,
       "kind": "native-release-build",
       "architecture": "arm64",
       "target": "aarch64-apple-darwin",
-      "macOS": "15.7.9",
-      "runtimeSha256": "18bedeb420d1a354bc5eda805543e0e79b1fc51bb22f196e77d19f9519b702bd",
-      "sourceRevision": "3bd42f9199cfef676e8b17c048346af1bbeb338e",
+      "macOS": "15.8.2",
+      "runtimeSha256": "13c2101e10278876ebd646cb39820adaf7e1f0e2e492ac1a095f89b2393e79fb",
+      "sourceRevision": "5b957b3e1aac0aa90260968d4a5486ad0591cc50",
       "sourceDirty": false,
-      "runtimeSourcesSha256": "ad625bf2b126fd2ab71daeafe5689dc3a2aa636129a2cc94c634aa341747fdee",
+      "runtimeSourcesSha256": "69f1d9735b47eea5f939526c6a93c1f7de668a095f039e2352321fc250ec8875",
       "passed": true,
       "modelCalls": 0,
       "codexVersion": "codex-cli 0.160.1",
@@ -231,7 +299,7 @@
         "plugin-remove"
       ],
       "nativeInheritance": {
-        "runtimeSha256": "18bedeb420d1a354bc5eda805543e0e79b1fc51bb22f196e77d19f9519b702bd",
+        "runtimeSha256": "13c2101e10278876ebd646cb39820adaf7e1f0e2e492ac1a095f89b2393e79fb",
         "hostVersion": "codex-cli 0.160.1",
         "architecture": "arm64",
         "nativeTestSha256": "d4b1166af7f557e6a95129acbc72665e38437543f2808810fc771b1554cb528d",
@@ -248,7 +316,7 @@
         "scripted": {
           "case": "scripted",
           "passed": true,
-          "runtimeSha256": "18bedeb420d1a354bc5eda805543e0e79b1fc51bb22f196e77d19f9519b702bd",
+          "runtimeSha256": "13c2101e10278876ebd646cb39820adaf7e1f0e2e492ac1a095f89b2393e79fb",
           "hostVersion": "codex-cli 0.160.1",
           "architecture": "arm64",
           "modelCalls": 0,
@@ -256,10 +324,10 @@
           "model": "gpt-6-astra",
           "effort": "medium",
           "workerForksStarted": 2,
-          "elapsedSeconds": 42.05426687500005,
-          "sourceDigest": "50458b9c6edb5e0f97a91ebc70f2e40c182477a1b3df1ac87dd0c93d8a9c34ac",
+          "elapsedSeconds": 7.467732875000024,
+          "sourceDigest": "b4986c6472cb75d6781e4f5c689bed3529b3aa2213a1659c033ecaf47f1cefac",
           "harnessSha256": "0f7162c8422bd15ab5e432ddaa18901d9ca55b40ee0e5870abd16360b3f9260d",
-          "packagePayloadSha256": "bd5ab86b4bda2454bc9c30d4efb527d7ce935982efe2fe45d56f94332d5c29d7",
+          "packagePayloadSha256": "42810370f58a45893f1d35d6c796c2acd03364408b04fe19509742ce262a6eb4",
           "nativeInvocation": true,
           "resultDelivered": true,
           "deliveryCleanupComplete": true,
@@ -281,7 +349,7 @@
         "failure": {
           "case": "failure",
           "passed": true,
-          "runtimeSha256": "18bedeb420d1a354bc5eda805543e0e79b1fc51bb22f196e77d19f9519b702bd",
+          "runtimeSha256": "13c2101e10278876ebd646cb39820adaf7e1f0e2e492ac1a095f89b2393e79fb",
           "hostVersion": "codex-cli 0.160.1",
           "architecture": "arm64",
           "modelCalls": 0,
@@ -289,10 +357,10 @@
           "model": "gpt-6-astra",
           "effort": "medium",
           "workerForksStarted": 2,
-          "elapsedSeconds": 41.65730216600002,
-          "sourceDigest": "50458b9c6edb5e0f97a91ebc70f2e40c182477a1b3df1ac87dd0c93d8a9c34ac",
+          "elapsedSeconds": 6.340080625000041,
+          "sourceDigest": "b4986c6472cb75d6781e4f5c689bed3529b3aa2213a1659c033ecaf47f1cefac",
           "harnessSha256": "0f7162c8422bd15ab5e432ddaa18901d9ca55b40ee0e5870abd16360b3f9260d",
-          "packagePayloadSha256": "bd5ab86b4bda2454bc9c30d4efb527d7ce935982efe2fe45d56f94332d5c29d7",
+          "packagePayloadSha256": "42810370f58a45893f1d35d6c796c2acd03364408b04fe19509742ce262a6eb4",
           "nativeInvocation": true,
           "resultDelivered": false,
           "deliveryCleanupComplete": false,
@@ -313,17 +381,17 @@
         }
       },
       "exactLiveSessionParity": false,
-      "lifecycleFixtureSha256": "c5ed0370f62b432f230914e088039f88ae0d6bc25ecb3f5875ca7d7392d15390",
+      "lifecycleFixtureSha256": "bda6d9e91512bae68d9a9ef1332873a908445121980fc1712e15158600b008de",
       "evidenceSha256": {
-        "smoke": "33231ca80b2697e944b3d77f84252837a7e06c96fb541d27b8b81df779c061d6",
-        "inheritance": "aae90bf029fae635776add5046bd733503d9cdc626b2bfc5c3ea562036ddbe13",
-        "interrupt": "ca6dffa62b7335b25d15be3fb1d2be2ab85b9689e068bc938c977240e520888f",
-        "preflight": "039ffc8b543d1e87922f1dee386a52b9d144126ee1e2fdaf0ed24660997a6b52",
-        "stop": "10bf24c7cf42b24ba08acba9be399cf0db3880f0768d05b106507c19b0482915",
-        "owner-death": "f8fc1d81d1b85c9f302c9d15db99041e9405301f8bd75c88c6136c25b63ec652",
-        "plugin-remove": "5455243f594034a6fc611b30e8529d9e1aca92072a9a4827d2dd179a6a38ce99",
-        "startup-scripted": "582e83180d7f3501a1bb3ea1b9560c1a118646b1868381e8fd955b0d7dc9f00b",
-        "startup-failure": "1e3e6278c0b1c435db36b345704aa0b0880af65379eec2466f70112f14bd601b"
+        "smoke": "6eb22e70b12a8c82ab882f75110b1f443605e6e380f3f9344ce065c403105553",
+        "inheritance": "6e49024cfd8eed5c3a870d45b56e8eedd4f79962db4b979a11c0807f94f50748",
+        "interrupt": "8f69f13de2115d83946b76bbd2288c971e331b797d6aa8607b88ef0d2e2dcbca",
+        "preflight": "23249de7c387d8cce7afcb3c07c62e995ffd0c2ea9efd5815219b6c95144419b",
+        "stop": "c47fabb7c62f68ccfe20d767dc47e4bbcc1a28ce719f6bb9aa9c540216eddfd5",
+        "owner-death": "789a4f013f4032044d3d4d631e173c29960aa3ca542097ac437583884c6dcc2d",
+        "plugin-remove": "6ac5475a29ea4e628e5119915e5a9d491da563c64ebf3300bc01ba96f723a852",
+        "startup-scripted": "35a42d0078758a07c4c411410dfdb76660b1c15cef09c17303e59fc407849d71",
+        "startup-failure": "194d685c7f1bb7412d11574f377d6ac6fd718b6150e90902f4af37edc34c3c62"
       }
     },
     "x86_64": {
@@ -332,10 +400,10 @@
       "architecture": "x86_64",
       "target": "x86_64-apple-darwin",
       "macOS": "15.7.9",
-      "runtimeSha256": "1bdd14e579d678f142504539871cbbb96108fb419eae723ec29653187a8fa9c1",
-      "sourceRevision": "3bd42f9199cfef676e8b17c048346af1bbeb338e",
+      "runtimeSha256": "b61f2d9e513c8173c0f21c95e8065f9a2f272c7f9fd8f4b3c3b1075b06957703",
+      "sourceRevision": "5b957b3e1aac0aa90260968d4a5486ad0591cc50",
       "sourceDirty": false,
-      "runtimeSourcesSha256": "ad625bf2b126fd2ab71daeafe5689dc3a2aa636129a2cc94c634aa341747fdee",
+      "runtimeSourcesSha256": "69f1d9735b47eea5f939526c6a93c1f7de668a095f039e2352321fc250ec8875",
       "passed": true,
       "modelCalls": 0,
       "codexVersion": "codex-cli 0.160.1",
@@ -347,7 +415,7 @@
         "plugin-remove"
       ],
       "nativeInheritance": {
-        "runtimeSha256": "1bdd14e579d678f142504539871cbbb96108fb419eae723ec29653187a8fa9c1",
+        "runtimeSha256": "b61f2d9e513c8173c0f21c95e8065f9a2f272c7f9fd8f4b3c3b1075b06957703",
         "hostVersion": "codex-cli 0.160.1",
         "architecture": "x86_64",
         "nativeTestSha256": "d4b1166af7f557e6a95129acbc72665e38437543f2808810fc771b1554cb528d",
@@ -364,7 +432,7 @@
         "scripted": {
           "case": "scripted",
           "passed": true,
-          "runtimeSha256": "1bdd14e579d678f142504539871cbbb96108fb419eae723ec29653187a8fa9c1",
+          "runtimeSha256": "b61f2d9e513c8173c0f21c95e8065f9a2f272c7f9fd8f4b3c3b1075b06957703",
           "hostVersion": "codex-cli 0.160.1",
           "architecture": "x86_64",
           "modelCalls": 0,
@@ -372,10 +440,10 @@
           "model": "gpt-6-astra",
           "effort": "medium",
           "workerForksStarted": 2,
-          "elapsedSeconds": 44.048064909000004,
-          "sourceDigest": "50458b9c6edb5e0f97a91ebc70f2e40c182477a1b3df1ac87dd0c93d8a9c34ac",
+          "elapsedSeconds": 43.60802553099984,
+          "sourceDigest": "b4986c6472cb75d6781e4f5c689bed3529b3aa2213a1659c033ecaf47f1cefac",
           "harnessSha256": "0f7162c8422bd15ab5e432ddaa18901d9ca55b40ee0e5870abd16360b3f9260d",
-          "packagePayloadSha256": "bd5ab86b4bda2454bc9c30d4efb527d7ce935982efe2fe45d56f94332d5c29d7",
+          "packagePayloadSha256": "42810370f58a45893f1d35d6c796c2acd03364408b04fe19509742ce262a6eb4",
           "nativeInvocation": true,
           "resultDelivered": true,
           "deliveryCleanupComplete": true,
@@ -397,7 +465,7 @@
         "failure": {
           "case": "failure",
           "passed": true,
-          "runtimeSha256": "1bdd14e579d678f142504539871cbbb96108fb419eae723ec29653187a8fa9c1",
+          "runtimeSha256": "b61f2d9e513c8173c0f21c95e8065f9a2f272c7f9fd8f4b3c3b1075b06957703",
           "hostVersion": "codex-cli 0.160.1",
           "architecture": "x86_64",
           "modelCalls": 0,
@@ -405,10 +473,10 @@
           "model": "gpt-6-astra",
           "effort": "medium",
           "workerForksStarted": 2,
-          "elapsedSeconds": 41.30656703799991,
-          "sourceDigest": "50458b9c6edb5e0f97a91ebc70f2e40c182477a1b3df1ac87dd0c93d8a9c34ac",
+          "elapsedSeconds": 44.78519450999988,
+          "sourceDigest": "b4986c6472cb75d6781e4f5c689bed3529b3aa2213a1659c033ecaf47f1cefac",
           "harnessSha256": "0f7162c8422bd15ab5e432ddaa18901d9ca55b40ee0e5870abd16360b3f9260d",
-          "packagePayloadSha256": "bd5ab86b4bda2454bc9c30d4efb527d7ce935982efe2fe45d56f94332d5c29d7",
+          "packagePayloadSha256": "42810370f58a45893f1d35d6c796c2acd03364408b04fe19509742ce262a6eb4",
           "nativeInvocation": true,
           "resultDelivered": false,
           "deliveryCleanupComplete": false,
@@ -429,19 +497,19 @@
         }
       },
       "exactLiveSessionParity": false,
-      "lifecycleFixtureSha256": "13f294db215a776e8bf7a6b92d11f53be0158dcaf5f67109ce7178e8a96f6607",
+      "lifecycleFixtureSha256": "65a9a2034c50daf332d1206bacbe8d46da8ec8bb53461a738d87cd40d3fb341c",
       "evidenceSha256": {
-        "smoke": "08e84b07ed7d13b7867254d7ebf437548bd28fe2ddce948f6e350fe9d6d5944e",
-        "inheritance": "d163757d28b82a92ef8442ed81329bc35ae721bbdf5719f0d7e101e14ab6df2a",
-        "interrupt": "e1ea2eda06742a5ffece020513b76e9d95e492e7f31ab5894acd8a55a66613ce",
-        "preflight": "791a34e5692dd9004aea6d702abacb31f6a77090e706a5f866e0160b12b60041",
-        "stop": "400629750a339aa82c86acb37a2b9535ead08ebabf6bf1e8fb91996c0505e196",
-        "owner-death": "19e36f410e161f1242fd75f4d540f3d20be3a0aea7621a1c068f735ad280dcfc",
-        "plugin-remove": "a947d0f5142c32264b7917b4b22ae38243f3ad8384432a6b4b6fcb9ef451e0ba",
-        "startup-scripted": "452e183ffe6f772fa1ef0c81f67edae711307ed11fe03407ee729483dde74cf2",
-        "startup-failure": "f4717627748d2ec17f0e4af9e39922d5652aee6004e9cbb89f14689a8086719a"
+        "smoke": "01a14f4a17427a5b8fc5aa4ec41dd90887ad81738f46a9c9b1d7a2d3e7f8ce3f",
+        "inheritance": "c792e8d566b0978f1823c356dbf59e80f78cd36a6088833f2378eabe311b9567",
+        "interrupt": "d7729cd73dd2dccd3edf213da113112a3f2fdcff598e5d0069788944d062b1e6",
+        "preflight": "1595f9f02eabb28ac2212040bdbea7512b7d2a9cf01de932c4766bd2a893f0d0",
+        "stop": "bfaa6e1a7f6e35a3e46261dc490896738bde1b4c8c94109f477c79205a28d55a",
+        "owner-death": "c322fc82f1c263f2f07d18479627e38bf27ae6a5bb43ee07874b921ccc9b2c99",
+        "plugin-remove": "65e575628adbc3eecbd4885b785c822b0b0ae97989ae1c08cbfe5a228abdfab2",
+        "startup-scripted": "aee4a22b286d390d1eb8d674a362b9e867b7ec2b3d54cf66fa6604d943d16b02",
+        "startup-failure": "22db0a42f04248e22500f463ef0d3541ff2b55f560c2c4f5084f89cb5be2714d"
       }
     }
   },
-  "unsignedRuntimeSha256": "6ce62c216283229e5af5d989915b9a4a526e9516859703701373e55b9678d46a"
+  "unsignedRuntimeSha256": "d8f732a415d19974e303fd8c72ecf09ca5e1d5af9daa78d4e09385420578ac55"
 }

@@ -1,0 +1,24 @@
+{
+  "name": "delm-pi",
+  "version": "0.4.0",
+  "description": "Build in parallel with collaborating Pi agents and deliver their changes to your project.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "delm"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/delm.ts",
+      "./extensions/delm-worker.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types tests/*.test.mjs"
+  },
+  "repository": "https://github.com/Decentralized-LM/delm-agent-plugin"
+}
