@@ -307,6 +307,30 @@ class ReleaseTests(unittest.TestCase):
                  self.assertRaisesRegex(RuntimeError, "changed during"):
                 build.validate_claude_package(package)
 
+    def test_claude_launcher_resolves_to_native_host_with_its_version(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            versions = home / ".local/share/claude/versions"
+            host = versions / "2.1.289"
+            executable(host, '#!/bin/sh\necho "2.1.289 (Claude Code)"\n')
+            newer = versions / "2.1.290"
+            executable(newer, '#!/bin/sh\necho "2.1.290 (Claude Code)"\n')
+            os.utime(host, (1, 1))
+            launcher = root / "launcher/claude"
+            executable(launcher, '#!/bin/sh\nexec "$HOME/.local/share/claude/versions/2.1.289" "$@"\n')
+            environment = {"HOME": str(home), "PATH": f"{launcher.parent}{os.pathsep}{os.environ['PATH']}"}
+            with mock.patch.dict(os.environ, environment):
+                resolved = build.claude_executable()
+            self.assertEqual(resolved, str(host.resolve()))
+            isolated = subprocess.run([resolved, "--version"], env={"HOME": str(root / "isolated")},
+                                      text=True, capture_output=True, check=True)
+            self.assertEqual(isolated.stdout.strip(), "2.1.289 (Claude Code)")
+
+            shutil.rmtree(versions)
+            with mock.patch.dict(os.environ, environment):
+                self.assertEqual(build.claude_executable(), str(launcher.resolve()))
+
     def test_inheritance_proof_is_bound_to_source_runtime_architecture_and_host(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary)
