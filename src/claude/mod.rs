@@ -3,6 +3,7 @@
 mod controller;
 mod view;
 
+use crate::evidence::NativeHost;
 use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 use serde::Deserialize;
@@ -75,10 +76,16 @@ async fn print(value: &Value) -> Result<()> {
 }
 
 pub async fn execute(command: Command) -> Result<()> {
+    execute_for(NativeHost::Claude, command).await
+}
+
+/// The same native transport serves Claude Code and Pi; the host tag selects
+/// evidence handling and user-facing wording.
+pub async fn execute_for(host: NativeHost, command: Command) -> Result<()> {
     match command {
         Command::View(arguments) => view::execute(arguments).await,
-        Command::Serve => serve().await,
-        Command::Mcp => mcp().await,
+        Command::Serve => serve(host).await,
+        Command::Mcp => mcp(host).await,
         Command::Recover { run_id } => {
             let bytes = line(&mut BufReader::new(tokio::io::stdin()))
                 .await?
@@ -128,7 +135,7 @@ impl Drop for Endpoint {
     }
 }
 
-async fn serve() -> Result<()> {
+async fn serve(host: NativeHost) -> Result<()> {
     let bytes = line(&mut BufReader::new(tokio::io::stdin()))
         .await?
         .context("Missing Claude launch request")?;
@@ -149,8 +156,13 @@ async fn serve() -> Result<()> {
     };
     let mut termination =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut controller =
-        controller::Controller::new(&start.project, start.session_id, start.task, native_host)?;
+    let mut controller = controller::Controller::new(
+        host,
+        &start.project,
+        start.session_id,
+        start.task,
+        native_host,
+    )?;
     if let Err(error) = controller.handle(
         json!({"op":"transport","token_digest":format!("{:x}",Sha256::digest(token.as_bytes())),"host_version":start.host_version,"package_root":start.package_root}),
     ) {
@@ -262,7 +274,7 @@ fn definitions() -> Vec<Value> {
     }).collect()
 }
 
-async fn mcp() -> Result<()> {
+async fn mcp(host: NativeHost) -> Result<()> {
     let mut input = BufReader::new(tokio::io::stdin());
     while let Some(bytes) = line(&mut input).await? {
         let message: Value = serde_json::from_slice(&bytes)?;
@@ -277,7 +289,7 @@ async fn mcp() -> Result<()> {
             Some("ping") => json!({}),
             Some("tools/list") => json!({"tools":definitions()}),
             Some("tools/call") => {
-                let result = mcp_call(&message["params"]).await;
+                let result = mcp_call(host, &message["params"]).await;
                 match result {
                     Ok(value) => {
                         json!({"content":[{"type":"text","text":serde_json::to_string(&value)?}],"isError":value.get("error").is_some()})
@@ -304,7 +316,7 @@ fn protocol_version(requested: &Value) -> &str {
     }
 }
 
-async fn mcp_call(params: &Value) -> Result<Value> {
+async fn mcp_call(host: NativeHost, params: &Value) -> Result<Value> {
     let name = params["name"].as_str().context("Missing tool name")?;
     ensure!(
         definitions().iter().any(|t| t["name"] == name),
@@ -315,7 +327,10 @@ async fn mcp_call(params: &Value) -> Result<Value> {
         .as_object_mut()
         .context("Tool arguments must be an object")?
         .remove("_delm")
-        .context("Use /delm:run in Claude Code; this tool has no native worker binding")?;
+        .with_context(|| match host {
+            NativeHost::Pi => "Use /delm:run in Pi; this tool has no native worker binding",
+            _ => "Use /delm:run in Claude Code; this tool has no native worker binding",
+        })?;
     let socket = Path::new(
         binding["socket"]
             .as_str()
@@ -358,14 +373,20 @@ mod tests {
     #[tokio::test]
     async fn direct_unbound_mcp_call_cannot_reach_the_board() {
         assert!(
-            mcp_call(&json!({"name":"delm_status","arguments":{}}))
-                .await
-                .is_err()
+            mcp_call(
+                NativeHost::Claude,
+                &json!({"name":"delm_status","arguments":{}})
+            )
+            .await
+            .is_err()
         );
         assert!(
-            mcp_call(&json!({"name":"arbitrary","arguments":{}}))
-                .await
-                .is_err()
+            mcp_call(
+                NativeHost::Claude,
+                &json!({"name":"arbitrary","arguments":{}})
+            )
+            .await
+            .is_err()
         );
     }
 }

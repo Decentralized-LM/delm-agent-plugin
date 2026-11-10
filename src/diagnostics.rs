@@ -138,8 +138,16 @@ fn inspect(path: &Path) -> Result<RunInfo> {
         !(claude.is_some() && codex.is_some()),
         "Conflicting host records; preserve this run for recovery"
     );
+    // Pi shares the Claude record layout; the record names its host.
     let (host, state) = if let Some(value) = claude {
-        ("claude", value)
+        (
+            if value["host"] == "pi" {
+                "pi"
+            } else {
+                "claude"
+            },
+            value,
+        )
     } else if let Some(value) = codex {
         ("codex", value)
     } else {
@@ -190,7 +198,7 @@ fn inspect(path: &Path) -> Result<RunInfo> {
             }
         }
     }
-    if host == "claude" {
+    if host == "claude" || host == "pi" {
         if state["finished"] != true {
             blockers.push("native_run_not_finished");
         }
@@ -210,7 +218,7 @@ fn inspect(path: &Path) -> Result<RunInfo> {
     } else {
         Value::Null
     };
-    let runtime = if host == "claude" {
+    let runtime = if host == "claude" || host == "pi" {
         &state["runtime"]
     } else {
         &watchdog["runtime"]

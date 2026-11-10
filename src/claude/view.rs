@@ -137,7 +137,7 @@ fn read_state(run: &Path, session: &str) -> Result<Value> {
     let saved: Value =
         serde_json::from_slice(&bytes).context("Saved board view state is incomplete")?;
     ensure!(
-        saved["version"] == 1 && saved["host"] == "claude",
+        saved["version"] == 1 && (saved["host"] == "claude" || saved["host"] == "pi"),
         "Unsupported saved board view version"
     );
     ensure!(

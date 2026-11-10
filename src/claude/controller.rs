@@ -75,6 +75,7 @@ struct Finalization {
 
 pub(super) struct Controller {
     _lock: Option<RunLock>,
+    host: NativeHost,
     workspace: PreparedWorkspace,
     session_id: String,
     task: String,
@@ -103,6 +104,7 @@ pub(super) struct Controller {
 
 impl Controller {
     pub(super) fn new(
+        host: NativeHost,
         project: &Path,
         session_id: String,
         task: String,
@@ -130,7 +132,7 @@ impl Controller {
         let run_dir = state::create_run()?;
         atomic_json(
             &run_dir.join("claude.json"),
-            &json!({"version":1,"host":"claude","project":project,
+            &json!({"version":1,"host":host_name(host),"project":project,
             "session_id":session_id,"task":task,"runtime":runtime,"native_host":native_host,"status":"preparing","finished":false}),
         )?;
         let mut preparation_journal = Journal::open(&run_dir)?;
@@ -153,17 +155,26 @@ impl Controller {
                     });
                 atomic_json(
                     &run_dir.join("claude.json"),
-                    &json!({"version":1,"host":"claude","project":project,
+                    &json!({"version":1,"host":host_name(host),"project":project,
                     "session_id":session_id,"task":task,"runtime":runtime,"native_host":native_host,
                     "status":"preparation_failed","finished":clean,"reason":error.to_string()}),
                 )?;
                 return Err(error);
             }
         };
-        Self::from_workspace(lock, workspace, session_id, task, native_host, runtime)
+        Self::from_workspace(
+            host,
+            lock,
+            workspace,
+            session_id,
+            task,
+            native_host,
+            runtime,
+        )
     }
 
     fn from_workspace(
+        host: NativeHost,
         lock: RunLock,
         workspace: PreparedWorkspace,
         session_id: String,
@@ -174,9 +185,9 @@ impl Controller {
         // Keep the project lock outside fallible construction, including failure
         // recovery. No native identity or launch path has been published yet.
         let saved = serde_json::to_value(&workspace)?;
-        let failure_record = json!({"version":1,"host":"claude","session_id":session_id,"task":task,
+        let failure_record = json!({"version":1,"host":host_name(host),"session_id":session_id,"task":task,
             "project":workspace.original,"workspace":saved,"runtime":runtime,"native_host":native_host});
-        match Self::assemble(workspace, session_id, task, native_host, runtime) {
+        match Self::assemble(host, workspace, session_id, task, native_host, runtime) {
             Ok(mut controller) => {
                 controller._lock = Some(lock);
                 Ok(controller)
@@ -209,6 +220,7 @@ impl Controller {
     }
 
     fn assemble(
+        host: NativeHost,
         workspace: PreparedWorkspace,
         session_id: String,
         task: String,
@@ -245,6 +257,7 @@ impl Controller {
         });
         let mut result = Self {
             _lock: None,
+            host,
             workspace,
             session_id,
             task,
@@ -775,14 +788,18 @@ impl Controller {
             self.workers[i].turn_id.as_deref() == Some(&started.turn_id),
             "Native command belongs to a retired turn"
         );
-        let evidence = CommandEvidence {
-            host: NativeHost::Claude,
-            id: id.clone(),
-            command: started.command,
-            cwd: started.cwd,
-            revision: started.revision,
-            started_sequence: Some(started.sequence),
-            completion: CommandCompletion::NativeTool {
+        let exit_code = r.get("exit_code").filter(|value| !value.is_null());
+        let completion = if self.host == NativeHost::Pi && exit_code.is_some() {
+            // Pi's bash tool reports the shell's exit status; a thrown abort or
+            // timeout sends a null exit code and is recorded as a tool result.
+            CommandCompletion::NativeProcess {
+                status: crate::evidence::ProcessStatus::Completed,
+                exit_code: exit_code
+                    .and_then(Value::as_i64)
+                    .context("Invalid native exit code")?,
+            }
+        } else {
+            CommandCompletion::NativeTool {
                 result_ref: text(r, "result_ref", 256)?.into(),
                 is_error: boolean(r, "is_error")?,
                 interrupted: boolean(r, "interrupted")?,
@@ -792,7 +809,16 @@ impl Controller {
                     _ => bail!("Invalid native background task identity"),
                 },
                 timed_out: boolean(r, "timed_out")?,
-            },
+            }
+        };
+        let evidence = CommandEvidence {
+            host: self.host,
+            id: id.clone(),
+            command: started.command,
+            cwd: started.cwd,
+            revision: started.revision,
+            started_sequence: Some(started.sequence),
+            completion,
         };
         self.journal.record("claude_command_completed", &evidence)?;
         self.workers[i].checks.insert(id, evidence);
@@ -1141,11 +1167,19 @@ impl Controller {
     fn persist(&self) -> Result<()> {
         atomic_json(
             &self.workspace.run_dir.join("claude.json"),
-            &json!({"version":1,"host":"claude","runtime_version":env!("CARGO_PKG_VERSION"),"host_version":self.host_version,"package_root":self.package_root,"session_id":self.session_id,
+            &json!({"version":1,"host":host_name(self.host),"runtime_version":env!("CARGO_PKG_VERSION"),"host_version":self.host_version,"package_root":self.package_root,"session_id":self.session_id,
             "workspace":self.workspace,"project":self.workspace.original,"token_digest":self.token_digest,"task":self.task,"revision":self.revision,"sequence":self.sequence,"native_host":self.native_host,
             "runtime":self.runtime,"workers":self.workers,"worker_scopes":self.worker_scopes,"services":self.services.process_identities(),"candidate":self.candidate,"status":self.status,
             "stop_requested":self.stop_requested,"finished":self.finished,"finalization":self.finalization,"final_result":self.final_result,"retained_artifacts":self.retained_artifacts}),
         )
+    }
+}
+
+pub(super) fn host_name(host: NativeHost) -> &'static str {
+    match host {
+        NativeHost::Codex => "codex",
+        NativeHost::Claude => "claude",
+        NativeHost::Pi => "pi",
     }
 }
 
@@ -1215,7 +1249,7 @@ fn recover_at(run_dir: &Path, request: &Value) -> Result<Value> {
     let path = run_dir.join("claude.json");
     let mut saved = read_state(&path)?;
     ensure!(
-        saved["version"] == 1 && saved["host"] == "claude",
+        saved["version"] == 1 && (saved["host"] == "claude" || saved["host"] == "pi"),
         "Unknown native recovery record"
     );
     let runtime: ProcessIdentity = serde_json::from_value(saved["runtime"].clone())?;
@@ -1417,6 +1451,12 @@ fn recover_at(run_dir: &Path, request: &Value) -> Result<Value> {
     saved["finished"] = json!(true);
     saved["candidate"] = Value::Null;
     saved["recovery"] = serde_json::to_value(&recovery)?;
+    // Recovery has just proven the native side stopped, so a finalization that
+    // was still awaiting its shutdown acknowledgment is confirmed; otherwise the
+    // maintenance guard keeps treating the record as unfinished.
+    if saved["finalization"].is_object() {
+        saved["finalization"]["shutdown_ack"] = json!("confirmed");
+    }
     atomic_json(&path, &saved)?;
     Ok(json!({"status":"stopped","recovery":recovery}))
 }
@@ -1488,6 +1528,7 @@ mod tests {
         .unwrap();
         let runtime = ProcessIdentity::capture(std::process::id()).unwrap();
         let c = Controller::from_workspace(
+            NativeHost::Claude,
             lock,
             workspace,
             "session".into(),
@@ -1496,6 +1537,11 @@ mod tests {
             runtime,
         )
         .unwrap();
+        (temp, c)
+    }
+    fn prepared_controller_for(host: NativeHost) -> (tempfile::TempDir, Controller) {
+        let (temp, mut c) = prepared_controller();
+        c.host = host;
         (temp, c)
     }
     fn controller() -> (tempfile::TempDir, Controller) {
@@ -2175,6 +2221,74 @@ mod tests {
     }
 
     #[test]
+    fn pi_bash_evidence_records_the_native_exit_code() {
+        let (_temp, mut c) = prepared_controller_for(NativeHost::Pi);
+        for slot in 1..=2 {
+            c.handle(json!({"op":"bind","slot":slot,"agent_id":format!("agent-{slot}")}))
+                .unwrap();
+            c.handle(json!({"op":"configure_scopes","agent_id":format!("agent-{slot}"),"scopes":[FilesystemScope {path:c.workspace.workers[slot-1].clone(),access:FilesystemAccess::Write}]})).unwrap();
+            c.handle(json!({"op":"step","agent_id":format!("agent-{slot}"),"turn_id":format!("turn-{slot}"),"revision":1})).unwrap();
+        }
+        let cwd = c.workspace.workers[0].to_string_lossy().into_owned();
+        for (call, code) in [("call-ok", 0), ("call-bad", 2)] {
+            c.handle(json!({"op":"command_start","agent_id":"agent-1","turn_id":"turn-1","call_id":call,"command":"cargo test","cwd":cwd})).unwrap();
+            c.handle(json!({"op":"command_end","agent_id":"agent-1","call_id":call,"result_ref":call,
+                "exit_code":code,"is_error":code != 0,"interrupted":false,"timed_out":false,"background_task_id":null})).unwrap();
+        }
+        let ok = &c.workers[0].checks["call-ok"];
+        assert_eq!(ok.host, NativeHost::Pi);
+        assert!(matches!(
+            ok.completion,
+            CommandCompletion::NativeProcess { exit_code: 0, .. }
+        ));
+        assert!(ok.validate_for("call-ok", 1).unwrap());
+        assert!(
+            !c.workers[0].checks["call-bad"]
+                .validate_for("call-bad", 1)
+                .unwrap()
+        );
+        // An aborted or timed-out command arrives with a null exit code, as the
+        // Pi host sends it, and falls back to the tool-result record.
+        c.handle(json!({"op":"command_start","agent_id":"agent-1","turn_id":"turn-1","call_id":"call-aborted","command":"sleep 99","cwd":cwd})).unwrap();
+        c.handle(json!({"op":"command_end","agent_id":"agent-1","call_id":"call-aborted","result_ref":"call-aborted","exit_code":null,
+            "is_error":true,"interrupted":true,"timed_out":false,"background_task_id":null})).unwrap();
+        let fractional = c.handle(json!({"op":"command_start","agent_id":"agent-1","turn_id":"turn-1","call_id":"call-frac","command":"true","cwd":cwd}))
+            .and_then(|_| c.handle(json!({"op":"command_end","agent_id":"agent-1","call_id":"call-frac","result_ref":"call-frac","exit_code":1.5,
+                "is_error":false,"interrupted":false,"timed_out":false,"background_task_id":null})));
+        assert!(
+            fractional
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid native exit code")
+        );
+        assert!(matches!(
+            c.workers[0].checks["call-aborted"].completion,
+            CommandCompletion::NativeTool {
+                interrupted: true,
+                ..
+            }
+        ));
+        assert!(
+            c.workers[0].checks["call-aborted"]
+                .validate_for("call-aborted", 1)
+                .is_err()
+        );
+        // A completion may cite only commands this worker was observed to run;
+        // a failed check is accepted as recorded evidence, not silently upgraded.
+        let unobserved = json!({"idempotency_key":"k1","expected_revision":1,"outcome":"complete","summary":"done","checks":["call-missing"],"shared_checks":[],"artifacts":[]});
+        let ticket = reserve(&mut c, 1, "call-c1", "delm_complete", unobserved.clone());
+        assert!(c.handle(json!({"op":"consume","ticket":ticket,"tool":"delm_complete","arguments":unobserved})).is_err());
+        let cited = json!({"idempotency_key":"k2","expected_revision":1,"outcome":"complete","summary":"done","checks":["call-ok","call-bad"],"shared_checks":[],"artifacts":[]});
+        let body = tool(&mut c, 1, "call-c2", "delm_complete", cited);
+        let recent = body["recent_commands"].as_array().unwrap();
+        assert!(
+            recent
+                .iter()
+                .any(|r| r["id"] == "call-bad" && r["completion"]["exit_code"] == 2)
+        );
+    }
+
+    #[test]
     fn native_evidence_requires_an_observed_foreground_result_and_cannot_cross_workers() {
         let (_temp, mut c) = controller();
         let root = c.workspace.workers[0].clone();
@@ -2705,6 +2819,17 @@ mod tests {
         let roots = c.workspace.workers.clone();
         fs::write(roots[1].join("partial.txt"), "preserve this progress").unwrap();
         assert!(state::check_native_admission(&project, temp.path(), None).is_err());
+        // A cancel that never received its shutdown acknowledgment, as a host that died mid-stop leaves it.
+        c.finalization = Some(Finalization {
+            generation: 1,
+            revision: 1,
+            intent: "cancel",
+            reason: "host_exited",
+            started: true,
+            attempt: 1,
+            shutdown_ack: "pending",
+        });
+        c.persist().unwrap();
         drop(c);
         let mut request = json!({"token":token,"session_id":"session","agents":[{"id":"agent-1","status":"completed"},{"id":"agent-2","status":"killed"}],"background_tasks_stopped":true});
         request["token"] = json!("wrong");
@@ -2720,6 +2845,8 @@ mod tests {
         assert!(Path::new(result["recovery"]["recovery"].as_str().unwrap()).exists());
         assert!(!project.join("partial.txt").exists());
         state::check_native_admission(&project, temp.path(), None).unwrap();
+        let saved = read_state(&run_dir.join("claude.json")).unwrap();
+        assert_eq!(saved["finalization"]["shutdown_ack"], "confirmed");
         assert_eq!(
             recover_at(&run_dir, &request).unwrap()["already_finished"],
             true
@@ -2802,6 +2929,7 @@ mod tests {
         let runtime = ProcessIdentity::capture(std::process::id()).unwrap();
         assert!(
             Controller::from_workspace(
+                NativeHost::Claude,
                 lock,
                 workspace,
                 "session".into(),

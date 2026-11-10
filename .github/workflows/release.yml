@@ -87,7 +87,7 @@ jobs:
       - name: Install build and qualification tools
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
-          npm install --global @openai/codex@0.160.1 @anthropic-ai/claude-code@2.1.289
+          npm install --global @openai/codex@0.160.1 @anthropic-ai/claude-code@2.1.289 @earendil-works/pi-coding-agent@1.5.0
       - name: Verify source, native installation, and release packaging
         run: ./scripts/verify.sh
       - name: Build and test release binaries on the native architecture

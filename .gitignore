@@ -10,3 +10,6 @@ __pycache__/
 .DS_Store
 .env
 .env.*
+
+# Development symlink to a built runtime; the build stages the real binary.
+hosts/pi/bin/

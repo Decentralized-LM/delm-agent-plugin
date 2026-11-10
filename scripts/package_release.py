@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 
-from build import HOST_PACKAGE_FILES, SOURCE, claude_adapter_digest, payload_digest, stage_package, validate_claude_package, validate_claude_runtime
+from build import HOST_PACKAGE_FILES, SOURCE, claude_adapter_digest, payload_digest, stage_package, validate_claude_package, validate_claude_runtime, validate_pi_package
 from install_support import fingerprint, package_files
 
 
@@ -18,8 +18,22 @@ ARCHITECTURES = {"arm64": "aarch64-apple-darwin", "x86_64": "x86_64-apple-darwin
 LIFECYCLE_CASES = ["interrupt", "preflight", "stop", "owner-death", "plugin-remove"]
 CODEX_STARTUP_CASES = ("scripted", "failure")
 REPOSITORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
-HOST_PATHS = {"codex": "plugins/delm", "claude": "plugins/delm-claude"}
-HOST_MANIFESTS = {"codex": ".codex-plugin/plugin.json", "claude": ".claude-plugin/plugin.json"}
+HOST_PATHS = {"codex": "plugins/delm", "claude": "plugins/delm-claude", "pi": "plugins/delm-pi"}
+HOST_MANIFESTS = {"codex": ".codex-plugin/plugin.json", "claude": ".claude-plugin/plugin.json", "pi": "package.json"}
+HOST_MANIFEST_NAMES = {"codex": "delm", "claude": "delm", "pi": "delm-pi"}
+# Pi installs a git source's root as the package, so the marketplace tree carries a root
+# manifest that points at the Pi package; Codex and Claude Code read their own catalogs.
+PI_EXTENSIONS = ["./plugins/delm-pi/extensions/delm.ts", "./plugins/delm-pi/extensions/delm-worker.ts"]
+
+
+def pi_root_manifest(version, repository):
+    return {
+        "name": "delm-pi", "version": version,
+        "description": "Build in parallel with collaborating Pi agents and deliver their changes to your project.",
+        "license": "MIT", "type": "module", "repository": f"https://github.com/{repository}",
+        "keywords": ["pi-package", "delm"],
+        "pi": {"extensions": PI_EXTENSIONS},
+    }
 
 
 def is_signed(metadata):
@@ -39,10 +53,11 @@ def source_version(source):
     if not match:
         raise RuntimeError("Cargo.toml must contain an explicit package version.")
     version = match[1]
-    for manifest in [".codex-plugin/plugin.json", "hosts/claude/.claude-plugin/plugin.json"]:
+    for manifest, name in [(".codex-plugin/plugin.json", "delm"), ("hosts/claude/.claude-plugin/plugin.json", "delm"),
+                           ("hosts/pi/package.json", "delm-pi")]:
         data = json.loads((source / manifest).read_text())
-        if data.get("name") != "delm" or data.get("version") != version:
-            raise RuntimeError(f"{manifest} must identify delm {version}.")
+        if data.get("name") != name or data.get("version") != version:
+            raise RuntimeError(f"{manifest} must identify {name} {version}.")
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
         raise RuntimeError("Invalid release version.")
     lock = (source / "Cargo.lock").read_text()
@@ -247,6 +262,7 @@ def assemble(source, runtime, output, repository, revision, signed=False,
     # Release assemblies must contain both native Mac architectures.
     subprocess.run(["lipo", str(runtime), "-verify_arch", "arm64", "x86_64"], check=True)
     packages = {}
+    pi_validation = None
     for host, relative in HOST_PATHS.items():
         package = output / relative
         stage_package(source, runtime, package, host)
@@ -254,6 +270,8 @@ def assemble(source, runtime, output, repository, revision, signed=False,
         manifest = json.loads(manifest_path.read_text())
         manifest["repository"] = f"https://github.com/{repository}"
         write_json(manifest_path, manifest)
+        if host == "pi":
+            pi_validation = validate_pi_package(package)
         files = package_files(package)
         packages[host] = {"path": relative, "files": files}
         if unsigned_origin is not None:
@@ -276,6 +294,7 @@ def assemble(source, runtime, output, repository, revision, signed=False,
         "plugins": [{"name": "delm", "source": "./plugins/delm-claude",
                      "description": "Collaborating agents with shared tasks and guarded result delivery."}],
     })
+    write_json(output / "package.json", pi_root_manifest(version, repository))
     metadata = {
         "schema": 1, "version": version, "sourceRevision": revision,
         "repository": repository, **provenance,
@@ -287,6 +306,7 @@ def assemble(source, runtime, output, repository, revision, signed=False,
         "claudeQualification": claude_qualification,
         "claudeQualifiedArchitectures": [arch for arch in ARCHITECTURES if arch in claude_qualification],
         "claudeQualificationFixtureSha256": fingerprint(source / "scripts/verify_claude_native.py")["sha256"],
+        "piValidation": pi_validation,
         "qualification": qualification,
     }
     if qualification:
@@ -297,7 +317,7 @@ def assemble(source, runtime, output, repository, revision, signed=False,
     write_json(output / "release.json", metadata)
     (output / "README.md").write_text(
         f"# DeLM {version} for macOS\n\n"
-        "Prebuilt native plugins for Codex and Claude Code on Apple Silicon and Intel. "
+        "Prebuilt native plugins for Codex, Claude Code and Pi on Apple Silicon and Intel. "
         "Requires the selected host CLI and Git; no Rust or Python is needed.\n\n"
         + (("Signed and notarized release.\n\n" if notarized else "Developer ID-signed release; not notarized.\n\n") if signed else
            "**Unsigned review artifact. Not for public distribution or installation.**\n\n")
@@ -318,6 +338,11 @@ def assemble(source, runtime, output, repository, revision, signed=False,
         "`claude plugin update delm@delm --scope user`. Remove with "
         "`claude plugin uninstall delm@delm --scope user --keep-data`. "
         "Native plugin validation checks packaging, separately from runtime qualification.\n\n"
+        "For Pi:\n\n```sh\n"
+        f"pi install git:github.com/{repository}@marketplace\n"
+        "```\n\nStart a new Pi session, then use `/delm:run <task>`. "
+        f"Update with `pi update --extension git:github.com/{repository}@marketplace`. "
+        f"Remove with `pi remove git:github.com/{repository}@marketplace`; saved DeLM runs are retained.\n\n"
         + "Claude architectures with matching real native task evidence: "
         + (", ".join(metadata["claudeQualifiedArchitectures"]) or "none; qualification remains incomplete") + ".\n\n"
         f"[Source and support](https://github.com/{repository}) · "
@@ -352,11 +377,11 @@ def verify(output, revision=None, repository=None, require_qualified=False):
         raise RuntimeError("Invalid release version.")
     packages = metadata.get("hostPackages", {})
     if set(packages) != set(HOST_PATHS):
-        raise RuntimeError("Release must contain both native host packages.")
+        raise RuntimeError("Release must contain every native host package.")
     for host, relative in HOST_PATHS.items():
         package = output / relative
         manifest = json.loads((package / HOST_MANIFESTS[host]).read_text())
-        if (manifest.get("name") != "delm" or manifest.get("version") != version
+        if (manifest.get("name") != HOST_MANIFEST_NAMES[host] or manifest.get("version") != version
                 or manifest.get("repository") != "https://github.com/" + metadata["repository"]
                 or (package / "plugin.json").exists() or packages[host].get("path") != relative):
             raise RuntimeError("Native plugin manifest differs from release provenance.")
@@ -369,8 +394,14 @@ def verify(output, revision=None, repository=None, require_qualified=False):
             raise RuntimeError("Release runtime must be executable with mode 0755.")
     if metadata.get("files") != packages["codex"]["files"]:
         raise RuntimeError("Codex package metadata differs from its host record.")
-    if packages["codex"]["files"]["bin/delm"] != packages["claude"]["files"]["bin/delm"]:
+    if any(packages[host]["files"]["bin/delm"] != packages["codex"]["files"]["bin/delm"] for host in HOST_PATHS):
         raise RuntimeError("Native hosts must contain identical shared runtime bytes and permissions.")
+    pi_validation = metadata.get("piValidation") or {}
+    if (pi_validation.get("kind") != "pi-package-validation"
+            or sorted(pi_validation.get("extensions", [])) != sorted(json.loads((output / HOST_PATHS["pi"] / "package.json").read_text())["pi"]["extensions"])):
+        raise RuntimeError("Pi package requires its offline package validation record.")
+    if json.loads((output / "package.json").read_text()) != pi_root_manifest(version, metadata["repository"]):
+        raise RuntimeError("Pi root manifest differs from the release identity.")
     if metadata.get("claudeAdapterSha256") != claude_adapter_digest(output / HOST_PATHS["claude"]):
         raise RuntimeError("Claude adapter differs from its qualified resource identity.")
     validation = metadata.get("claudeValidation", {})
@@ -400,7 +431,7 @@ def verify(output, revision=None, repository=None, require_qualified=False):
             raise RuntimeError("Invalid checksum file.")
         expected[name] = digest
     distribution_files = package_files(output)
-    allowed_distribution_files = {"README.md", "release.json", "SHA256SUMS",
+    allowed_distribution_files = {"README.md", "release.json", "SHA256SUMS", "package.json",
                                   ".agents/plugins/marketplace.json", ".claude-plugin/marketplace.json"}
     for host, relative in HOST_PATHS.items():
         allowed_distribution_files.update(relative + "/" + name for name in {*HOST_PACKAGE_FILES[host], "bin/delm"})

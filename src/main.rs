@@ -59,7 +59,7 @@ async fn serve(args: Args) -> Result<()> {
     }
     anyhow::ensure!(
         args.stdio,
-        "Enter $delm:run in Codex or /delm:run in Claude Code, followed by your task. Use --help for runtime commands."
+        "Enter $delm:run in Codex or /delm:run in Claude Code or Pi, followed by your task. Use --help for runtime commands."
     );
     let (commands_tx, commands_rx) = mpsc::channel(64);
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Event>();

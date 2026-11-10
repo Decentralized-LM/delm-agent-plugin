@@ -833,3 +833,140 @@ fn explicit_source_only_contract_keeps_incidental_build_output_without_blocking_
         assert!(report.cleanup_complete && prepared.workers.iter().all(|path| !path.exists()));
     }
 }
+
+/// A worker's private environment (an ignored input it rebuilt) may contain a
+/// nested `.git` directory, as installed packages sometimes ship one. Git
+/// administration is never delivered, but its presence must not refuse the
+/// delivery or the preservation of the worker's real changes.
+#[test]
+#[cfg(target_os = "macos")]
+fn nested_git_inside_an_ignored_environment_does_not_block_delivery_or_preservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    assert!(
+        git::command()
+            .arg("init")
+            .arg("--quiet")
+            .arg(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(project.join(".gitignore"), ".venv/\n").unwrap();
+    fs::write(project.join("file.txt"), "first\n").unwrap();
+    // The user's own environment exists before preparation; workers rebuild their private copies.
+    fs::create_dir_all(project.join(".venv/bin")).unwrap();
+    fs::write(project.join(".venv/bin/python"), "#!/bin/sh\n").unwrap();
+    assert!(
+        git::command()
+            .arg("-C")
+            .arg(&project)
+            .args(["add", ".gitignore", "file.txt"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let prepared = prepare(&project, &temp.path().join("run"), u64::MAX).unwrap();
+    for (worker, change) in prepared
+        .workers
+        .iter()
+        .zip(["first\nfrom worker 1\n", "first\nfrom worker 2\n"])
+    {
+        fs::write(worker.join("file.txt"), change).unwrap();
+        // A rebuilt virtual environment (recognised by pyvenv.cfg) with a package that ships its repository metadata.
+        fs::create_dir_all(worker.join(".venv/lib/pkg/.git/refs")).unwrap();
+        fs::write(
+            worker.join(".venv/pyvenv.cfg"),
+            "home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.13.0\n",
+        )
+        .unwrap();
+        fs::create_dir_all(worker.join(".venv/bin")).unwrap();
+        fs::write(worker.join(".venv/bin/python"), "#!/bin/sh\n").unwrap();
+        fs::write(
+            worker.join(".venv/lib/pkg/.git/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .unwrap();
+        fs::write(worker.join(".venv/lib/pkg/module.py"), "x = 1\n").unwrap();
+    }
+    let report = deliver_result(&prepared, 0, &ResultPolicy::default()).unwrap();
+    assert!(report.delivered, "{report:?}");
+    assert_eq!(
+        fs::read_to_string(project.join("file.txt")).unwrap(),
+        "first\nfrom worker 1\n"
+    );
+    assert!(
+        !project.join(".venv/lib").exists(),
+        "a worker's rebuilt environment is never delivered"
+    );
+    assert!(
+        project.join(".venv/bin/python").exists(),
+        "the user's own environment is untouched"
+    );
+    assert!(
+        prepared.workers.iter().all(|worker| !worker.exists()),
+        "worker trees are removed after delivery"
+    );
+
+    // The same shape in a run that is cancelled: the real change is preserved, the environment is not.
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    assert!(
+        git::command()
+            .arg("init")
+            .arg("--quiet")
+            .arg(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(project.join(".gitignore"), ".venv/\n").unwrap();
+    fs::write(project.join("file.txt"), "first\n").unwrap();
+    // The user's own environment exists before preparation; workers rebuild their private copies.
+    fs::create_dir_all(project.join(".venv/bin")).unwrap();
+    fs::write(project.join(".venv/bin/python"), "#!/bin/sh\n").unwrap();
+    assert!(
+        git::command()
+            .arg("-C")
+            .arg(&project)
+            .args(["add", ".gitignore", "file.txt"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let prepared = prepare(&project, &temp.path().join("run"), u64::MAX).unwrap();
+    let worker = &prepared.workers[1];
+    fs::write(worker.join("file.txt"), "first\npartial\n").unwrap();
+    fs::create_dir_all(worker.join(".venv/lib/pkg/.git")).unwrap();
+    fs::write(
+        worker.join(".venv/pyvenv.cfg"),
+        "home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.13.0\n",
+    )
+    .unwrap();
+    fs::create_dir_all(worker.join(".venv/bin")).unwrap();
+    fs::write(worker.join(".venv/bin/python"), "#!/bin/sh\n").unwrap();
+    fs::write(
+        worker.join(".venv/lib/pkg/.git/HEAD"),
+        "ref: refs/heads/main\n",
+    )
+    .unwrap();
+    let recovery = preserve_partial_and_cleanup(&prepared).unwrap();
+    assert!(recovery.cleanup_complete, "{recovery:?}");
+    let inspection = recovery::inspect_recovery(&recovery.recovery).unwrap();
+    assert!(
+        inspection
+            .workers
+            .iter()
+            .any(|w| w.changes.iter().any(|c| c.path == "file.txt")),
+        "{inspection:?}"
+    );
+    assert!(
+        inspection
+            .workers
+            .iter()
+            .all(|w| w.changes.iter().all(|c| !c.path.contains(".git"))),
+        "{inspection:?}"
+    );
+}

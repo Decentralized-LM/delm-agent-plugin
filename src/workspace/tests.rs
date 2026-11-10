@@ -765,3 +765,10 @@ fn result_retains_cpython_314_pi_alias_without_widening_source_admission() {
     fs::remove_file(root.join(".venv/pyvenv.cfg")).unwrap();
     assert!(manifest_for_result(&root, &policy).is_err());
 }
+
+#[test]
+fn provenance_is_system_bookkeeping_and_other_attributes_are_content() {
+    assert!(super::system_managed_attribute(b"com.apple.provenance"));
+    assert!(!super::system_managed_attribute(b"com.apple.quarantine"));
+    assert!(!super::system_managed_attribute(b"user.delm-fixture"));
+}

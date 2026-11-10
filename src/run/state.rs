@@ -253,7 +253,7 @@ pub(crate) fn check_native_admission(
         });
         if original.and_then(Value::as_str) == project.to_str() && saved["finished"] != true {
             bail!(
-                "An unfinished Claude DeLM run still owns this project: {}. Stop its native agents and recover that run before starting another",
+                "An unfinished Claude Code or Pi DeLM run still owns this project: {}. Stop its native agents and recover that run before starting another",
                 entry.file_name().to_string_lossy()
             );
         }

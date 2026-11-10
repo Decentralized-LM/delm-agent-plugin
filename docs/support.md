@@ -117,7 +117,7 @@ Cleanup requires confirmed delivery, completed workspace cleanup, confirmed nati
 
 ## Updating and removing the plugin
 
-For a published marketplace installation, the [common installer](../packages/installer/README.md#host-selection) supports `update`, `remove`, and `status` with the same host detection and choice as installation. Pass `--host codex`, `--host claude`, or `--host both` to select explicitly. You can also use the native commands below. Update and removal are separate operations. Stop active work first.
+For a published marketplace installation, the [common installer](../packages/installer/README.md#host-selection) supports `update`, `remove`, and `status` with the same host detection and choice as installation. Pass `--host codex`, `--host claude`, `--host pi`, `--host both` (Codex and Claude Code) or `--host all` to select explicitly. You can also use the native commands below. Update and removal are separate operations. Stop active work first.
 
 ```sh
 npx --yes delm-agent@latest status
@@ -161,6 +161,22 @@ claude plugin uninstall delm@delm --scope user --keep-data
 ```
 
 Restart Claude Code after an update. These commands manage a user-scoped installation; review any different or duplicate scope through Claude's native plugin manager.
+
+### Pi
+
+Update the installed package from the release branch:
+
+```sh
+pi update --extension git:github.com/Decentralized-LM/delm-agent-plugin@marketplace
+```
+
+Remove it; saved DeLM runs are retained:
+
+```sh
+pi remove git:github.com/Decentralized-LM/delm-agent-plugin@marketplace
+```
+
+Start a new Pi session after an update. The installer manages only your user packages (`~/.pi/agent/settings.json`); a project-scoped registration is left to Pi.
 
 ### Retained state and contributor installations
 

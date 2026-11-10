@@ -38,7 +38,7 @@ test('npm pack contains only the runnable CLI, metadata, README and license', ()
     const packed = JSON.parse(execFileSync('npm', ['pack', '--json', '--ignore-scripts', '--offline', '--no-update-notifier', '--pack-destination', temporary,
       '--userconfig', userconfig, '--globalconfig', globalconfig, '--cache', path.join(temporary, 'cache')], {cwd: root, encoding: 'utf8'}));
     assert.deepEqual(packed[0].files.map(file => file.path).sort(), [
-      'LICENSE', 'NOTICE', 'README.md', 'bin/delm-agent.mjs', 'lib/claude.mjs', 'lib/hosts.mjs', 'lib/installer.mjs', 'lib/maintenance.mjs', 'lib/native.mjs', 'lib/release.mjs', 'package.json', 'release.json',
+      'LICENSE', 'NOTICE', 'README.md', 'bin/delm-agent.mjs', 'lib/claude.mjs', 'lib/hosts.mjs', 'lib/installer.mjs', 'lib/maintenance.mjs', 'lib/native.mjs', 'lib/pi.mjs', 'lib/release.mjs', 'package.json', 'release.json',
     ]);
     assert.ok(packed[0].size < 20_000, 'The thin installer should stay small.');
     assert.deepEqual(packed[0].bundled, []);
@@ -71,7 +71,7 @@ test('preparation binds one destination, produces publishable metadata, and pres
     assert.equal(metadata.repository.url, `git+https://github.com/${destination}.git`);
     assert.equal(metadata.homepage, `https://github.com/${destination}#readme`);
     assert.deepEqual(metadata.bugs, {url: `https://github.com/${destination}/issues`});
-    assert.deepEqual(metadata.keywords, ['delm', 'codex', 'claude-code', 'ai-agents', 'cli']);
+    assert.deepEqual(metadata.keywords, ['delm', 'codex', 'claude-code', 'pi', 'ai-agents', 'cli']);
     assert.deepEqual(metadata.publishConfig, {access: 'public', registry: 'https://registry.npmjs.org/', tag: 'latest'});
     assert.deepEqual(metadata.files, JSON.parse(sourceMetadata).files);
     assert.equal(metadata.scripts, undefined);
@@ -83,13 +83,14 @@ test('preparation binds one destination, produces publishable metadata, and pres
     const readme = readFileSync(path.join(output, 'package/README.md'), 'utf8');
     assert.match(readme, /npx --yes delm-agent@latest install/);
     assert.match(readme, /npx --yes delm-agent@latest install --host claude/);
+    assert.match(readme, /npx --yes delm-agent@latest install --host pi/);
     assert.match(readme, /CLAUDE_CONFIG_DIR/);
     assert.doesNotMatch(readme, /Preparing a package|after this package is published/);
     assert.match(readme, /## Repository moves/);
     assert.match(readme, /no approved previous repository names/);
     assert.match(readme, /For Codex, restart, open `\/hooks`, and review and trust DeLM/);
     assert.match(readme, /Installation status does not verify activation or permissions/);
-    assert.match(help, /codex\|claude\|both/);
+    assert.match(help, /codex\|claude\|pi\|both\|all/);
     assert.ok(readme.includes(destination));
     assert.doesNotMatch(readme, /jerry2247|unpublished|not an available install command/);
     for (const [relative, digest] of Object.entries(preparation.files)) {

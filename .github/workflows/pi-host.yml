@@ -1,0 +1,101 @@
+name: Pi host checks
+# The Pi host's model-free checks on both macOS architectures: the runtime builds,
+# the package stages and validates, and the Pi suite (unit tests plus the
+# fake-worker lifecycle against the real controller, sidecar and delivery) passes
+# under the pinned Pi release. No model account is used.
+on:
+  push:
+    branches: [pi-host, main]
+    paths:
+      - hosts/pi/**
+      - plugin/worker.md
+      - scripts/build.py
+      - scripts/build.sh
+      - scripts/test_installation.py
+      - src/**
+      - Cargo.*
+      - rust-toolchain.toml
+      - .github/workflows/pi-host.yml
+  pull_request:
+    paths:
+      - hosts/pi/**
+      - plugin/worker.md
+      - scripts/build.py
+      - scripts/test_installation.py
+      - src/**
+      - .github/workflows/pi-host.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pi-host-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  PI_VERSION: 1.5.0
+jobs:
+  pi-host:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install the pinned Pi release
+        run: |
+          npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}"
+          pi --version
+          node --version
+          uname -m
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup show active-toolchain
+      - name: Cache cargo
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pi-host-${{ matrix.architecture }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Build the runtime
+        run: cargo build --release --locked --bin delm
+      - name: Stage and validate the Pi package
+        run: |
+          python3 scripts/build.py --host pi --prebuilt "$PWD/target/release/delm"
+          .build/plugin-pi/bin/delm --version
+          .build/plugin-pi/bin/delm pi view --help >/dev/null
+      - name: Pi host suite (unit tests and the fake-worker lifecycle)
+        env:
+          DELM_PI_RUNTIME: ${{ github.workspace }}/.build/plugin-pi/bin/delm
+          ARCH: ${{ matrix.architecture }}
+        run: |
+          cd hosts/pi
+          node --test --experimental-strip-types tests/*.test.mjs 2>&1 | tee "$RUNNER_TEMP/pi-tests-$ARCH.txt"
+          test "${PIPESTATUS[0]}" -eq 0
+      - name: Installer tests for the Pi package
+        env:
+          ARCH: ${{ matrix.architecture }}
+        run: |
+          cd scripts
+          python3 -m unittest test_installation -k pi_ -v 2>&1 | tee "$RUNNER_TEMP/pi-installer-$ARCH.txt"
+          test "${PIPESTATUS[0]}" -eq 0
+      - name: Controller tests
+        run: cargo test --release --locked --lib -q "claude::"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: pi-host-${{ matrix.architecture }}
+          path: |
+            ${{ runner.temp }}/pi-tests-${{ matrix.architecture }}.txt
+            ${{ runner.temp }}/pi-installer-${{ matrix.architecture }}.txt
+          if-no-files-found: ignore

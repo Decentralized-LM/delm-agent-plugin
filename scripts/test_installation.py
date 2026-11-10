@@ -32,13 +32,16 @@ def executable(path, content):
     path.chmod(0o755)
 
 
-def fixture_runtime(path, version="fixture", board=True):
+def fixture_runtime(path, version="fixture", board=True, pi=True):
     replies = [
         {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "delm"}}},
         {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": name} for name in
             ["delm_status", "delm_complete", "delm_service"]]}},
     ]
     script = '#!/bin/sh\n'
+    if pi:
+        script += ('if [ "$1" = pi ] && [ "$2" = view ]; then\n'
+                   "echo '--run-id --session-id --watch --interval-ms --collection --limit'\nexit 0\nfi\n")
     if board:
         script += ('if [ "$1" = claude ] && [ "$2" = view ]; then\n'
                    "echo '--run-id --session-id --watch --interval-ms --collection --through-sequence --item-id'\nexit 0\nfi\n")
@@ -75,6 +78,16 @@ def fixture_source(path):
     skill = path / "hosts/claude/skills/run/SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: run\ndescription: Unit-test package fixture.\n---\nDo not run.\n")
+    for directory in ("hosts/pi/extensions", "hosts/pi/lib"):
+        (path / directory).mkdir(parents=True, exist_ok=True)
+    package_release.write_json(path / "hosts/pi/package.json", {
+        "name": "delm-pi", "version": version, "type": "module",
+        "pi": {"extensions": ["./extensions/delm.ts", "./extensions/delm-worker.ts"]},
+    })
+    (path / "hosts/pi/README.md").write_text("# Unit-test package fixture\n")
+    for name in ("extensions/delm.ts", "extensions/delm-worker.ts",
+                 "lib/protocol.ts", "lib/rpc.ts", "lib/bridge.ts", "lib/control.ts", "lib/board.ts"):
+        (path / "hosts/pi" / name).write_text("export const fixture: boolean = true;\n")
     return path
 
 
@@ -556,8 +569,17 @@ class BuildTests(unittest.TestCase):
             self.assertFalse((output / "plugins/delm/skills/run/local-notes.txt").exists())
             metadata = json.loads((output / "release.json").read_text())
             self.assertIn("hooks/hooks.json", metadata["files"])
-            self.assertEqual(set(metadata["hostPackages"]), {"codex", "claude"})
+            self.assertEqual(set(metadata["hostPackages"]), {"codex", "claude", "pi"})
             self.assertEqual(metadata["hostPackages"]["claude"]["files"]["bin/delm"], metadata["files"]["bin/delm"])
+            self.assertEqual(metadata["hostPackages"]["pi"]["files"]["bin/delm"], metadata["files"]["bin/delm"])
+            self.assertEqual(set(metadata["hostPackages"]["pi"]["files"]), {*build.PI_PACKAGE_FILES, "bin/delm"})
+            self.assertEqual(metadata["piValidation"]["kind"], "pi-package-validation")
+            root_manifest = json.loads((output / "package.json").read_text())
+            self.assertEqual(root_manifest["pi"]["extensions"], package_release.PI_EXTENSIONS)
+            self.assertEqual(root_manifest["repository"], "https://github.com/example/delm")
+            self.assertEqual(json.loads((output / "plugins/delm-pi/package.json").read_text())["repository"], "https://github.com/example/delm")
+            self.assertEqual((output / "plugins/delm-pi/worker.md").read_bytes(), (source / "plugin/worker.md").read_bytes())
+            self.assertIn("pi install git:github.com/example/delm@marketplace", (output / "README.md").read_text())
             self.assertEqual((output / "plugins/delm-claude/hooks/worker.md").read_bytes(),
                              (source / "plugin/worker.md").read_bytes())
             self.assertEqual(json.loads((output / ".claude-plugin/marketplace.json").read_text())["plugins"][0]["source"],
@@ -627,6 +649,47 @@ class BuildTests(unittest.TestCase):
                              {*build.CLAUDE_PACKAGE_FILES, "bin/delm"})
             self.assertEqual((source / ".build/plugin-claude/hooks/worker.md").read_bytes(),
                              (source / "plugin/worker.md").read_bytes())
+
+    def test_pi_package_stages_extensions_and_the_shared_worker_policy(self):
+        with tempfile.TemporaryDirectory(prefix="delm pi build ") as temporary:
+            source = fixture_source(Path(temporary) / "source")
+            (source / "hosts/pi/notes.txt").write_text("never package this")
+            runtime = Path(temporary) / "runtime"
+            fixture_runtime(runtime)
+            with contextlib.redirect_stdout(io.StringIO()):
+                build.build(source, runtime, host="pi")
+            package = source / ".build/plugin-pi"
+            self.assertEqual(set(install_support.package_files(package)), {*build.PI_PACKAGE_FILES, "bin/delm"})
+            self.assertEqual((package / "worker.md").read_bytes(), (source / "plugin/worker.md").read_bytes())
+            manifest = json.loads((package / "package.json").read_text())
+            self.assertEqual(manifest["pi"]["extensions"], ["./extensions/delm.ts", "./extensions/delm-worker.ts"])
+            (source / "hosts/pi/package.json").write_text(json.dumps({"name": "delm-pi", "pi": {"extensions": ["./extensions/delm.ts"]}}))
+            with contextlib.redirect_stdout(io.StringIO()), \
+                 self.assertRaisesRegex(RuntimeError, "exactly the two DeLM extensions"):
+                build.build(source, runtime, host="pi")
+
+    def test_runtime_without_the_pi_host_cannot_stage_the_pi_package(self):
+        with tempfile.TemporaryDirectory(prefix="delm pi build ") as temporary:
+            source = fixture_source(Path(temporary) / "source")
+            runtime = Path(temporary) / "runtime"
+            fixture_runtime(runtime, pi=False)
+            with contextlib.redirect_stdout(io.StringIO()), \
+                 self.assertRaisesRegex(RuntimeError, "does not provide the Pi host commands"):
+                build.build(source, runtime, host="pi")
+            self.assertFalse((source / ".build/plugin-pi").exists())
+            self.assertEqual([p.name for p in (source / ".build").iterdir() if p.name.startswith("plugin-pi-stage")], [],
+                             "a failed validation must not leave a staged copy behind")
+
+    def test_malformed_typescript_cannot_stage_the_pi_package(self):
+        with tempfile.TemporaryDirectory(prefix="delm pi build ") as temporary:
+            source = fixture_source(Path(temporary) / "source")
+            runtime = Path(temporary) / "runtime"
+            fixture_runtime(runtime)
+            (source / "hosts/pi/lib/board.ts").write_text("export const broken: = ;\n")
+            with contextlib.redirect_stdout(io.StringIO()), \
+                 self.assertRaisesRegex(RuntimeError, "Invalid TypeScript in board.ts"):
+                build.build(source, runtime, host="pi")
+            self.assertFalse((source / ".build/plugin-pi").exists())
 
     def test_old_same_version_runtime_cannot_activate_claude_package(self):
         with tempfile.TemporaryDirectory() as temporary:

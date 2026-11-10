@@ -16,3 +16,4 @@ python3 -B scripts/test_verify_claude_native.py
 python3 -B scripts/test_dependency_notices.py
 npm --prefix packages/installer test
 node --test hosts/claude/tests/*.test.mjs
+node --test --experimental-strip-types hosts/pi/tests/*.test.mjs

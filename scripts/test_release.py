@@ -534,13 +534,14 @@ class ReleaseTests(unittest.TestCase):
                                          qualifications=records,
                                      claude_qualifications=fixture_claude_qualifications(root, source, runtime))
                 package = origin / relative
-                skill = package / "skills/run/SKILL.md"
-                skill.write_text(skill.read_text() + "\nAltered payload\n")
+                # Each host carries the shared worker policy under its own name; Pi has no skill file.
+                payload = package / ("worker.md" if host == "pi" else "skills/run/SKILL.md")
+                payload.write_text(payload.read_text() + "\nAltered payload\n")
                 metadata = json.loads((origin / "release.json").read_text())
                 metadata["hostPackages"][host]["files"] = package_files(package)
                 if host == "codex":
                     metadata["files"] = metadata["hostPackages"][host]["files"]
-                else:
+                elif host == "claude":
                     metadata["claudeValidation"] = fixture_claude_validation(package)
                     metadata["claudeAdapterSha256"] = build.claude_adapter_digest(package)
                     for record in metadata["claudeQualification"].values():

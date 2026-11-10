@@ -67,6 +67,12 @@ pub enum Command {
         #[command(subcommand)]
         command: crate::claude::Command,
     },
+    /// Native Pi plugin integration; shares the Claude transport and controller.
+    #[command(hide = true)]
+    Pi {
+        #[command(subcommand)]
+        command: crate::claude::Command,
+    },
     #[command(hide = true)]
     CapturedRun {
         #[arg(long)]
@@ -344,6 +350,9 @@ pub async fn execute(command: Command) -> Result<()> {
             output,
         } => crate::diagnostics::recover(&run_id, worker.map(usize::from), output.as_deref()),
         Command::Claude { command } => crate::claude::execute(command).await,
+        Command::Pi { command } => {
+            crate::claude::execute_for(crate::evidence::NativeHost::Pi, command).await
+        }
         Command::Respond {
             run_id,
             request_id,

@@ -26,14 +26,22 @@ CLAUDE_PACKAGE_FILES = (
     "hooks/delm.js", "hooks/protocol.js", "hooks/board-view.js", "hooks/board-render.js",
     "hooks/worker.md", "LICENSE", "NOTICE", DEPENDENCY_NOTICES,
 )
-HOST_PACKAGE_FILES = {"codex": PACKAGE_FILES, "claude": CLAUDE_PACKAGE_FILES}
+PI_PACKAGE_FILES = (
+    "package.json", "README.md", "extensions/delm.ts", "extensions/delm-worker.ts",
+    "lib/protocol.ts", "lib/rpc.ts", "lib/bridge.ts", "lib/control.ts", "lib/board.ts",
+    "worker.md", "LICENSE", "NOTICE", DEPENDENCY_NOTICES,
+)
+HOST_PACKAGE_FILES = {"codex": PACKAGE_FILES, "claude": CLAUDE_PACKAGE_FILES, "pi": PI_PACKAGE_FILES}
+PUBLISHED_NAMES = {"codex": "plugin", "claude": "plugin-claude", "pi": "plugin-pi"}
 
 
 def package_source(source, name, host):
     if host == "claude" and name == "hooks/worker.md":
         return source / "plugin/worker.md"
-    if host == "claude" and name not in {"LICENSE", "NOTICE", DEPENDENCY_NOTICES}:
-        return source / "hosts/claude" / name
+    if host == "pi" and name == "worker.md":
+        return source / "plugin/worker.md"
+    if host in {"claude", "pi"} and name not in {"LICENSE", "NOTICE", DEPENDENCY_NOTICES}:
+        return source / f"hosts/{host}" / name
     return source / name
 
 
@@ -128,6 +136,51 @@ def validate_claude_package(package, claude="claude"):
             "passed": True, "modelCalls": 0, "payloadSha256": payload_digest(package)}
 
 
+# `node --check` on a .ts file only confirms the file exists; the types must be
+# stripped first, which fails on malformed TypeScript, and the result checked
+# as JavaScript.
+TYPESCRIPT_CHECK = '''
+const {stripTypeScriptTypes} = require("node:module");
+const {readFileSync, writeFileSync, mkdtempSync, rmSync} = require("node:fs");
+const {join} = require("node:path");
+const {tmpdir} = require("node:os");
+const {spawnSync} = require("node:child_process");
+const source = process.argv[1];
+const stripped = stripTypeScriptTypes(readFileSync(source, "utf8"), {mode: "strip"});
+const dir = mkdtempSync(join(tmpdir(), "delm-ts-check-"));
+try {
+  const out = join(dir, "checked.mjs");
+  writeFileSync(out, stripped);
+  const result = spawnSync(process.execPath, ["--check", out], {encoding: "utf8"});
+  if (result.status !== 0) { process.stderr.write(result.stderr.replace(out, source)); process.exit(1); }
+} finally { rmSync(dir, {recursive: true, force: true}); }
+'''
+
+
+def check_typescript(path):
+    result = subprocess.run(["node", "-e", TYPESCRIPT_CHECK, str(path)], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Invalid TypeScript in {path.name}: {(result.stderr or result.stdout).strip()[:400]}")
+
+
+def validate_pi_package(package):
+    """Pi loads TypeScript through jiti at runtime; check the manifest and syntax offline."""
+    manifest = json.loads((package / "package.json").read_text())
+    declared = manifest.get("pi", {}).get("extensions", [])
+    if sorted(declared) != ["./extensions/delm-worker.ts", "./extensions/delm.ts"]:
+        raise RuntimeError("The Pi package manifest must declare exactly the two DeLM extensions.")
+    if shutil.which("node") is None:
+        raise RuntimeError("Node.js is required to validate the Pi package.")
+    for name in PI_PACKAGE_FILES:
+        if name.endswith(".ts"):
+            check_typescript(package / name)
+    # The extensions call `delm pi serve|mcp|view|recover`; a runtime without the Pi host must not stage.
+    probe = subprocess.run([str(package / "bin" / "delm"), "pi", "view", "--help"], capture_output=True, text=True)
+    if probe.returncode != 0 or "--run-id" not in probe.stdout + probe.stderr:
+        raise RuntimeError("The staged runtime does not provide the Pi host commands: " + (probe.stderr or probe.stdout).strip()[:300])
+    return {"kind": "pi-package-validation", "extensions": declared}
+
+
 def stage_package(source, runtime, package, host="codex"):
     """Stage only runtime resources, never a checkout or its local artifacts."""
     if host not in HOST_PACKAGE_FILES:
@@ -164,24 +217,33 @@ def build(source, prebuilt=None, host="codex", claude="claude"):
             ], cwd=source, check=True)
         runtime = prebuilt or target / "release/delm"
         staged = []
-        for selected in HOST_PACKAGE_FILES if host == "all" else [host]:
-            package = Path(tempfile.mkdtemp(prefix=f"plugin-{selected}-stage.", dir=build_root))
-            stage_package(source, runtime, package, selected)
-            subprocess.run([str(package / "bin/delm"), "--version"], check=True)
-            if selected == "claude":
-                validate_claude_runtime(package / "bin/delm")
-                validate_claude_package(package, claude)
-            published = build_root / ("plugin" if selected == "codex" else "plugin-claude")
-            if os.path.lexists(published) and (not published.is_dir() or published.is_symlink()):
-                raise RuntimeError(f"Refusing to replace an unrelated path: {published}")
-            staged.append((selected, package, published))
-        # Validate every requested package before making any new package active.
-        # Codex uses a copied native cache; staging it is offline. Claude's
-        # directory installation can load this path in place, so protect that
-        # adapter before activation. Unrelated known package roots are safe.
-        for selected, package, published in staged:
-            if selected == "claude" and os.path.lexists(published):
-                assert_maintenance_safe(selected, package=published)
+        try:
+            for selected in HOST_PACKAGE_FILES if host == "all" else [host]:
+                package = Path(tempfile.mkdtemp(prefix=f"plugin-{selected}-stage.", dir=build_root))
+                staged.append((selected, package, build_root / PUBLISHED_NAMES[selected]))
+                stage_package(source, runtime, package, selected)
+                subprocess.run([str(package / "bin/delm"), "--version"], check=True)
+                if selected == "claude":
+                    validate_claude_runtime(package / "bin/delm")
+                    validate_claude_package(package, claude)
+                if selected == "pi":
+                    validate_pi_package(package)
+                published = build_root / PUBLISHED_NAMES[selected]
+                if os.path.lexists(published) and (not published.is_dir() or published.is_symlink()):
+                    raise RuntimeError(f"Refusing to replace an unrelated path: {published}")
+            # Validate every requested package before making any new package active.
+            # Codex uses a copied native cache; staging it is offline. Claude Code and
+            # Pi load their package directories in place (Pi re-reads bin/delm,
+            # worker.md and the worker extension during a run), so protect those
+            # adapters before activation. Unrelated known package roots are safe.
+            for selected, package, published in staged:
+                if selected in {"claude", "pi"} and os.path.lexists(published):
+                    assert_maintenance_safe(selected, package=published)
+        except BaseException:
+            # Nothing was activated; leave no half-staged copies behind.
+            for _selected, package, _published in staged:
+                shutil.rmtree(package, ignore_errors=True)
+            raise
         for selected, package, published in staged:
             if os.path.lexists(published):
                 # Retain previous packages; they may contain qualification artifacts.

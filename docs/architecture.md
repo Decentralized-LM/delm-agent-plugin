@@ -25,6 +25,7 @@ flowchart LR
 | `src/workspace/`, `src/run/state.rs`, `src/supervisor.rs` | Project capture, delivery, recovery, durable ownership, and process checks. |
 | `hooks/`, `skills/`, `src/run/`, `src/workers.rs`, `src/worker_tools.rs` | Codex hooks, skill, native app-server execution, and coordination transport. |
 | `hosts/claude/`, `src/claude/` | Claude skills, plugin module, native MCP sidecar, and lifecycle controller. |
+| `hosts/pi/` | Pi extensions (parent and worker), RPC worker supervision, and the ticket bridge; the controller and sidecar are shared with Claude through `delm pi`. |
 | `packages/installer/`, `scripts/` | Host selection, native installation, package assembly, and qualification. |
 | `src/diagnostics.rs` | Local run inventory, privacy-safe timing reports, and guarded diagnostic cleanup. |
 

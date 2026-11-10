@@ -10,6 +10,7 @@ use std::path::PathBuf;
 pub enum NativeHost {
     Codex,
     Claude,
+    Pi,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
