@@ -115,6 +115,7 @@ Thanks to all contributors:
 <p>
   <a href="https://github.com/jerry2247"><img src="https://avatars.githubusercontent.com/u/88354083?v=4&amp;s=128" width="64" height="64" alt="Jerry Gu" title="Jerry Gu"></a>
   <a href="https://github.com/ZachDeLong"><img src="https://avatars.githubusercontent.com/u/242496128?v=4&amp;s=128" width="64" height="64" alt="ZachDeLong" title="ZachDeLong"></a>
+  <a href="https://github.com/aadcha"><img src="https://avatars.githubusercontent.com/u/49332081?v=4&amp;s=128" width="64" height="64" alt="Aadi Chauhan" title="Aadi Chauhan"></a>
 </p>
 
 ## License
